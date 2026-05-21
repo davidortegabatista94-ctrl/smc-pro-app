@@ -1955,117 +1955,281 @@ def explain_market_context(df, cot=None, calendar=None, news=None):
 
 # ── Metadatos de estrategias ─────────────────────────────────────────────────
 _STRATEGY_META = {
+    # ── Tendencia con EMAs ──────────────────────────────────────────────────
     "ema_trend": {
         "label": "EMA Trend (9/21/50 + MACD + RSI)",
-        "why":   "Las 3 EMAs alineadas confirman tendencia en los 3 horizontes (corto/medio/largo). MACD filtra el momentum y RSI evita comprar sobrecomprado. Funciona mejor cuando el mercado tendencia 60%+ del tiempo.",
-        "pros":  "Bajo drawdown · Alta selectividad · Buena relación señal/ruido",
-        "cons":  "Pocas señales en rangos laterales",
+        "why":   "Las 3 EMAs alineadas en los 3 horizontes + confirmación MACD y RSI. Alta selectividad.",
+        "pros":  "Bajo drawdown · Alta selectividad",
+        "cons":  "Pocas señales en rangos",
     },
+    "ema_crossover": {
+        "label": "EMA Crossover 9/21 + EMA50 filtro",
+        "why":   "Cuando la EMA9 cruza la EMA21 (golden/death cross corto plazo), con precio al lado correcto de EMA50. Captura el inicio de cada impulso.",
+        "pros":  "Entrada temprana en impulsos · Buena frecuencia",
+        "cons":  "Whipsaws en rangos laterales",
+    },
+    "triple_ema": {
+        "label": "Triple EMA 3/8/21 (sistema rápido)",
+        "why":   "Las EMA 3/8/21 son un sistema clásico de seguimiento de tendencia a corto plazo. Cuando las 3 están alineadas y en dirección creciente, el momentum es muy fuerte.",
+        "pros":  "Muy sensible · Muchas señales en tendencias",
+        "cons":  "Alta frecuencia de señales falsas en laterales",
+    },
+    "ema_ribbon": {
+        "label": "EMA Ribbon 5/10/20/50 (multi-marco)",
+        "why":   "5 EMAs alineadas confirman tendencia en 5 horizontes diferentes. Señal muy fiable aunque poco frecuente.",
+        "pros":  "Señales muy robustas · Bajo drawdown",
+        "cons":  "Muy pocas señales — solo en tendencias limpias",
+    },
+    # ── Momentum / Osciladores ──────────────────────────────────────────────
     "macd_cross": {
-        "label": "MACD Crossover + EMA50",
-        "why":   "El cruce del histograma MACD (cambio de signo) señala el inicio de un nuevo impulso. El filtro EMA50 asegura que la dirección es correcta a nivel medio plazo. Captura tendencias desde el principio.",
-        "pros":  "Entra pronto en tendencias nuevas · Buena frecuencia",
-        "cons":  "Más señales falsas en mercados laterales",
+        "label": "MACD Crossover (hist cruza cero) + EMA50",
+        "why":   "El cruce del histograma MACD de negativo a positivo señala cambio de momentum. EMA50 da la dirección macro.",
+        "pros":  "Entra pronto en tendencias · Buena frecuencia",
+        "cons":  "Señales falsas en laterales",
     },
     "rsi_reversion": {
-        "label": "RSI Reversion en Tendencia",
-        "why":   "En una tendencia establecida (EMA21 > EMA50), el precio siempre hace pullbacks. Cuando RSI cae a 40-48 y recupera, es el punto exacto de menor riesgo y mayor probabilidad de continuación.",
-        "pros":  "Win rate muy alta (65%+) · Entradas en mínimos de corrección",
-        "cons":  "R:R menor · Requiere tendencia clara previa establecida",
+        "label": "RSI Reversion en Tendencia (pullback a 45)",
+        "why":   "En tendencia (EMA21 > EMA50), espera pullback RSI 40-48 y rebote. Entrada en el punto exacto de menor riesgo.",
+        "pros":  "Win rate alta · Entradas en mínimos de corrección",
+        "cons":  "Requiere tendencia clara previa",
     },
+    "rsi_50_cross": {
+        "label": "RSI cruza nivel 50 + MACD + EMA50",
+        "why":   "Cuando RSI cruza el nivel 50 (de territorio bajista a alcista o viceversa) con precio al lado correcto de EMA50 y MACD en misma dirección, confirma cambio de momentum.",
+        "pros":  "Simple · Frecuencia moderada · Buenas confirmaciones",
+        "cons":  "RSI puede oscilar alrededor del 50 en rangos",
+    },
+    "stochastic_trend": {
+        "label": "Estocástico (14,3) reversión en tendencia",
+        "why":   "El estocástico mide posición del precio en su rango reciente. Cuando el %K cruza al %D saliendo de zona oversold (< 25) en tendencia alcista, alta probabilidad de rebote.",
+        "pros":  "Entradas muy precisas en correcciones · Clásico probado",
+        "cons":  "Puede señalizar early en tendencias muy fuertes",
+    },
+    # ── Volatilidad / Bandas ────────────────────────────────────────────────
     "bb_touch": {
-        "label": "Bollinger Band Touch + RSI",
-        "why":   "Las Bandas de Bollinger miden la volatilidad estadística. Cuando el precio toca la banda inferior (-2σ) en una tendencia alcista con RSI < 45, está en una corrección extrema estadísticamente. Alta probabilidad de rebote al centro.",
+        "label": "Bollinger Band Touch (−2σ) + RSI",
+        "why":   "Toca la banda inferior (−2σ) en tendencia alcista con RSI < 45. Corrección estadísticamente extrema con alta probabilidad de rebote al centro.",
         "pros":  "Entradas muy precisas · Funciona bien en EUR/USD",
-        "cons":  "En tendencias muy fuertes el precio puede 'pegarse' a la banda",
+        "cons":  "Precio puede pegarse a la banda en tendencias fuertes",
+    },
+    "keltner_touch": {
+        "label": "Keltner Channel Touch (EMA20 ± 2.5×ATR)",
+        "why":   "El canal Keltner (EMA20 ± 2.5×ATR14) filtra mejor la volatilidad que Bollinger. Tocar el canal inferior en tendencia alcista es una señal de compra clásica.",
+        "pros":  "Menos falsas señales que BB · Usa volatilidad real (ATR)",
+        "cons":  "Señales poco frecuentes en mercados de baja volatilidad",
+    },
+    # ── Ruptura / Breakout ──────────────────────────────────────────────────
+    "donchian_break": {
+        "label": "Donchian Breakout 20 períodos + EMA50",
+        "why":   "Romper el máximo de 20 velas (canal Donchian) con precio sobre EMA50 señala una ruptura de resistencia clave. Sistema de seguimiento de tendencia puro.",
+        "pros":  "Captura movimientos grandes · Sin indicadores rezagados",
+        "cons":  "Falsas rupturas frecuentes sin filtros adicionales",
+    },
+    "momentum_break": {
+        "label": "ATR Momentum Breakout (máx/mín 10 velas)",
+        "why":   "Cuando el precio rompe el máximo de las últimas 10 velas con momentum confirmado (RSI > 50), indica un impulso real con fuerza suficiente para continuar.",
+        "pros":  "Captura impulsos fuertes · R:R favorable",
+        "cons":  "Puede entrar tarde en el movimiento",
+    },
+    "supertrend": {
+        "label": "SuperTrend (EMA(H+L/2) ± 3×ATR10)",
+        "why":   "El SuperTrend es un indicador de seguimiento de tendencia basado en ATR que traza soporte/resistencia dinámico. Cuando el precio cruza el nivel, señala cambio de tendencia.",
+        "pros":  "Muy visual · Pocas señales pero de alta calidad",
+        "cons":  "Rezagado por naturaleza — entra tarde en reversiones",
+    },
+    # ── Acción del precio ───────────────────────────────────────────────────
+    "engulfing": {
+        "label": "Engulfing Pattern (velas envolventes) + EMA50",
+        "why":   "Una vela envolvente alcista (el cuerpo actual cubre el cuerpo anterior) en zona de soporte/EMA50 señala rechazo fuerte de los vendedores y entrada de compradores institucionales.",
+        "pros":  "Señal de acción del precio pura · Sin indicadores",
+        "cons":  "Necesita contexto (nivel de soporte/tendencia)",
     },
 }
 
 def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=2):
-    if df.empty or len(df) < 60:
+    if df.empty or len(df) < 110:
         return None
 
     close = df["Close"].copy(); high = df["High"].copy(); low = df["Low"].copy()
-    ema9  = close.ewm(span=9,  adjust=False).mean()
-    ema21 = close.ewm(span=21, adjust=False).mean()
-    ema50 = close.ewm(span=50, adjust=False).mean()
-    dc    = close.diff()
-    gain  = dc.clip(lower=0).rolling(14).mean()
-    loss  = (-dc.clip(upper=0)).rolling(14).mean()
-    rsi   = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+    opn   = df["Open"].copy() if "Open" in df.columns else close.shift(1)
+
+    ema3  = close.ewm(span=3,   adjust=False).mean()
+    ema5  = close.ewm(span=5,   adjust=False).mean()
+    ema8  = close.ewm(span=8,   adjust=False).mean()
+    ema9  = close.ewm(span=9,   adjust=False).mean()
+    ema10 = close.ewm(span=10,  adjust=False).mean()
+    ema20 = close.ewm(span=20,  adjust=False).mean()
+    ema21 = close.ewm(span=21,  adjust=False).mean()
+    ema50 = close.ewm(span=50,  adjust=False).mean()
+    ema100= close.ewm(span=100, adjust=False).mean()
+
+    dc   = close.diff()
+    gain = dc.clip(lower=0).rolling(14).mean()
+    loss = (-dc.clip(upper=0)).rolling(14).mean()
+    rsi  = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+
     macd_line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
     macd_sig  = macd_line.ewm(span=9, adjust=False).mean()
     hist      = macd_line - macd_sig
-    tr        = pd.concat([high - low, (high - close.shift()).abs(),
-                            (low - close.shift()).abs()], axis=1).max(axis=1)
-    atr       = tr.rolling(14).mean()
-    sma20     = close.rolling(20).mean()
-    std20     = close.rolling(20).std()
-    bb_lo     = sma20 - 2 * std20
-    bb_up     = sma20 + 2 * std20
+
+    tr    = pd.concat([high - low, (high - close.shift()).abs(),
+                       (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr14 = tr.rolling(14).mean()
+    atr10 = tr.rolling(10).mean()
+
+    sma20 = close.rolling(20).mean()
+    std20 = close.rolling(20).std()
+    bb_lo = sma20 - 2 * std20
+    bb_up = sma20 + 2 * std20
+
+    kc_lo = ema20 - 2.5 * atr14
+    kc_up = ema20 + 2.5 * atr14
+
+    dc_hi = high.rolling(20).max().shift(1)
+    dc_lo = low.rolling(20).min().shift(1)
+    mb_hi = high.rolling(10).max().shift(1)
+    mb_lo = low.rolling(10).min().shift(1)
+
+    lo14    = low.rolling(14).min()
+    hi14    = high.rolling(14).max()
+    stoch_k = 100 * (close - lo14) / (hi14 - lo14).replace(0, np.nan)
+    stoch_d = stoch_k.rolling(3).mean()
+
+    hl2    = (high + low) / 2
+    st_up  = hl2 - 3 * atr10
+    st_dn  = hl2 + 3 * atr10
+    st_dir_list = []
+    prev_st = float(st_up.iloc[0]) if not np.isnan(st_up.iloc[0]) else 0.0
+    prev_dir = 1
+    for idx in range(len(close)):
+        cu = float(st_up.iloc[idx]) if not np.isnan(st_up.iloc[idx]) else prev_st
+        cd = float(st_dn.iloc[idx]) if not np.isnan(st_dn.iloc[idx]) else prev_st
+        cv = float(close.iloc[idx])
+        if prev_dir == 1:
+            cur_st = max(cu, prev_st) if cv > prev_st else cd
+            prev_dir = 1 if cv > cur_st else -1
+        else:
+            cur_st = min(cd, prev_st) if cv < prev_st else cu
+            prev_dir = -1 if cv < cur_st else 1
+        st_dir_list.append(prev_dir)
+        prev_st = cur_st
+    st_dir = pd.Series(st_dir_list, index=close.index)
 
     RR = 3.0; pip_val = 1.0
     trades = []; equity = [10000.0]
     in_trade = False; ep = dr = tp_p = sl_p = ei = None
     last_entry_i = -999
 
-    for i in range(55, len(df) - 1):
+    for i in range(110, len(df) - 1):
         if use_windows and hasattr(df.index[i], "hour"):
             hs = (df.index[i].hour + utc_offset) % 24
             if not ((7 <= hs < 12) or (15 <= hs < 20)) and not in_trade:
                 continue
 
-        c      = float(close.iloc[i]);  prev_c = float(close.iloc[i - 1])
-        e9     = float(ema9.iloc[i]);   e21    = float(ema21.iloc[i]);   e50 = float(ema50.iloc[i])
-        r      = float(rsi.iloc[i])   if not np.isnan(rsi.iloc[i])    else 50.0
-        hv     = float(hist.iloc[i])  if not np.isnan(hist.iloc[i])   else 0.0
-        hv_p   = float(hist.iloc[i-1])if not np.isnan(hist.iloc[i-1]) else 0.0
-        r_p    = float(rsi.iloc[i-1]) if not np.isnan(rsi.iloc[i-1])  else 50.0
-        av     = float(atr.iloc[i])   if not np.isnan(atr.iloc[i])    else PIP * 12
-        sl_d   = max(min(av * 1.2, PIP * 20), PIP * 6)
-        tp_d   = sl_d * RR
+        c      = float(close.iloc[i]);   prev_c = float(close.iloc[i-1])
+        h_c    = float(high.iloc[i]);    l_c    = float(low.iloc[i])
+        o_c    = float(opn.iloc[i])  if not np.isnan(opn.iloc[i]) else prev_c
+        prev_h = float(high.iloc[i-1]); prev_l = float(low.iloc[i-1])
+        prev_o = float(opn.iloc[i-1]) if not np.isnan(opn.iloc[i-1]) else float(close.iloc[i-2])
+        e3  = float(ema3.iloc[i]);   e5  = float(ema5.iloc[i]);   e8  = float(ema8.iloc[i])
+        e9  = float(ema9.iloc[i]);   e10 = float(ema10.iloc[i]);  e20 = float(ema20.iloc[i])
+        e21 = float(ema21.iloc[i]);  e50 = float(ema50.iloc[i]);  e100= float(ema100.iloc[i])
+        e9p = float(ema9.iloc[i-1]); e21p= float(ema21.iloc[i-1])
+        e3p = float(ema3.iloc[i-1]); e8p = float(ema8.iloc[i-1])
+        r   = float(rsi.iloc[i])    if not np.isnan(rsi.iloc[i])    else 50.0
+        r_p = float(rsi.iloc[i-1])  if not np.isnan(rsi.iloc[i-1])  else 50.0
+        hv  = float(hist.iloc[i])   if not np.isnan(hist.iloc[i])   else 0.0
+        hv_p= float(hist.iloc[i-1]) if not np.isnan(hist.iloc[i-1]) else 0.0
+        av  = float(atr14.iloc[i])  if not np.isnan(atr14.iloc[i])  else PIP * 12
+        sk  = float(stoch_k.iloc[i])  if not np.isnan(stoch_k.iloc[i])  else 50.0
+        sd  = float(stoch_d.iloc[i])  if not np.isnan(stoch_d.iloc[i])  else 50.0
+        sk_p= float(stoch_k.iloc[i-1])if not np.isnan(stoch_k.iloc[i-1]) else 50.0
+        sd_p= float(stoch_d.iloc[i-1])if not np.isnan(stoch_d.iloc[i-1]) else 50.0
+        bbl = float(bb_lo.iloc[i])  if not np.isnan(bb_lo.iloc[i])  else c - av*2
+        bbu = float(bb_up.iloc[i])  if not np.isnan(bb_up.iloc[i])  else c + av*2
+        kcl = float(kc_lo.iloc[i])  if not np.isnan(kc_lo.iloc[i])  else c - av*2.5
+        kcu = float(kc_up.iloc[i])  if not np.isnan(kc_up.iloc[i])  else c + av*2.5
+        dchi= float(dc_hi.iloc[i])  if not np.isnan(dc_hi.iloc[i])  else c + av*3
+        dclo= float(dc_lo.iloc[i])  if not np.isnan(dc_lo.iloc[i])  else c - av*3
+        mbhi= float(mb_hi.iloc[i])  if not np.isnan(mb_hi.iloc[i])  else c + av*2
+        mblo= float(mb_lo.iloc[i])  if not np.isnan(mb_lo.iloc[i])  else c - av*2
+        sdir= int(st_dir.iloc[i]);  sdir_p = int(st_dir.iloc[i-1])
+
+        sl_d = max(min(av * 1.2, PIP * 20), PIP * 6)
+        tp_d = sl_d * RR
 
         if in_trade:
-            hc = float(high.iloc[i]); lc = float(low.iloc[i])
             spr = sl_d / PIP; tpr = tp_d / PIP
             if dr == "LONG":
-                if lc <= sl_p:
-                    pnl = -spr * pip_val; equity.append(equity[-1] + pnl)
+                if l_c <= sl_p:
+                    pnl = -spr*pip_val; equity.append(equity[-1]+pnl)
                     trades.append({"dir":"LONG","outcome":"SL","pips":round(-spr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
                     in_trade = False
-                elif hc >= tp_p:
-                    pnl = tpr * pip_val; equity.append(equity[-1] + pnl)
+                elif h_c >= tp_p:
+                    pnl = tpr*pip_val; equity.append(equity[-1]+pnl)
                     trades.append({"dir":"LONG","outcome":"TP","pips":round(tpr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
                     in_trade = False
             else:
-                if hc >= sl_p:
-                    pnl = -spr * pip_val; equity.append(equity[-1] + pnl)
+                if h_c >= sl_p:
+                    pnl = -spr*pip_val; equity.append(equity[-1]+pnl)
                     trades.append({"dir":"SHORT","outcome":"SL","pips":round(-spr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
                     in_trade = False
-                elif lc <= tp_p:
-                    pnl = tpr * pip_val; equity.append(equity[-1] + pnl)
+                elif l_c <= tp_p:
+                    pnl = tpr*pip_val; equity.append(equity[-1]+pnl)
                     trades.append({"dir":"SHORT","outcome":"TP","pips":round(tpr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
                     in_trade = False
             continue
 
-        cooldown_ok = (i - last_entry_i) >= 6
-        min_atr     = av > PIP * 4
+        cd_ok = (i - last_entry_i) >= 6
+        matr  = av > PIP * 4
         long_sig = short_sig = False
 
         if strategy == "ema_trend":
-            long_sig  = (e9>e21>e50) and hv>0 and 42<=r<=73 and c>prev_c and min_atr and cooldown_ok
-            short_sig = (e9<e21<e50) and hv<0 and 27<=r<=58 and c<prev_c and min_atr and cooldown_ok
+            long_sig  = (e9>e21>e50) and hv>0 and 42<=r<=73 and c>prev_c and matr and cd_ok
+            short_sig = (e9<e21<e50) and hv<0 and 27<=r<=58 and c<prev_c and matr and cd_ok
+        elif strategy == "ema_crossover":
+            long_sig  = (e9>e21 and e9p<=e21p) and c>e50 and 45<=r<=72 and matr and cd_ok
+            short_sig = (e9<e21 and e9p>=e21p) and c<e50 and 28<=r<=55 and matr and cd_ok
+        elif strategy == "triple_ema":
+            long_sig  = (e3>e8>e21) and e3>e3p and e8>e8p and 44<=r<=75 and matr and cd_ok
+            short_sig = (e3<e8<e21) and e3<e3p and e8<e8p and 25<=r<=56 and matr and cd_ok
+        elif strategy == "ema_ribbon":
+            long_sig  = (e5>e10>e20>e50) and c>e100 and 44<=r<=74 and matr and cd_ok
+            short_sig = (e5<e10<e20<e50) and c<e100 and 26<=r<=56 and matr and cd_ok
         elif strategy == "macd_cross":
-            long_sig  = (c>e50) and (hv>0 and hv_p<=0) and 30<=r<=72 and min_atr and cooldown_ok
-            short_sig = (c<e50) and (hv<0 and hv_p>=0) and 28<=r<=70 and min_atr and cooldown_ok
+            long_sig  = (c>e50) and (hv>0 and hv_p<=0) and 30<=r<=72 and matr and cd_ok
+            short_sig = (c<e50) and (hv<0 and hv_p>=0) and 28<=r<=70 and matr and cd_ok
         elif strategy == "rsi_reversion":
-            long_sig  = (e21>e50) and (r_p<=48 and r>r_p) and r<62 and c>e50 and min_atr and cooldown_ok
-            short_sig = (e21<e50) and (r_p>=52 and r<r_p) and r>38 and c<e50 and min_atr and cooldown_ok
+            long_sig  = (e21>e50) and (r_p<=48 and r>r_p) and r<62 and c>e50 and matr and cd_ok
+            short_sig = (e21<e50) and (r_p>=52 and r<r_p) and r>38 and c<e50 and matr and cd_ok
+        elif strategy == "rsi_50_cross":
+            long_sig  = (r>50 and r_p<=50) and hv>0 and c>e50 and matr and cd_ok
+            short_sig = (r<50 and r_p>=50) and hv<0 and c<e50 and matr and cd_ok
+        elif strategy == "stochastic_trend":
+            stoch_xu = sk>sd and sk_p<=sd_p and sk<35
+            stoch_xd = sk<sd and sk_p>=sd_p and sk>65
+            long_sig  = (e21>e50) and stoch_xu and c>e50 and matr and cd_ok
+            short_sig = (e21<e50) and stoch_xd and c<e50 and matr and cd_ok
         elif strategy == "bb_touch":
-            bbl = float(bb_lo.iloc[i]) if not np.isnan(bb_lo.iloc[i]) else c - av*2
-            bbu = float(bb_up.iloc[i]) if not np.isnan(bb_up.iloc[i]) else c + av*2
-            long_sig  = (e21>e50) and (c<=bbl*1.001) and r<45 and c>prev_c and min_atr and cooldown_ok
-            short_sig = (e21<e50) and (c>=bbu*0.999) and r>55 and c<prev_c and min_atr and cooldown_ok
+            long_sig  = (e21>e50) and (c<=bbl*1.001) and r<45 and c>prev_c and matr and cd_ok
+            short_sig = (e21<e50) and (c>=bbu*0.999) and r>55 and c<prev_c and matr and cd_ok
+        elif strategy == "keltner_touch":
+            long_sig  = (e21>e50) and (c<=kcl*1.001) and r<45 and c>prev_c and matr and cd_ok
+            short_sig = (e21<e50) and (c>=kcu*0.999) and r>55 and c<prev_c and matr and cd_ok
+        elif strategy == "donchian_break":
+            long_sig  = (c>dchi) and c>e50 and 50<=r<=76 and matr and cd_ok
+            short_sig = (c<dclo) and c<e50 and 24<=r<=50 and matr and cd_ok
+        elif strategy == "momentum_break":
+            long_sig  = (c>mbhi) and r>50 and hv>0 and matr and cd_ok
+            short_sig = (c<mblo) and r<50 and hv<0 and matr and cd_ok
+        elif strategy == "supertrend":
+            long_sig  = (sdir==1  and sdir_p==-1) and matr and cd_ok
+            short_sig = (sdir==-1 and sdir_p==1)  and matr and cd_ok
+        elif strategy == "engulfing":
+            bull_eng = (o_c<prev_c) and (c>prev_o) and (c>o_c) and (prev_c<prev_o)
+            bear_eng = (o_c>prev_c) and (c<prev_o) and (c<o_c) and (prev_c>prev_o)
+            long_sig  = bull_eng and c>e50 and r<65 and matr and cd_ok
+            short_sig = bear_eng and c<e50 and r>35 and matr and cd_ok
 
         if long_sig:
             ep=c; dr="LONG";  tp_p=c+tp_d; sl_p=c-sl_d; in_trade=True; ei=i; last_entry_i=i
@@ -2093,34 +2257,34 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
         if e > peak: peak = e
         dd = (peak - e) / peak * 100
         if dd > max_dd: max_dd = dd
-    gw = sum(t["pnl"] for t in wins)         if wins   else 0.0
-    gl = abs(sum(t["pnl"] for t in losses))  if losses else 1.0
+    gw = sum(t["pnl"] for t in wins)        if wins   else 0.0
+    gl = abs(sum(t["pnl"] for t in losses)) if losses else 1.0
     pf = round(gw / max(gl, 0.01), 2)
-
     meta = _STRATEGY_META.get(strategy, {})
     return {
         "strategy": strategy,
         "label":    meta.get("label", strategy),
-        "why":      meta.get("why", ""),
-        "pros":     meta.get("pros", ""),
-        "cons":     meta.get("cons", ""),
-        "total": total, "wins": len(wins), "losses": len(losses),
-        "winrate": round(wr, 1), "be_winrate": 25.0,
+        "why":      meta.get("why",   ""),
+        "pros":     meta.get("pros",  ""),
+        "cons":     meta.get("cons",  ""),
+        "total":    total, "wins": len(wins), "losses": len(losses),
+        "winrate":  round(wr, 1), "be_winrate": 25.0,
         "net_pips": round(np_, 1), "net_pnl": round(npnl, 2),
-        "max_dd": round(max_dd, 1), "profit_factor": pf,
+        "max_dd":   round(max_dd, 1), "profit_factor": pf,
         "rr_ratio": RR, "equity": equity, "trades": trades[-300:],
     }
 
+_ALL_STRATEGIES = list(_STRATEGY_META.keys())
+
 def run_strategy_comparison(df, use_windows=True, utc_offset=2):
-    """Ejecuta las 4 estrategias sobre los mismos datos. Devuelve ranking + ganadora."""
+    """Ejecuta las 14 estrategias sobre los mismos datos. Devuelve ranking + ganadora."""
     results = []
-    for name in ("ema_trend", "macd_cross", "rsi_reversion", "bb_touch"):
+    for name in _ALL_STRATEGIES:
         r = _run_single_strategy(df, strategy=name, use_windows=use_windows, utc_offset=utc_offset)
         if r:
             results.append(r)
     if not results:
         return None
-    # Puntuación compuesta: profit_factor × winrate × sqrt(nº operaciones)
     results.sort(
         key=lambda r: r["profit_factor"] * (r["winrate"] / 100) * (r["total"] ** 0.5),
         reverse=True
