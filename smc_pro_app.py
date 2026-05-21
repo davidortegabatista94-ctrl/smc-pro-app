@@ -1585,10 +1585,13 @@ def get_backtest_data(tf="1h"):
 
 def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
     """
-    Estrategia rentable con R:R 1:3 — objetivo: 40%+ win rate.
-    Lógica: solo entrar en mercados con tendencia (ADX>20), en retroceso
-    a EMA21 con alineacion de EMA50, confirmado por MACD+RSI.
-    Con 1:3 R:R, el break-even es solo 25% de win rate.
+    Estrategia multi-confluencia equilibrada — EUR/USD 1h.
+    Objetivo: 3-5 entradas/semana, 40%+ win rate, R:R 1:3.
+
+    LONG:  EMA9>EMA21>EMA50, MACD+, RSI 42-73, vela alcista
+    SHORT: EMA9<EMA21<EMA50, MACD-, RSI 27-58, vela bajista
+    SL=1.2xATR (6-20p) | TP=3.0xSL | Cooldown 6 velas entre entradas.
+    Eliminados: near_EMA21 y ADX>20 (eran los principales cuellos de botella).
     """
     if df.empty or len(df) < 60:
         return None
@@ -1597,12 +1600,12 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
     high  = df["High"].copy()
     low   = df["Low"].copy()
 
-    # EMAs para tendencia y entrada
+    # EMAs para tendencia
     ema9  = close.ewm(span=9,  adjust=False).mean()
     ema21 = close.ewm(span=21, adjust=False).mean()
     ema50 = close.ewm(span=50, adjust=False).mean()
 
-    # RSI
+    # RSI(14)
     dc   = close.diff()
     gain = dc.clip(lower=0).rolling(14).mean()
     loss = (-dc.clip(upper=0)).rolling(14).mean()
@@ -1613,29 +1616,20 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
     macd_sig  = macd_line.ewm(span=9, adjust=False).mean()
     hist      = macd_line - macd_sig
 
-    # ATR (14)
+    # ATR(14)
     tr  = pd.concat([high - low,
                      (high - close.shift()).abs(),
                      (low  - close.shift()).abs()], axis=1).max(axis=1)
     atr = tr.rolling(14).mean()
 
-    # ADX (14) — solo operar cuando ADX > 20 (mercado con tendencia)
-    hd, ld    = high.diff(), low.diff()
-    pdm = hd.where((hd > (-ld)) & (hd > 0), 0.0)
-    ndm = (-ld).where((-ld > hd) & (ld < 0), 0.0)
-    atr_s  = atr.replace(0, np.nan)
-    pdi    = 100 * pdm.rolling(14).mean() / atr_s
-    ndi    = 100 * ndm.rolling(14).mean() / atr_s
-    dx     = 100 * (pdi - ndi).abs() / (pdi + ndi).replace(0, np.nan)
-    adx    = dx.rolling(14).mean()
+    RR      = 3.0
+    pip_val = 1.0
 
-    RR      = 3.0          # R:R objetivo 1:3
-    pip_val = 1.0          # $1/pip para 0.01 lot EURUSD
-
-    trades   = []
-    equity   = [10000.0]
-    in_trade = False
-    ep = dr = tp_p = sl_p = ei = None   # entry_price, direction, tp, sl, entry_idx
+    trades       = []
+    equity       = [10000.0]
+    in_trade     = False
+    ep = dr = tp_p = sl_p = ei = None
+    last_entry_i = -999   # cooldown: mínimo 6 velas entre entradas
 
     for i in range(55, len(df) - 1):
         # Filtro ventana horaria
@@ -1644,19 +1638,19 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
             if not ((7 <= hs < 12) or (15 <= hs < 20)) and not in_trade:
                 continue
 
-        c    = float(close.iloc[i])
-        e9   = float(ema9.iloc[i]);  e21  = float(ema21.iloc[i])
-        e50  = float(ema50.iloc[i])
-        r    = float(rsi.iloc[i])   if not np.isnan(rsi.iloc[i])  else 50.0
-        hv   = float(hist.iloc[i])  if not np.isnan(hist.iloc[i]) else 0.0
-        av   = float(atr.iloc[i])   if not np.isnan(atr.iloc[i])  else PIP * 12
-        adxv = float(adx.iloc[i])   if not np.isnan(adx.iloc[i])  else 0.0
+        c      = float(close.iloc[i])
+        e9     = float(ema9.iloc[i]);  e21 = float(ema21.iloc[i])
+        e50    = float(ema50.iloc[i])
+        r      = float(rsi.iloc[i])   if not np.isnan(rsi.iloc[i])  else 50.0
+        hv     = float(hist.iloc[i])  if not np.isnan(hist.iloc[i]) else 0.0
+        av     = float(atr.iloc[i])   if not np.isnan(atr.iloc[i])  else PIP * 12
+        prev_c = float(close.iloc[i - 1])
 
-        # SL dinámico: 1.2x ATR, mínimo 8p, máximo 18p
-        sl_d = max(min(av * 1.2, PIP * 18), PIP * 8)
+        # SL dinámico: 1.2x ATR, mínimo 6p, máximo 20p
+        sl_d = max(min(av * 1.2, PIP * 20), PIP * 6)
         tp_d = sl_d * RR
 
-        # ── Gestionar trade abierto ───────────────────────────────────────
+        # ── Gestionar trade abierto ─────────────────────────────────────────
         if in_trade:
             hc = float(high.iloc[i]); lc = float(low.iloc[i])
             sl_pips_real = sl_d / PIP; tp_pips_real = tp_d / PIP
@@ -1692,30 +1686,32 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
                     in_trade = False
             continue
 
-        # ── Condiciones de entrada ────────────────────────────────────────
-        trending    = adxv > 20
-        min_atr     = av > PIP * 6    # Evitar mercados sin movimiento
+        # ── Condiciones de entrada ──────────────────────────────────────────
+        cooldown_ok = (i - last_entry_i) >= 6   # no entrar dos veces en 6 velas
+        min_atr     = av > PIP * 4              # volatilidad mínima
 
-        # Calcular condiciones de tendencia y retroceso
-        bull_align  = e9 > e21 > e50
-        bear_align  = e9 < e21 < e50
-        near_e21_up = 0 <= (c - e21) < av * 0.5   # precio ligeramente sobre EMA21
-        near_e21_dn = 0 <= (e21 - c) < av * 0.5   # precio ligeramente bajo EMA21
+        bull_align  = e9 > e21 > e50            # tendencia alcista confirmada
+        bear_align  = e9 < e21 < e50            # tendencia bajista confirmada
+        macd_long   = hv > 0                    # momentum alcista
+        macd_short  = hv < 0                    # momentum bajista
+        long_rsi    = 42 <= r <= 73             # RSI saludable alcista (no sobrecomprado)
+        short_rsi   = 27 <= r <= 58             # RSI saludable bajista (no sobrevendido)
+        bull_candle = c > prev_c                # vela alcista confirma entrada
+        bear_candle = c < prev_c                # vela bajista confirma entrada
 
-        # ENTRADA LONG: tendencia alcista + pullback a EMA21 + MACD + RSI
-        if (bull_align and near_e21_up and trending and min_atr and
-                hv > 0 and 38 <= r <= 65):
-            if float(close.iloc[i - 1]) < c:       # vela alcista confirma rebote
-                ep = c;  dr = "LONG"
-                tp_p = c + tp_d;  sl_p = c - sl_d
-                in_trade = True; ei = i
-        # ENTRADA SHORT: tendencia bajista + rally a EMA21 + MACD + RSI
-        elif (bear_align and near_e21_dn and trending and min_atr and
-              hv < 0 and 35 <= r <= 62):
-            if float(close.iloc[i - 1]) > c:       # vela bajista confirma rechazo
-                ep = c;  dr = "SHORT"
-                tp_p = c - tp_d;  sl_p = c + sl_d
-                in_trade = True; ei = i
+        # LONG: tendencia alcista + MACD+ + RSI saludable + vela alcista
+        if (bull_align and macd_long and long_rsi and
+                min_atr and bull_candle and cooldown_ok):
+            ep = c;  dr = "LONG"
+            tp_p = c + tp_d;  sl_p = c - sl_d
+            in_trade = True; ei = i; last_entry_i = i
+
+        # SHORT: tendencia bajista + MACD- + RSI saludable + vela bajista
+        elif (bear_align and macd_short and short_rsi and
+              min_atr and bear_candle and cooldown_ok):
+            ep = c;  dr = "SHORT"
+            tp_p = c - tp_d;  sl_p = c + sl_d
+            in_trade = True; ei = i; last_entry_i = i
 
     # Cerrar trade abierto al final
     if in_trade and ep is not None:
@@ -1730,12 +1726,12 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
     if not trades:
         return None
 
-    wins    = [t for t in trades if t["outcome"] == "TP"]
-    losses  = [t for t in trades if t["outcome"] == "SL"]
-    total   = len(trades)
-    wr      = len(wins) / total * 100 if total > 0 else 0
-    np_     = sum(t["pips"] for t in trades)
-    npnl    = sum(t["pnl"]  for t in trades)
+    wins   = [t for t in trades if t["outcome"] == "TP"]
+    losses = [t for t in trades if t["outcome"] == "SL"]
+    total  = len(trades)
+    wr     = len(wins) / total * 100 if total > 0 else 0
+    np_    = sum(t["pips"] for t in trades)
+    npnl   = sum(t["pnl"]  for t in trades)
 
     peak = equity[0]; max_dd = 0.0
     for e in equity:
@@ -1743,11 +1739,11 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
         dd = (peak - e) / peak * 100
         if dd > max_dd: max_dd = dd
 
-    gw = sum(t["pnl"] for t in wins)    if wins   else 0.0
-    gl = abs(sum(t["pnl"] for t in losses)) if losses else 1.0
+    gw = sum(t["pnl"] for t in wins)         if wins   else 0.0
+    gl = abs(sum(t["pnl"] for t in losses))  if losses else 1.0
     pf = round(gw / max(gl, 0.01), 2)
 
-    be_winrate = round(1 / (1 + RR) * 100, 1)  # Break-even teórico con este R:R
+    be_winrate = round(1 / (1 + RR) * 100, 1)
 
     return {
         "total":         total,
@@ -3390,8 +3386,8 @@ else:
 
 # ── BACKTEST COMPLETO ──────────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("📊 Backtest — Estrategia Pullback EMA + ADX + R:R 1:3")
-st.caption("Estrategia: solo entra en tendencia confirmada (ADX>20) + retroceso a EMA21 + MACD + RSI. R:R 1:3 — break-even con solo 25% win rate.")
+st.subheader("📊 Backtest — Estrategia EMA Trend + MACD + RSI | R:R 1:3")
+st.caption("Estrategia: alineación EMA9>21>50, MACD en dirección, RSI 42-73 (L) / 27-58 (S), vela de confirmación. Break-even con solo 25% win rate. Objetivo: 3-5 entradas/semana.")
 
 bt_col_left, bt_col_right = st.columns([1, 3])
 with bt_col_left:
