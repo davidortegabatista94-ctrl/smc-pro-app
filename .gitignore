@@ -1,0 +1,35 @@
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Datos de usuario (no subir credenciales MT5)
+user_config.json
+position_state.json
+trades_history.json
+news_cache.json
+install_log.txt
+install_status.txt
+
+# Archivos de instalador Windows
+SMC_Pro_App_Setup.exe
+*.iss
+
+# Logs
+*.log
+
+# VS Code
+.vscode/
+
+# Sistema
+desktop.ini
+Thumbs.db
+.DS_Store
