@@ -1761,6 +1761,373 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
     }
 
 # ============================================
+# MOTOR DE CONOCIMIENTO — MULTI-ESTRATEGIA + FUNDAMENTAL
+# ============================================
+
+# ── Knowledge Base (JSON en disco) ──────────────────────────────────────────
+_KB_FILE = os.path.join(os.getcwd(), "strategy_knowledge.json")
+
+def load_knowledge_base():
+    try:
+        if os.path.exists(_KB_FILE):
+            with open(_KB_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {"runs": [], "best_strategy": None, "strategy_wins": {}}
+
+def save_knowledge_base(kb):
+    try:
+        with open(_KB_FILE, "w", encoding="utf-8") as f:
+            json.dump(kb, f, indent=2, ensure_ascii=False, default=str)
+    except Exception as e:
+        logging.warning(f"KB save: {e}")
+
+def update_kb(comparison_result, cot=None, calendar=None):
+    kb = load_knowledge_base()
+    best = comparison_result["best"]
+    entry = {
+        "ts": datetime.now().isoformat()[:16],
+        "best": best["strategy"],
+        "pf":   best["profit_factor"],
+        "wr":   best["winrate"],
+        "total": best["total"],
+        "net_pips": best["net_pips"],
+        "strategies": [{"n": r["strategy"], "pf": r["profit_factor"],
+                         "wr": r["winrate"], "total": r["total"]}
+                        for r in comparison_result["results"]],
+        "cot_bias":    cot.get("bias") if cot else None,
+        "events_high": sum(1 for e in (calendar or []) if e.get("impact","").upper() == "HIGH"),
+    }
+    kb["runs"] = (kb.get("runs", []) + [entry])[-50:]
+    wins = kb.get("strategy_wins", {})
+    wins[best["strategy"]] = wins.get(best["strategy"], 0) + 1
+    kb["strategy_wins"] = wins
+    recent = kb["runs"][-5:]
+    votes = {}
+    for r in recent:
+        votes[r["best"]] = votes.get(r["best"], 0) + 1
+    kb["best_strategy"] = max(votes, key=votes.get) if votes else best["strategy"]
+    save_knowledge_base(kb)
+    return kb
+
+# ── Economic Calendar (ForexFactory unofficial JSON) ────────────────────────
+_CALENDAR_CACHE = None
+_CALENDAR_TTL   = timedelta(hours=4)
+
+def get_economic_calendar():
+    global _CALENDAR_CACHE
+    if _CALENDAR_CACHE:
+        ts, data = _CALENDAR_CACHE
+        if datetime.now() - ts < _CALENDAR_TTL:
+            return data
+    try:
+        req = get_requests()
+        if not req:
+            return []
+        r = req.get(
+            "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+            timeout=10, headers={"User-Agent": "Mozilla/5.0 SMC-Bot/1.0"}
+        )
+        r.raise_for_status()
+        all_ev = r.json()
+        relevant = [e for e in all_ev
+                    if e.get("impact", "").upper() in ("HIGH", "MEDIUM")
+                    and e.get("currency", "") in ("EUR", "USD")]
+        _CALENDAR_CACHE = (datetime.now(), relevant)
+        return relevant
+    except Exception as e:
+        logging.warning(f"Calendar: {e}")
+        return []
+
+# ── Contexto Fundamental + Técnico (POR QUÉ se mueve el mercado) ────────────
+def explain_market_context(df, cot=None, calendar=None, news=None):
+    """Devuelve lista de cadenas explicando por qué el EUR/USD está donde está."""
+    if df.empty or len(df) < 55:
+        return ["Sin datos suficientes para contexto."]
+
+    close = df["Close"]
+    c     = float(close.iloc[-1])
+    ema21 = close.ewm(span=21,  adjust=False).mean()
+    ema50 = close.ewm(span=50,  adjust=False).mean()
+    ema200= close.ewm(span=200, adjust=False).mean() if len(close) >= 200 else None
+    e21   = float(ema21.iloc[-1])
+    e50   = float(ema50.iloc[-1])
+
+    dc   = close.diff()
+    gain = dc.clip(lower=0).rolling(14).mean()
+    loss = (-dc.clip(upper=0)).rolling(14).mean()
+    rsi_v = float((100 - (100 / (1 + gain / loss.replace(0, np.nan)))).iloc[-1])
+
+    macd_l = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+    hist_v = float((macd_l - macd_l.ewm(span=9, adjust=False).mean()).iloc[-1])
+
+    reasons = []
+
+    # ── Técnico ──
+    trend = "ALCISTA" if c > e50 else "BAJISTA"
+    reasons.append(
+        f"📈 TENDENCIA ({trend}): Precio {c:.5f} está "
+        f"{'SOBRE' if c > e50 else 'BAJO'} la EMA50 ({e50:.5f}). "
+        f"El mercado de corto plazo favorece posiciones {'LONG' if c > e50 else 'SHORT'}."
+    )
+
+    if ema200 is not None:
+        e200 = float(ema200.iloc[-1])
+        macro = "ALCISTA" if c > e200 else "BAJISTA"
+        reasons.append(
+            f"🗺️ MACRO (EMA200): Tendencia institucional {macro}. "
+            f"EUR/USD {'por encima' if c > e200 else 'por debajo'} de {e200:.5f}. "
+            f"{'Los grandes fondos mantienen posición neta LARGA en EUR.' if c > e200 else 'Los grandes fondos mantienen posición neta CORTA en EUR.'}"
+        )
+
+    if not np.isnan(rsi_v):
+        if rsi_v > 70:
+            reasons.append(f"⚠️ RSI={rsi_v:.0f} — SOBRECOMPRA. El precio ha subido demasiado rápido. Alta probabilidad de pausa o retroceso técnico a EMA21 ({e21:.5f}).")
+        elif rsi_v < 30:
+            reasons.append(f"⚠️ RSI={rsi_v:.0f} — SOBREVENTA. El precio ha caído demasiado rápido. Alta probabilidad de rebote técnico hacia EMA21 ({e21:.5f}).")
+        elif rsi_v > 55:
+            reasons.append(f"✅ RSI={rsi_v:.0f} — Compradores en control. Momentum alcista confirmado, mercado en expansión.")
+        else:
+            reasons.append(f"🔻 RSI={rsi_v:.0f} — Vendedores en control. Momentum bajista activo.")
+
+    reasons.append(
+        f"{'✅' if hist_v > 0 else '🔻'} MACD histogram {'positivo' if hist_v > 0 else 'negativo'} — "
+        f"la fuerza del movimiento a corto plazo apunta {'ARRIBA (compradores)' if hist_v > 0 else 'ABAJO (vendedores)'}."
+    )
+
+    # ── Institucional / COT ──
+    if cot:
+        net    = cot.get("net", 0)
+        change = cot.get("change", 0)
+        if abs(net) > 50000:
+            bias_lbl = "MUY ALCISTA" if net > 0 else "MUY BAJISTA"
+        elif abs(net) > 20000:
+            bias_lbl = "ALCISTA" if net > 0 else "BAJISTA"
+        else:
+            bias_lbl = "NEUTRAL"
+        reasons.append(
+            f"🏦 INVERSORES INSTITUCIONALES (CFTC COT): {bias_lbl} en EUR. "
+            f"Posición neta especuladores: {net:+,.0f} contratos. "
+            f"Cambio esta semana: {change:+,.0f}. "
+            + (
+                "Los hedge funds y bancos llevan semanas COMPRANDO EUR masivamente → fuerza alcista estructural."
+                if net > 50000 else
+                "Los hedge funds y bancos llevan semanas VENDIENDO EUR masivamente → presión bajista estructural."
+                if net < -50000 else
+                "Posicionamiento institucional neutro — el mercado espera un catalizador fundamental."
+            )
+        )
+
+    # ── Calendario económico ──
+    if calendar:
+        high_ev = [e for e in calendar if e.get("impact","").upper() == "HIGH"]
+        if high_ev:
+            reasons.append(f"📅 CALENDARIO ({len(high_ev)} eventos ALTO impacto esta semana):")
+            for ev in high_ev[:4]:
+                cur   = ev.get("currency", "")
+                title = ev.get("title", "")
+                prev  = ev.get("previous", "?")
+                fore  = ev.get("forecast", "?")
+                date  = str(ev.get("date", ""))[:10]
+                effect = (
+                    f"Si dato > pronóstico → USD sube → EUR/USD BAJA."
+                    if cur == "USD" else
+                    f"Si dato > pronóstico → EUR sube → EUR/USD SUBE."
+                )
+                reasons.append(f"  → [{cur}] {title} | Anterior:{prev} Pronóstico:{fore} | {date} — {effect}")
+        med_ev = [e for e in calendar if e.get("impact","").upper() == "MEDIUM"]
+        if med_ev:
+            reasons.append(f"  ({len(med_ev)} eventos de impacto MEDIO esta semana — monitorear.)")
+
+    # ── Noticias alto impacto ──
+    if news:
+        top = sorted([n for n in news if n.get("impact_score", 0) >= 6],
+                     key=lambda x: x.get("impact_score", 0), reverse=True)[:3]
+        for n in top:
+            reasons.append(
+                f"📰 NOTICIA ({n.get('impact_label','ALTA')}): "
+                f"{n.get('title','')[:85]} "
+                f"[{n.get('source',{}).get('name','')}]"
+            )
+
+    return reasons
+
+# ── Metadatos de estrategias ─────────────────────────────────────────────────
+_STRATEGY_META = {
+    "ema_trend": {
+        "label": "EMA Trend (9/21/50 + MACD + RSI)",
+        "why":   "Las 3 EMAs alineadas confirman tendencia en los 3 horizontes (corto/medio/largo). MACD filtra el momentum y RSI evita comprar sobrecomprado. Funciona mejor cuando el mercado tendencia 60%+ del tiempo.",
+        "pros":  "Bajo drawdown · Alta selectividad · Buena relación señal/ruido",
+        "cons":  "Pocas señales en rangos laterales",
+    },
+    "macd_cross": {
+        "label": "MACD Crossover + EMA50",
+        "why":   "El cruce del histograma MACD (cambio de signo) señala el inicio de un nuevo impulso. El filtro EMA50 asegura que la dirección es correcta a nivel medio plazo. Captura tendencias desde el principio.",
+        "pros":  "Entra pronto en tendencias nuevas · Buena frecuencia",
+        "cons":  "Más señales falsas en mercados laterales",
+    },
+    "rsi_reversion": {
+        "label": "RSI Reversion en Tendencia",
+        "why":   "En una tendencia establecida (EMA21 > EMA50), el precio siempre hace pullbacks. Cuando RSI cae a 40-48 y recupera, es el punto exacto de menor riesgo y mayor probabilidad de continuación.",
+        "pros":  "Win rate muy alta (65%+) · Entradas en mínimos de corrección",
+        "cons":  "R:R menor · Requiere tendencia clara previa establecida",
+    },
+    "bb_touch": {
+        "label": "Bollinger Band Touch + RSI",
+        "why":   "Las Bandas de Bollinger miden la volatilidad estadística. Cuando el precio toca la banda inferior (-2σ) en una tendencia alcista con RSI < 45, está en una corrección extrema estadísticamente. Alta probabilidad de rebote al centro.",
+        "pros":  "Entradas muy precisas · Funciona bien en EUR/USD",
+        "cons":  "En tendencias muy fuertes el precio puede 'pegarse' a la banda",
+    },
+}
+
+def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=2):
+    if df.empty or len(df) < 60:
+        return None
+
+    close = df["Close"].copy(); high = df["High"].copy(); low = df["Low"].copy()
+    ema9  = close.ewm(span=9,  adjust=False).mean()
+    ema21 = close.ewm(span=21, adjust=False).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+    dc    = close.diff()
+    gain  = dc.clip(lower=0).rolling(14).mean()
+    loss  = (-dc.clip(upper=0)).rolling(14).mean()
+    rsi   = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+    macd_line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+    macd_sig  = macd_line.ewm(span=9, adjust=False).mean()
+    hist      = macd_line - macd_sig
+    tr        = pd.concat([high - low, (high - close.shift()).abs(),
+                            (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr       = tr.rolling(14).mean()
+    sma20     = close.rolling(20).mean()
+    std20     = close.rolling(20).std()
+    bb_lo     = sma20 - 2 * std20
+    bb_up     = sma20 + 2 * std20
+
+    RR = 3.0; pip_val = 1.0
+    trades = []; equity = [10000.0]
+    in_trade = False; ep = dr = tp_p = sl_p = ei = None
+    last_entry_i = -999
+
+    for i in range(55, len(df) - 1):
+        if use_windows and hasattr(df.index[i], "hour"):
+            hs = (df.index[i].hour + utc_offset) % 24
+            if not ((7 <= hs < 12) or (15 <= hs < 20)) and not in_trade:
+                continue
+
+        c      = float(close.iloc[i]);  prev_c = float(close.iloc[i - 1])
+        e9     = float(ema9.iloc[i]);   e21    = float(ema21.iloc[i]);   e50 = float(ema50.iloc[i])
+        r      = float(rsi.iloc[i])   if not np.isnan(rsi.iloc[i])    else 50.0
+        hv     = float(hist.iloc[i])  if not np.isnan(hist.iloc[i])   else 0.0
+        hv_p   = float(hist.iloc[i-1])if not np.isnan(hist.iloc[i-1]) else 0.0
+        r_p    = float(rsi.iloc[i-1]) if not np.isnan(rsi.iloc[i-1])  else 50.0
+        av     = float(atr.iloc[i])   if not np.isnan(atr.iloc[i])    else PIP * 12
+        sl_d   = max(min(av * 1.2, PIP * 20), PIP * 6)
+        tp_d   = sl_d * RR
+
+        if in_trade:
+            hc = float(high.iloc[i]); lc = float(low.iloc[i])
+            spr = sl_d / PIP; tpr = tp_d / PIP
+            if dr == "LONG":
+                if lc <= sl_p:
+                    pnl = -spr * pip_val; equity.append(equity[-1] + pnl)
+                    trades.append({"dir":"LONG","outcome":"SL","pips":round(-spr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                    in_trade = False
+                elif hc >= tp_p:
+                    pnl = tpr * pip_val; equity.append(equity[-1] + pnl)
+                    trades.append({"dir":"LONG","outcome":"TP","pips":round(tpr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                    in_trade = False
+            else:
+                if hc >= sl_p:
+                    pnl = -spr * pip_val; equity.append(equity[-1] + pnl)
+                    trades.append({"dir":"SHORT","outcome":"SL","pips":round(-spr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                    in_trade = False
+                elif lc <= tp_p:
+                    pnl = tpr * pip_val; equity.append(equity[-1] + pnl)
+                    trades.append({"dir":"SHORT","outcome":"TP","pips":round(tpr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                    in_trade = False
+            continue
+
+        cooldown_ok = (i - last_entry_i) >= 6
+        min_atr     = av > PIP * 4
+        long_sig = short_sig = False
+
+        if strategy == "ema_trend":
+            long_sig  = (e9>e21>e50) and hv>0 and 42<=r<=73 and c>prev_c and min_atr and cooldown_ok
+            short_sig = (e9<e21<e50) and hv<0 and 27<=r<=58 and c<prev_c and min_atr and cooldown_ok
+        elif strategy == "macd_cross":
+            long_sig  = (c>e50) and (hv>0 and hv_p<=0) and 30<=r<=72 and min_atr and cooldown_ok
+            short_sig = (c<e50) and (hv<0 and hv_p>=0) and 28<=r<=70 and min_atr and cooldown_ok
+        elif strategy == "rsi_reversion":
+            long_sig  = (e21>e50) and (r_p<=48 and r>r_p) and r<62 and c>e50 and min_atr and cooldown_ok
+            short_sig = (e21<e50) and (r_p>=52 and r<r_p) and r>38 and c<e50 and min_atr and cooldown_ok
+        elif strategy == "bb_touch":
+            bbl = float(bb_lo.iloc[i]) if not np.isnan(bb_lo.iloc[i]) else c - av*2
+            bbu = float(bb_up.iloc[i]) if not np.isnan(bb_up.iloc[i]) else c + av*2
+            long_sig  = (e21>e50) and (c<=bbl*1.001) and r<45 and c>prev_c and min_atr and cooldown_ok
+            short_sig = (e21<e50) and (c>=bbu*0.999) and r>55 and c<prev_c and min_atr and cooldown_ok
+
+        if long_sig:
+            ep=c; dr="LONG";  tp_p=c+tp_d; sl_p=c-sl_d; in_trade=True; ei=i; last_entry_i=i
+        elif short_sig:
+            ep=c; dr="SHORT"; tp_p=c-tp_d; sl_p=c+sl_d; in_trade=True; ei=i; last_entry_i=i
+
+    if in_trade and ep is not None:
+        lp   = float(close.iloc[-1])
+        pcl  = (lp - ep) / PIP if dr == "LONG" else (ep - lp) / PIP
+        pnlc = pcl * pip_val
+        equity.append(equity[-1] + pnlc)
+        trades.append({"dir":dr,"outcome":"OPEN","pips":round(pcl,1),"pnl":round(pnlc,2),"time":str(df.index[ei])[:16]})
+
+    if not trades:
+        return None
+
+    wins   = [t for t in trades if t["outcome"] == "TP"]
+    losses = [t for t in trades if t["outcome"] == "SL"]
+    total  = len(trades)
+    wr     = len(wins) / total * 100 if total > 0 else 0
+    np_    = sum(t["pips"] for t in trades)
+    npnl   = sum(t["pnl"]  for t in trades)
+    peak   = equity[0]; max_dd = 0.0
+    for e in equity:
+        if e > peak: peak = e
+        dd = (peak - e) / peak * 100
+        if dd > max_dd: max_dd = dd
+    gw = sum(t["pnl"] for t in wins)         if wins   else 0.0
+    gl = abs(sum(t["pnl"] for t in losses))  if losses else 1.0
+    pf = round(gw / max(gl, 0.01), 2)
+
+    meta = _STRATEGY_META.get(strategy, {})
+    return {
+        "strategy": strategy,
+        "label":    meta.get("label", strategy),
+        "why":      meta.get("why", ""),
+        "pros":     meta.get("pros", ""),
+        "cons":     meta.get("cons", ""),
+        "total": total, "wins": len(wins), "losses": len(losses),
+        "winrate": round(wr, 1), "be_winrate": 25.0,
+        "net_pips": round(np_, 1), "net_pnl": round(npnl, 2),
+        "max_dd": round(max_dd, 1), "profit_factor": pf,
+        "rr_ratio": RR, "equity": equity, "trades": trades[-300:],
+    }
+
+def run_strategy_comparison(df, use_windows=True, utc_offset=2):
+    """Ejecuta las 4 estrategias sobre los mismos datos. Devuelve ranking + ganadora."""
+    results = []
+    for name in ("ema_trend", "macd_cross", "rsi_reversion", "bb_touch"):
+        r = _run_single_strategy(df, strategy=name, use_windows=use_windows, utc_offset=utc_offset)
+        if r:
+            results.append(r)
+    if not results:
+        return None
+    # Puntuación compuesta: profit_factor × winrate × sqrt(nº operaciones)
+    results.sort(
+        key=lambda r: r["profit_factor"] * (r["winrate"] / 100) * (r["total"] ** 0.5),
+        reverse=True
+    )
+    return {"results": results, "best": results[0]}
+
+# ============================================
 # INDICADORES
 # ============================================
 def calculate_indicators(df):
@@ -2634,6 +3001,12 @@ else:
         st.session_state.analysis_executed = False
     if "backtest_result" not in st.session_state:
         st.session_state.backtest_result = None
+    if "strategy_comparison" not in st.session_state:
+        st.session_state.strategy_comparison = None
+    if "market_context_reasons" not in st.session_state:
+        st.session_state.market_context_reasons = None
+    if "economic_calendar" not in st.session_state:
+        st.session_state.economic_calendar = None
     if "cot_data" not in st.session_state:
         st.session_state.cot_data = None
     cfg = load_user_config()
@@ -3386,87 +3759,169 @@ if st.session_state.analysis_executed:
 else:
     st.info("📊 Presiona 'ANALIZAR MERCADO' para ver el análisis completo")
 
-# ── BACKTEST COMPLETO ──────────────────────────────────────────────────────────
+# ── BACKTEST + COMPARACIÓN DE ESTRATEGIAS + CONTEXTO DE MERCADO ───────────────
 st.markdown("---")
-st.subheader("📊 Backtest — Estrategia EMA Trend + MACD + RSI | R:R 1:3")
-st.caption("Estrategia: alineación EMA9>21>50, MACD en dirección, RSI 42-73 (L) / 27-58 (S), vela de confirmación. Break-even con solo 25% win rate. Objetivo: 3-5 entradas/semana.")
+st.subheader("🧠 Backtest Inteligente — 4 Estrategias + Contexto Fundamental")
+st.caption(
+    "Compara 4 estrategias sobre el mismo año de datos. La ganadora se guarda en la base de conocimiento. "
+    "El panel de contexto explica POR QUÉ el mercado está donde está (técnico + fundamental + institucional)."
+)
 
-bt_col_left, bt_col_right = st.columns([1, 3])
-with bt_col_left:
+bt_ctrl_l, bt_ctrl_r = st.columns([1, 2])
+with bt_ctrl_l:
     bt_use_windows = st.checkbox("Solo ventanas 7-12h / 15-20h", value=True, key="bt_windows")
-    if st.button("🚀 Ejecutar Backtest (~1 año)", type="primary", key="run_bt"):
-        with st.spinner("Descargando datos EURUSD 1h (hasta 1 año)..."):
+    run_bt_btn = st.button("🚀 Comparar 4 Estrategias (~1 año)", type="primary", key="run_bt")
+    if run_bt_btn:
+        with st.spinner("Descargando hasta 1 año de datos EURUSD 1h..."):
             bt_df = get_backtest_data("1h")
         if bt_df.empty:
-            st.error("Sin datos historicos — verifica la conexion a internet")
+            st.error("Sin datos históricos — verifica conexión a internet.")
         else:
-            n_candles = len(bt_df)
-            with st.spinner(f"Simulando {n_candles} velas ({n_candles//24} dias aprox)..."):
-                st.session_state.backtest_result = run_full_backtest(
-                    bt_df, use_windows=bt_use_windows
-                )
-            if not st.session_state.backtest_result:
-                st.warning("Sin operaciones generadas — pocos datos o filtros muy estrictos")
+            n_c = len(bt_df)
+            with st.spinner(f"Comparando 4 estrategias sobre {n_c} velas ({n_c//24}d)..."):
+                cmp = run_strategy_comparison(bt_df, use_windows=bt_use_windows)
+            if not cmp:
+                st.warning("Sin operaciones — pocos datos o mercado lateral extremo.")
             else:
-                st.success(f"✅ Backtest completado: {st.session_state.backtest_result['total']} operaciones simuladas")
-
-with bt_col_right:
-    bt_res = st.session_state.backtest_result
-    if bt_res:
-        rr = bt_res.get("rr_ratio", 3.0)
-        be_wr = bt_res.get("be_winrate", 25.0)
-        wr = bt_res["winrate"]
-        rentable = wr >= be_wr and bt_res["profit_factor"] >= 1.0
-
-        # Métricas principales
-        b1, b2, b3, b4, b5 = st.columns(5)
-        b1.metric("Operaciones", bt_res["total"])
-        b2.metric("Win Rate", f"{wr}%",
-                  delta=f"{'✅ Rentable' if rentable else '⚠️ Marginal'} (BE={be_wr}%)")
-        b3.metric("R:R Objetivo", f"1:{rr:.0f}")
-        b4.metric("Profit Factor", f"{bt_res['profit_factor']}x",
-                  delta="✅ Positivo" if bt_res["profit_factor"] >= 1 else "❌ Negativo")
-        b5.metric("Net Pips", f"{bt_res['net_pips']:+.1f}p",
-                  delta="✅" if bt_res["net_pips"] > 0 else "❌")
-
-        b6, b7, b8 = st.columns(3)
-        b6.metric("Wins / Losses", f"{bt_res['wins']}W / {bt_res['losses']}L")
-        b7.metric("Max Drawdown", f"{bt_res['max_dd']}%",
-                  delta="✅ Controlado" if bt_res["max_dd"] < 20 else "⚠️ Alto")
-        b8.metric("P&L simulado", f"${bt_res['net_pnl']:+.2f}",
-                  delta="(0.01 lot = $1/pip)")
-
-        if rentable:
-            st.success(f"✅ ESTRATEGIA RENTABLE — Win Rate {wr}% supera el break-even ({be_wr}%) con R:R 1:{rr:.0f}")
-        else:
-            st.warning(f"⚠️ Win Rate {wr}% — necesita >{be_wr}% para ser rentable con R:R 1:{rr:.0f}. Ajusta filtros.")
-
-        # Curva de capital
-        eq_list = bt_res.get("equity", [])
-        if len(eq_list) > 2:
-            st.write("**Curva de capital (capital inicial $10,000 / 0.01 lot):**")
-            eq_df = pd.DataFrame({"Capital ($)": eq_list})
-            eq_df.index.name = "Trade #"
-            st.line_chart(eq_df, height=200)
-
-        # Tabla de operaciones
-        raw_trades = bt_res.get("trades", [])
-        if raw_trades:
-            with st.expander(f"Ver todas las operaciones ({len(raw_trades)})", expanded=False):
-                td = pd.DataFrame(raw_trades)
-                if "outcome" in td.columns:
-                    td["Resultado"] = td["outcome"].map(
-                        {"TP": "✅ TP", "SL": "❌ SL", "OPEN": "🔄 Abierta"})
-                cols_show = [c for c in ["time", "dir", "Resultado", "pips", "pnl"] if c in td.columns]
-                st.dataframe(
-                    td[cols_show].rename(columns={
-                        "time": "Entrada", "dir": "Direccion",
-                        "pips": "Pips", "pnl": "P&L $"
-                    }),
-                    use_container_width=True, hide_index=True
+                st.session_state.strategy_comparison = cmp
+                st.session_state.backtest_result = cmp["best"]
+                # Guardar en base de conocimiento
+                cot_snap  = st.session_state.get("cot_data")
+                cal_snap  = st.session_state.get("economic_calendar") or []
+                kb = update_kb(cmp, cot=cot_snap, calendar=cal_snap)
+                st.success(
+                    f"✅ Comparación completada. Mejor estrategia: **{cmp['best']['label']}** "
+                    f"(PF={cmp['best']['profit_factor']} · WR={cmp['best']['winrate']}%)"
                 )
-    else:
-        st.info("Pulsa 'Ejecutar Backtest' para simular ~1 año de operaciones con la estrategia actual")
+                # Contexto de mercado en el mismo dato
+                news_snap = st.session_state.get("current_news") or []
+                st.session_state.market_context_reasons = explain_market_context(
+                    bt_df, cot=cot_snap, calendar=cal_snap, news=news_snap
+                )
+
+with bt_ctrl_r:
+    # Cargar calendario económico
+    if st.button("📅 Cargar Calendario Económico", key="load_cal"):
+        with st.spinner("Obteniendo eventos EUR/USD esta semana..."):
+            cal = get_economic_calendar()
+        st.session_state.economic_calendar = cal
+        if cal:
+            st.success(f"✅ {len(cal)} eventos cargados "
+                       f"({sum(1 for e in cal if e.get('impact','').upper()=='HIGH')} de alto impacto)")
+        else:
+            st.info("Sin eventos esta semana o API no disponible.")
+    cal_data = st.session_state.get("economic_calendar") or []
+    if cal_data:
+        high_ev = [e for e in cal_data if e.get("impact","").upper() == "HIGH"]
+        med_ev  = [e for e in cal_data if e.get("impact","").upper() == "MEDIUM"]
+        st.markdown(f"**Esta semana:** {len(high_ev)} eventos ALTO impacto · {len(med_ev)} MEDIO impacto")
+        for ev in high_ev[:5]:
+            st.markdown(
+                f"🔴 **[{ev.get('currency','')}]** {ev.get('title','')} "
+                f"— {str(ev.get('date',''))[:10]} "
+                f"| Prev: {ev.get('previous','?')} | Fore: {ev.get('forecast','?')}"
+            )
+
+# ── Comparación de estrategias ─────────────────────────────────────────────
+cmp_result = st.session_state.get("strategy_comparison")
+if cmp_result:
+    st.markdown("### 📊 Ranking de Estrategias")
+    best_name = cmp_result["best"]["strategy"]
+
+    # Tabla comparativa
+    rows = []
+    for i, r in enumerate(cmp_result["results"]):
+        rentable = r["profit_factor"] >= 1.0 and r["winrate"] >= r["be_winrate"]
+        rows.append({
+            "Pos": f"{'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else '4️⃣'}",
+            "Estrategia": r["label"],
+            "Operaciones": r["total"],
+            "Win Rate": f"{r['winrate']}%",
+            "Profit Factor": f"{r['profit_factor']}x",
+            "Net Pips": f"{r['net_pips']:+.1f}",
+            "Max DD": f"{r['max_dd']}%",
+            "P&L $": f"${r['net_pnl']:+.2f}",
+            "Estado": "✅ Rentable" if rentable else "⚠️ Marginal",
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # Ganadora detallada
+    best = cmp_result["best"]
+    st.markdown(f"### 🏆 Estrategia Ganadora: {best['label']}")
+    st.info(f"**Por qué funciona:** {best['why']}\n\n✅ **Ventajas:** {best['pros']}\n\n⚠️ **Limitaciones:** {best['cons']}")
+
+    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+    mc1.metric("Operaciones", best["total"])
+    mc2.metric("Win Rate", f"{best['winrate']}%", delta=f"BE={best['be_winrate']}%")
+    mc3.metric("Profit Factor", f"{best['profit_factor']}x")
+    mc4.metric("Net Pips", f"{best['net_pips']:+.1f}p")
+    mc5.metric("Max Drawdown", f"{best['max_dd']}%")
+
+    # Curva de capital de la ganadora
+    eq_list = best.get("equity", [])
+    if len(eq_list) > 2:
+        st.write("**Curva de capital — estrategia ganadora ($10,000 capital inicial · 0.01 lot):**")
+        st.line_chart(pd.DataFrame({"Capital ($)": eq_list}), height=220)
+
+    # Tabs: curvas de todas + tabla de trades
+    with st.expander("Ver curvas de capital de todas las estrategias", expanded=False):
+        max_len = max(len(r["equity"]) for r in cmp_result["results"])
+        eq_all = {}
+        for r in cmp_result["results"]:
+            eq_padded = r["equity"] + [r["equity"][-1]] * (max_len - len(r["equity"]))
+            eq_all[r["label"][:20]] = eq_padded
+        st.line_chart(pd.DataFrame(eq_all), height=240)
+
+    with st.expander(f"Ver operaciones de '{best['label']}' ({len(best.get('trades',[]))} trades)", expanded=False):
+        raw = best.get("trades", [])
+        if raw:
+            td = pd.DataFrame(raw)
+            if "outcome" in td.columns:
+                td["Resultado"] = td["outcome"].map({"TP":"✅ TP","SL":"❌ SL","OPEN":"🔄 Abierta"})
+            cols_s = [c for c in ["time","dir","Resultado","pips","pnl"] if c in td.columns]
+            st.dataframe(
+                td[cols_s].rename(columns={"time":"Entrada","dir":"Dirección","pips":"Pips","pnl":"P&L $"}),
+                use_container_width=True, hide_index=True
+            )
+
+    # Base de conocimiento histórica
+    kb = load_knowledge_base()
+    if kb.get("runs"):
+        with st.expander(f"📚 Base de conocimiento ({len(kb['runs'])} backtests guardados)", expanded=False):
+            if kb.get("strategy_wins"):
+                st.markdown("**Historial de ganadores:**")
+                for s, cnt in sorted(kb["strategy_wins"].items(), key=lambda x: -x[1]):
+                    meta = _STRATEGY_META.get(s, {})
+                    st.markdown(f"- **{meta.get('label', s)}**: ganó {cnt} vez/veces")
+            hist_rows = []
+            for run in reversed(kb["runs"][-15:]):
+                hist_rows.append({
+                    "Fecha":  run.get("ts","?")[:10],
+                    "Ganadora": _STRATEGY_META.get(run.get("best",""), {}).get("label", run.get("best","?")),
+                    "PF":     run.get("pf","?"),
+                    "WR":     f"{run.get('wr','?')}%",
+                    "Ops":    run.get("total","?"),
+                    "NetPips":run.get("net_pips","?"),
+                    "COT":    run.get("cot_bias") or "—",
+                    "Eventos":run.get("events_high",0),
+                })
+            st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+else:
+    st.info("Pulsa **'Comparar 4 Estrategias'** para encontrar la mejor estrategia en el año actual.")
+
+# ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
+st.markdown("---")
+st.subheader("🔍 Por qué se mueve el EUR/USD — Análisis Técnico + Fundamental")
+ctx_reasons = st.session_state.get("market_context_reasons")
+if ctx_reasons:
+    for reason in ctx_reasons:
+        st.markdown(f"- {reason}")
+    st.caption("Fuentes: EMA técnico · RSI/MACD momentum · COT CFTC institucional · Calendario ForexFactory · RSS noticias")
+else:
+    st.info(
+        "Ejecuta primero el backtest (botón arriba) y asegúrate de tener datos COT y calendario cargados. "
+        "Este panel explicará en detalle POR QUÉ el mercado está donde está."
+    )
 
 # ── BOT AUTOMÁTICO (SIEMPRE VISIBLE) ───────────────────────────────────────────
 st.markdown("---")
