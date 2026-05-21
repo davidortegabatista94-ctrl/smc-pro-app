@@ -132,8 +132,8 @@ SCALP_MAX_HOLD = 3
 PIP            = 0.0001
 SYMBOL         = "EURUSD"
 
-TELEGRAM_TOKEN   = "TU_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "TU_CHAT_ID"
+TELEGRAM_TOKEN   = "7967414683:AAGmyLDjobQOvpU_OVzlwHJ-Tf1o9GjbIlE"
+TELEGRAM_CHAT_ID = "1442582228"
 
 # Configuración persistente de usuario
 USER_CONFIG_FILE = "user_config.json"
@@ -698,10 +698,19 @@ def close_mt5_position(position_ticket, volume=None, comment="SMC Pro Bot Close"
     result = mt5.order_send(request)
     return result
 
-def auto_trade_signal(signal, volume=0.01, liq_levels=None):
+def auto_trade_signal(signal, volume=0.01, liq_levels=None, check_windows=True):
     """Ejecuta automáticamente una señal de trading en MT5"""
     if not signal or not signal.get("direction"):
         return False, "Sin señal válida"
+
+    # Verificar ventana horaria de trading
+    if check_windows:
+        try:
+            in_win, win_label, win_eta = get_trading_window_info()
+            if not in_win:
+                return False, f"Fuera de horario — {win_label}. {win_eta}"
+        except NameError:
+            pass  # get_trading_window_info aún no disponible (primera carga)
 
     try:
         # Comprobar si el terminal permite trading. Si no, usar modo simulación.
@@ -1064,6 +1073,75 @@ def get_dxy():
     }
 
 # ============================================
+# DATOS INSTITUCIONALES — COT REPORT (CFTC)
+# ============================================
+_COT_CACHE = None
+_COT_CACHE_TTL = timedelta(hours=12)
+
+def get_cot_data():
+    """Obtiene COT (Commitment of Traders) para EUR FX Futures desde CFTC."""
+    global _COT_CACHE
+    if _COT_CACHE:
+        ts, data = _COT_CACHE
+        if datetime.now() - ts < _COT_CACHE_TTL:
+            return data
+    try:
+        req = get_requests()
+        if not req:
+            return None
+        url = (
+            "https://publicreporting.cftc.gov/api/odata/v1/MarketsAndPositions"
+            "?$filter=MarketAndExchangeNames eq 'EURO FX - CHICAGO MERCANTILE EXCHANGE'"
+            "&$top=2&$orderby=ReportDate desc"
+        )
+        r = req.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        values = r.json().get("value", [])
+        if not values:
+            return None
+        latest = values[0]
+        prev   = values[1] if len(values) > 1 else None
+        nc_long  = int(latest.get("NonCommercialLong",  0) or 0)
+        nc_short = int(latest.get("NonCommercialShort", 0) or 0)
+        net      = nc_long - nc_short
+        prev_net = 0
+        if prev:
+            prev_net = int(prev.get("NonCommercialLong", 0) or 0) - int(prev.get("NonCommercialShort", 0) or 0)
+        change = net - prev_net
+        result = {
+            "date":            (latest.get("ReportDate") or "")[:10],
+            "nc_long":         nc_long,
+            "nc_short":        nc_short,
+            "net":             net,
+            "prev_net":        prev_net,
+            "change":          change,
+            "bias":            "ALCISTA (EUR)" if net > 0 else "BAJISTA (EUR)",
+            "bias_direction":  "LONG" if net > 0 else "SHORT",
+            "change_lbl":      "Aumentando longs" if change > 0 else "Reduciendo longs",
+        }
+        _COT_CACHE = (datetime.now(), result)
+        return result
+    except Exception as e:
+        logging.warning(f"COT data error: {e}")
+        return None
+
+def interpret_cot_for_signal(cot):
+    """Convierte COT en sesgo direccional para el score de confluencia."""
+    if not cot:
+        return None, 0
+    net = cot["net"]
+    change = cot["change"]
+    if net > 50000 and change > 0:
+        return "LONG", 15
+    elif net > 20000:
+        return "LONG", 8
+    elif net < -50000 and change < 0:
+        return "SHORT", 15
+    elif net < -20000:
+        return "SHORT", 8
+    return "NEUTRAL", 0
+
+# ============================================
 # VOLUMEN — ANÁLISIS COMPLETO
 # ============================================
 def detect_volume_spikes(df, threshold=2.0):
@@ -1413,6 +1491,165 @@ def run_backtest(df, direction="LONG", sl_pips=17, tp_pips=34, max_candles=20):
     }
 
 # ============================================
+# BACKTEST COMPLETO — AÑO ANTERIOR
+# ============================================
+def get_backtest_data(tf="1h"):
+    """Descarga hasta 2 años de datos para backtest (máximo disponible en yfinance)."""
+    yf = get_yf()
+    if yf:
+        try:
+            if tf in ("1h", "4h"):
+                df = yf.download("EURUSD=X", period="730d", interval="1h",
+                                 progress=False, auto_adjust=True)
+                df = flatten_columns(df)
+                if not df.empty and tf == "4h":
+                    df = df.resample("4h").agg({
+                        "Open": "first", "High": "max",
+                        "Low": "min", "Close": "last", "Volume": "sum"
+                    }).dropna()
+            else:
+                df = yf.download("EURUSD=X", period="730d", interval="1d",
+                                 progress=False, auto_adjust=True)
+                df = flatten_columns(df)
+            return df
+        except Exception as e:
+            logging.warning(f"Backtest data error: {e}")
+    return pd.DataFrame()
+
+
+def run_full_backtest(df, sl_pips=SCALP_SL_PIPS, use_windows=True, utc_offset=2):
+    """
+    Backtest completo: simula todas las entradas que haría el bot en el año anterior.
+    Señal: cruce EMA9/EMA21 + confirmación RSI + ventanas horarias opcionales.
+    """
+    if df.empty or len(df) < 50:
+        return None
+
+    close = df["Close"]
+    ema9  = close.ewm(span=9,  adjust=False).mean()
+    ema21 = close.ewm(span=21, adjust=False).mean()
+    delta_c = close.diff()
+    gain = delta_c.clip(lower=0).rolling(14).mean()
+    loss = (-delta_c.clip(upper=0)).rolling(14).mean()
+    rsi  = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+    high, low = df["High"], df["Low"]
+    tr   = pd.concat([high - low,
+                      (high - close.shift()).abs(),
+                      (low  - close.shift()).abs()], axis=1).max(axis=1)
+    atr  = tr.rolling(14).mean()
+
+    trades    = []
+    equity    = [10000.0]
+    pip_value = 1.0          # $1 per pip for 0.01 lot on EURUSD
+    in_trade  = False
+    entry_price = direction = tp_price = sl_price = entry_idx = None
+
+    for i in range(25, len(df) - 1):
+        if use_windows and hasattr(df.index[i], "hour"):
+            h_spain = (df.index[i].hour + utc_offset) % 24
+            in_win  = (7 <= h_spain < 12) or (15 <= h_spain < 20)
+            if not in_win and not in_trade:
+                continue
+
+        e9  = float(ema9.iloc[i]);  e21  = float(ema21.iloc[i])
+        e9p = float(ema9.iloc[i-1]); e21p = float(ema21.iloc[i-1])
+        r   = float(rsi.iloc[i]) if not np.isnan(rsi.iloc[i]) else 50.0
+        atr_val = float(atr.iloc[i]) if not np.isnan(atr.iloc[i]) else PIP * 10
+
+        # Use ATR-based SL/TP when possible (min sl_pips, max 20 pips)
+        sl_use = max(min(atr_val / PIP * 1.2, 20), sl_pips)
+        tp_use = sl_use * 2.2
+
+        if in_trade:
+            h_c = float(high.iloc[i]); l_c = float(low.iloc[i])
+            if direction == "LONG":
+                if l_c <= sl_price:
+                    pnl = -sl_use * pip_value
+                    equity.append(equity[-1] + pnl)
+                    trades.append({"dir": "LONG", "outcome": "SL", "pips": -sl_use,
+                                   "pnl": pnl, "time": str(df.index[entry_idx])[:16]})
+                    in_trade = False
+                elif h_c >= tp_price:
+                    pnl = tp_use * pip_value
+                    equity.append(equity[-1] + pnl)
+                    trades.append({"dir": "LONG", "outcome": "TP", "pips": tp_use,
+                                   "pnl": pnl, "time": str(df.index[entry_idx])[:16]})
+                    in_trade = False
+            else:
+                if h_c >= sl_price:
+                    pnl = -sl_use * pip_value
+                    equity.append(equity[-1] + pnl)
+                    trades.append({"dir": "SHORT", "outcome": "SL", "pips": -sl_use,
+                                   "pnl": pnl, "time": str(df.index[entry_idx])[:16]})
+                    in_trade = False
+                elif l_c <= tp_price:
+                    pnl = tp_use * pip_value
+                    equity.append(equity[-1] + pnl)
+                    trades.append({"dir": "SHORT", "outcome": "TP", "pips": tp_use,
+                                   "pnl": pnl, "time": str(df.index[entry_idx])[:16]})
+                    in_trade = False
+            continue
+
+        # Cruce alcista: EMA9 cruza arriba EMA21, RSI no sobrecomprado
+        if e9 > e21 and e9p <= e21p and r < 68:
+            entry_price = float(close.iloc[i])
+            direction   = "LONG"
+            tp_price    = entry_price + tp_use * PIP
+            sl_price    = entry_price - sl_use * PIP
+            in_trade    = True; entry_idx = i
+        # Cruce bajista: EMA9 cruza abajo EMA21, RSI no sobrevendido
+        elif e9 < e21 and e9p >= e21p and r > 32:
+            entry_price = float(close.iloc[i])
+            direction   = "SHORT"
+            tp_price    = entry_price - tp_use * PIP
+            sl_price    = entry_price + sl_use * PIP
+            in_trade    = True; entry_idx = i
+
+    # Cerrar trade abierto al final del dataset
+    if in_trade and entry_price is not None:
+        last_p  = float(close.iloc[-1])
+        pips_cl = (last_p - entry_price) / PIP if direction == "LONG" else (entry_price - last_p) / PIP
+        pnl_cl  = pips_cl * pip_value
+        equity.append(equity[-1] + pnl_cl)
+        trades.append({"dir": direction, "outcome": "OPEN",
+                       "pips": round(pips_cl, 1), "pnl": round(pnl_cl, 2),
+                       "time": str(df.index[entry_idx])[:16]})
+
+    if not trades:
+        return None
+
+    wins     = [t for t in trades if t["outcome"] == "TP"]
+    losses   = [t for t in trades if t["outcome"] == "SL"]
+    total    = len(trades)
+    winrate  = len(wins) / total * 100 if total > 0 else 0
+    net_pips = sum(t["pips"] for t in trades)
+    net_pnl  = sum(t["pnl"]  for t in trades)
+
+    # Max drawdown
+    peak = equity[0]; max_dd = 0.0
+    for e in equity:
+        if e > peak: peak = e
+        dd = (peak - e) / peak * 100
+        if dd > max_dd: max_dd = dd
+
+    gross_w = sum(t["pnl"] for t in wins)    if wins   else 0.0
+    gross_l = abs(sum(t["pnl"] for t in losses)) if losses else 1.0
+    pf      = round(gross_w / gross_l, 2) if gross_l > 0 else 0.0
+
+    return {
+        "total":         total,
+        "wins":          len(wins),
+        "losses":        len(losses),
+        "winrate":       round(winrate, 1),
+        "net_pips":      round(net_pips, 1),
+        "net_pnl":       round(net_pnl, 2),
+        "max_dd":        round(max_dd, 1),
+        "profit_factor": pf,
+        "equity":        equity,
+        "trades":        trades[-200:],
+    }
+
+# ============================================
 # INDICADORES
 # ============================================
 def calculate_indicators(df):
@@ -1570,6 +1807,32 @@ def get_market_session():
     if 13 <= h < 17:      return "Londres+NY",  "MUY ALTA ⚡", "🟡"
     if 17 <= h < 22:      return "Nueva York",  "ALTA",        "🟢"
     return                       "Tokio",       "MEDIA",       "🟡"
+
+# ============================================
+# VENTANAS HORARIAS DE TRADING (ESPAÑA)
+# ============================================
+UTC_OFFSET_SPAIN = 2  # CEST verano (+2); cambiar a 1 para CET invierno
+
+def get_spain_hour():
+    return (datetime.utcnow().hour + UTC_OFFSET_SPAIN) % 24
+
+def is_trading_window():
+    """True si hora España está en 07:00-12:00 o 15:00-20:00"""
+    h = get_spain_hour()
+    return (7 <= h < 12) or (15 <= h < 20)
+
+def get_trading_window_info():
+    h = get_spain_hour()
+    if 7 <= h < 12:
+        return True, "VENTANA MAÑANA (07:00-12:00)", f"Cierra en ~{12 - h}h | España aprox. {h:02d}:xx"
+    elif 15 <= h < 20:
+        return True, "VENTANA TARDE (15:00-20:00)", f"Cierra en ~{20 - h}h | España aprox. {h:02d}:xx"
+    elif h < 7:
+        return False, "CERRADO (noche)", f"Abre ventana mañana en ~{7 - h}h"
+    elif 12 <= h < 15:
+        return False, "DESCANSO MEDIODÍA", f"Reabre ventana tarde en ~{15 - h}h"
+    else:
+        return False, "CERRADO (noche)", f"Abre ventana mañana en ~{24 - h + 7}h"
 
 # ============================================
 # NIVELES SCALPING
@@ -2212,6 +2475,10 @@ def generate_signal():
     sig.update({"session": session, "volatility": volatility, "sess_icon": sess_icon})
     sig["reasons"].append(f"Sesión: {session} — Volatilidad {volatility}")
 
+    # Ventana horaria
+    in_win, win_label, win_eta = get_trading_window_info()
+    sig.update({"in_trading_window": in_win, "window_label": win_label, "window_eta": win_eta})
+
     sig["buy_signals"]  = buy_signals
     sig["sell_signals"] = sell_signals
     total = buy_signals + sell_signals
@@ -2254,6 +2521,10 @@ else:
         st.session_state.last_analysis_time = None
     if "analysis_executed" not in st.session_state:
         st.session_state.analysis_executed = False
+    if "backtest_result" not in st.session_state:
+        st.session_state.backtest_result = None
+    if "cot_data" not in st.session_state:
+        st.session_state.cot_data = None
     cfg = load_user_config()
 
     if "mt5_login" not in st.session_state:
@@ -2300,6 +2571,13 @@ else:
         f"Datos: {data_src}  |  "
         f"TP variable · SL {SCALP_SL_PIPS}p máx · R:R 1:2-3"
     )
+
+    # ── Ventana horaria de trading ─────────────────────────────────────────
+    _win_in, _win_label, _win_eta = get_trading_window_info()
+    if _win_in:
+        st.success(f"✅ **HORARIO ACTIVO** — {_win_label} | {_win_eta}")
+    else:
+        st.warning(f"⏸️ **FUERA DE HORARIO** — {_win_label} | {_win_eta}")
 
     # ── Estado de Posición ──────────────────────────────────────────────────────
     position_state = load_position_state()
@@ -2711,6 +2989,15 @@ if st.session_state.analysis_executed:
         if score >= 70:   st.success("✅ Score válido para considerar entrada")
         elif score >= 50: st.warning("⚠️ Score bajo — espera mejor confluencia")
         else:             st.error("❌ NO operar — score insuficiente")
+
+        # Ventana horaria
+        _win_ok = signal.get("in_trading_window", True)
+        _win_lbl = signal.get("window_label", "")
+        _win_eta = signal.get("window_eta", "")
+        if _win_ok:
+            st.success(f"✅ Horario OK: {_win_lbl}")
+        else:
+            st.error(f"⏸️ FUERA HORARIO: {_win_lbl} — {_win_eta}")
     with col_sc2:
         st.write("**Desglose del score:**")
         for r in score_reasons: st.write(f"• {r}")
@@ -2904,6 +3191,45 @@ if st.session_state.analysis_executed:
         else:
             st.info("⚪ Sin absorción institucional detectada")
 
+    # ── COT — Datos Institucionales ───────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🏦 Datos Institucionales — COT Report (CFTC) + Grandes Inversores")
+    cot_col1, cot_col2 = st.columns([2, 1])
+    with cot_col1:
+        if st.button("🔄 Actualizar COT Data", key="refresh_cot"):
+            with st.spinner("Descargando datos CFTC..."):
+                st.session_state.cot_data = get_cot_data()
+        elif st.session_state.cot_data is None:
+            with st.spinner("Cargando COT..."):
+                st.session_state.cot_data = get_cot_data()
+        cot = st.session_state.cot_data
+        if cot:
+            bias_color = "🟢" if cot["bias_direction"] == "LONG" else "🔴"
+            st.markdown(
+                f"**Informe COT** — fecha: `{cot['date']}`  \n"
+                f"**Bias especuladores:** {bias_color} {cot['bias']}  \n"
+                f"**Net non-commercial:** `{cot['net']:+,}` contratos  \n"
+                f"**Cambio semana:** `{cot['change']:+,}` — {cot['change_lbl']}"
+            )
+            cot_dir, cot_pts = interpret_cot_for_signal(cot)
+            if cot_dir == "LONG":
+                st.success(f"✅ COT señala LONG EUR ({cot_pts}pts de confluencia)")
+            elif cot_dir == "SHORT":
+                st.error(f"🔴 COT señala SHORT EUR ({cot_pts}pts de confluencia)")
+            else:
+                st.info("⚪ COT neutral — posiciones equilibradas")
+        else:
+            st.info("Sin datos COT disponibles (timeout o sin conexión CFTC)")
+    with cot_col2:
+        st.write("**¿Qué es el COT?**")
+        st.caption(
+            "Muestra las posiciones de grandes especuladores "
+            "(fondos de inversión, hedge funds) en EUR futures. "
+            "Si aumentan longs → institucionales apuestan al alza del EUR."
+        )
+        st.write("**Fuente:** CFTC (semanal, viernes)")
+        st.write("**Refresco:** 12h de caché")
+
     # ── IA — Motor de Bias ────────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("🤖 Motor de IA — Análisis de Confluencia Inteligente")
@@ -2941,6 +3267,66 @@ if st.session_state.analysis_executed:
 
 else:
     st.info("📊 Presiona 'ANALIZAR MERCADO' para ver el análisis completo")
+
+# ── BACKTEST COMPLETO ──────────────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("📊 Backtest Completo — Año Anterior (EMA9/21 + RSI + Ventanas Horarias)")
+
+bt_col_left, bt_col_right = st.columns([1, 2])
+with bt_col_left:
+    bt_use_windows = st.checkbox("Respetar ventanas 7-12h / 15-20h", value=True, key="bt_windows")
+    bt_sl = st.slider("SL (pips)", 5, 25, SCALP_SL_PIPS, key="bt_sl")
+    if st.button("🚀 Ejecutar Backtest Año Anterior", type="primary", key="run_bt"):
+        with st.spinner("Descargando hasta 2 años de datos EURUSD 1h..."):
+            bt_df = get_backtest_data("1h")
+        if bt_df.empty:
+            st.error("No se pudo obtener datos históricos para el backtest")
+        else:
+            with st.spinner(f"Simulando {len(bt_df)} velas..."):
+                st.session_state.backtest_result = run_full_backtest(
+                    bt_df, sl_pips=bt_sl, use_windows=bt_use_windows
+                )
+            if not st.session_state.backtest_result:
+                st.warning("No se generaron operaciones suficientes")
+
+with bt_col_right:
+    bt_res = st.session_state.backtest_result
+    if bt_res:
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Total Ops", bt_res["total"])
+        b2.metric("Win Rate", f"{bt_res['winrate']}%",
+                  delta="✅ Rentable" if bt_res["winrate"] >= 50 else "❌ Mejorar")
+        b3.metric("Net Pips", f"{bt_res['net_pips']:+.1f}p",
+                  delta="✅" if bt_res["net_pips"] > 0 else "❌")
+        b4.metric("Profit Factor", f"{bt_res['profit_factor']}x",
+                  delta="✅ >1" if bt_res["profit_factor"] >= 1 else "❌ <1")
+        b5, b6, b7 = st.columns(3)
+        b5.metric("Wins/Losses", f"{bt_res['wins']}W / {bt_res['losses']}L")
+        b6.metric("Max Drawdown", f"{bt_res['max_dd']}%",
+                  delta="✅ Bajo" if bt_res["max_dd"] < 15 else "⚠️ Alto")
+        b7.metric("Net P&L (sim)", f"${bt_res['net_pnl']:+.2f}")
+
+        # Equity curve
+        if bt_res["equity"] and len(bt_res["equity"]) > 1:
+            st.write("**Curva de capital (0.01 lot):**")
+            eq_df = pd.DataFrame({"Capital": bt_res["equity"]})
+            eq_df.index.name = "Trade #"
+            st.line_chart(eq_df)
+
+        # Últimas operaciones
+        if bt_res["trades"]:
+            st.write("**Últimas 20 operaciones:**")
+            trades_df = pd.DataFrame(bt_res["trades"][-20:])
+            trades_df["resultado"] = trades_df["outcome"].map(
+                {"TP": "✅ TP", "SL": "❌ SL", "OPEN": "🔄 Abierta"})
+            st.dataframe(
+                trades_df[["time", "dir", "resultado", "pips", "pnl"]].rename(
+                    columns={"time": "Entrada", "dir": "Dir",
+                             "resultado": "Resultado", "pips": "Pips", "pnl": "P&L $"}),
+                use_container_width=True, hide_index=True
+            )
+    else:
+        st.info("Pulsa 'Ejecutar Backtest' para ver los resultados del año anterior")
 
 # ── BOT AUTOMÁTICO (SIEMPRE VISIBLE) ───────────────────────────────────────────
 st.markdown("---")
@@ -3217,18 +3603,17 @@ st.markdown("---")
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
 # ── Auto-rerun (Streamlit-nativo, preserva session_state) ─────────────────
-# time.sleep(1) + st.rerun() hace un rerun suave: mantiene session_state intacto
-# (config del bot, credenciales MT5, etc.). El análisis pesado solo corre cuando
-# elapsed >= refresh_secs, controlado por should_auto_refresh arriba.
+# Siempre se ejecuta cuando auto-refresh está activo (se controla con sleep corto).
+# El análisis pesado solo corre cuando elapsed >= refresh_secs (should_auto_refresh).
 if refresh_secs > 0:
     now = time.time()
     last = st.session_state.get("last_analysis_time") or now
     elapsed = now - last
     remaining_secs = max(0.0, refresh_secs - elapsed)
     m, s = divmod(int(remaining_secs), 60)
-
-    if remaining_secs > 0:
-        st.markdown(f"🔄 Próxima actualización en **{m:02d}:{s:02d}**")
-        exec_time = time.time() - _APP_RERUN_START
-        time.sleep(max(0.05, 1.0 - exec_time))
-        st.rerun()
+    st.markdown(f"🔄 Próxima actualización en **{m:02d}:{s:02d}**")
+    exec_time = time.time() - _APP_RERUN_START
+    sleep_t = max(0.5, min(1.0, remaining_secs)) if remaining_secs > 0 else 1.0
+    sleep_t = max(0.5, sleep_t - max(0.0, exec_time - 0.5))
+    time.sleep(sleep_t)
+    st.rerun()
