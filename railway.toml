@@ -1,9 +1,4 @@
-[build]
-builder = "NIXPACKS"
-
 [deploy]
 startCommand = "streamlit run smc_pro_app.py --server.port=$PORT --server.address=0.0.0.0 --server.headless=true"
-healthcheckPath = "/"
-healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
