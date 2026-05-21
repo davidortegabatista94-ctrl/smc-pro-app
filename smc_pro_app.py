@@ -2780,17 +2780,19 @@ else:
             else:
                 st.info("ℹ️ Ingresa credenciales arriba o abre MT5")
         else:
-            st.warning("⚠️ No se detecta el paquete Python MetaTrader5 en este intérprete.")
-            st.code(f"{sys.executable} -m pip install MetaTrader5")
-            error = get_mt5_error()
-            if error:
-                st.caption(f"Detalle: {error}")
-            spec = importlib.util.find_spec("MetaTrader5")
-            if spec:
-                st.caption("MetaTrader5 está instalado en el entorno, pero no pudo importarse desde este proceso Streamlit.")
+            if sys.platform != "win32":
+                st.info(
+                    "ℹ️ **MT5 no disponible en servidor cloud (Linux)**\n\n"
+                    "MetaTrader5 solo funciona en **Windows**. En la versión web, "
+                    "la app opera en modo **análisis** (señales, backtest, alertas Telegram) "
+                    "sin ejecución automática de órdenes.\n\n"
+                    "Para ejecutar órdenes reales, instala la app localmente en tu PC con Windows."
+                )
             else:
-                st.caption("MetaTrader5 no está instalado en el entorno de ejecución actual.")
-            st.caption(f"Ejecutable usado por la app: {sys.executable}")
+                st.warning(
+                    "⚠️ Paquete MetaTrader5 no instalado.\n\n"
+                    f"Ejecuta en tu terminal: `pip install MetaTrader5`"
+                )
 
         symbol_input = st.text_input("Símbolo MT5", value=SYMBOL,
                                       help="Ej: EURUSD, EURUSDm, EURUSD.")
@@ -3471,35 +3473,43 @@ st.markdown("---")
 st.subheader("🤖 Modo Bot Automático")
 
 # Información de diagnóstico MT5
-st.write("**🔍 Diagnóstico MT5:**")
-col_diag1, col_diag2, col_diag3 = st.columns(3)
-with col_diag1:
-    if is_mt5_available():
-        st.success("✅ MT5 instalado")
-    else:
-        st.error("❌ MT5 no instalado")
-with col_diag2:
-    if is_mt5_available():
-        connected = mt5_connect()
-        if connected:
-            st.success("✅ MT5 conectado")
+if sys.platform != "win32":
+    st.info(
+        "ℹ️ **Bot automático desactivado en servidor cloud.**  "
+        "MT5 requiere Windows. Las señales, alertas Telegram y el backtest "
+        "funcionan con normalidad — solo la ejecución de órdenes requiere la "
+        "versión local en PC con Windows."
+    )
+else:
+    st.write("**🔍 Diagnóstico MT5:**")
+    col_diag1, col_diag2, col_diag3 = st.columns(3)
+    with col_diag1:
+        if is_mt5_available():
+            st.success("✅ MT5 instalado")
         else:
-            st.error("❌ MT5 no conectado")
-            err = get_mt5_error()
-            if err:
-                st.warning(f"🛠️ Error: {err}")
-            st.info("💡 Abre MetaTrader 5 y verifica que esté funcionando")
-    else:
-        st.error("❌ No disponible")
-with col_diag3:
-    if is_mt5_available() and mt5_connect():
-        terminal_info = mt5.terminal_info()
-        if terminal_info:
-            st.success(f"✅ Terminal: {terminal_info.name}")
+            st.error("❌ MT5 no instalado")
+    with col_diag2:
+        if is_mt5_available():
+            connected_diag = mt5_connect()
+            if connected_diag:
+                st.success("✅ MT5 conectado")
+            else:
+                st.error("❌ MT5 no conectado")
+                err = get_mt5_error()
+                if err:
+                    st.warning(f"🛠️ Error: {err}")
+                st.info("💡 Abre MetaTrader 5 y verifica que esté funcionando")
         else:
-            st.warning("⚠️ Terminal info no disponible")
-    else:
-        st.error("❌ No disponible")
+            st.error("❌ No disponible")
+    with col_diag3:
+        if is_mt5_available() and mt5_connect():
+            terminal_info = mt5.terminal_info()
+            if terminal_info:
+                st.success(f"✅ Terminal: {terminal_info.name}")
+            else:
+                st.warning("⚠️ Terminal info no disponible")
+        else:
+            st.error("❌ No disponible")
 
 # Inicializar estado del bot en session_state
 if "bot_enabled" not in st.session_state:
