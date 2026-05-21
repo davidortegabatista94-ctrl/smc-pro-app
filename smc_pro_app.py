@@ -3690,22 +3690,25 @@ else:
 # ── Botón ─────────────────────────────────────────────────────────────────────
 run_analysis = st.button("🔍 ANALIZAR MERCADO", type="primary", use_container_width=True)
 
-# Auto-refresh solo si: 1) está habilitado, 2) pasó suficiente tiempo, 3) NO presionó el botón del bot
+# Guard de análisis: evita doble-trigger y asegura intervalo mínimo
 should_auto_refresh = False
 if refresh_secs > 0:
-    current_time = time.time()
-    if st.session_state.last_analysis_time is None:
+    _t_now  = time.time()
+    _t_last = st.session_state.last_analysis_time
+    if _t_last is None:
+        # Primera carga: analizar inmediatamente
         should_auto_refresh = True
     else:
-        elapsed = current_time - st.session_state.last_analysis_time
-        if elapsed >= refresh_secs:
+        _elapsed = _t_now - _t_last
+        # Requiere que haya pasado al menos el 95% del intervalo para evitar doble-trigger
+        if _elapsed >= refresh_secs * 0.95:
             should_auto_refresh = True
 
 run_fresh_analysis = run_analysis or should_auto_refresh
 if run_fresh_analysis:
+    # Fijar timestamp ANTES del análisis para que el timer empiece desde aquí
     st.session_state.last_analysis_time = time.time()
     st.session_state.analysis_executed = True
-# No se resetea analysis_executed a False: los resultados persisten entre reruns del temporizador
 
 # Valores por defecto para evitar errores cuando no se ha analizado aún
 signal      = {}
@@ -4719,23 +4722,15 @@ st.markdown("---")
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
 # ── Auto-rerun (Streamlit-nativo, preserva session_state) ─────────────────
-# Sleep inteligente: no recargar cada segundo — solo cuando sea necesario.
-# El análisis pesado solo corre cuando elapsed >= refresh_secs (should_auto_refresh).
+# IMPORTANTE: time.sleep() > 2s bloquea el WebSocket de Streamlit, congela la UI
+# y causa desconexión del navegador. Siempre usar <= 2s para mantener el heartbeat.
+# El análisis pesado está protegido por el guard elapsed >= refresh_secs.
 if refresh_secs > 0:
-    now = time.time()
-    last = st.session_state.get("last_analysis_time") or now
-    elapsed = now - last
-    remaining_secs = max(0.0, refresh_secs - elapsed)
-    m, s = divmod(int(remaining_secs), 60)
-    st.markdown(f"🔄 Próxima actualización en **{m:02d}:{s:02d}**")
-    # Smart sleep: reducir reruns innecesarios que causan recarga prematura visual
-    if remaining_secs > 30:
-        sleep_t = 10.0   # rerun cada 10s cuando queda tiempo
-    elif remaining_secs > 10:
-        sleep_t = 5.0    # rerun cada 5s cuando se acerca
-    elif remaining_secs > 2:
-        sleep_t = 2.0    # rerun cada 2s en los últimos 10s
-    else:
-        sleep_t = max(0.3, remaining_secs)  # segundos finales exactos
-    time.sleep(sleep_t)
+    _now  = time.time()
+    _last = st.session_state.get("last_analysis_time") or _now
+    _remaining = max(0.0, refresh_secs - (_now - _last))
+    _m, _s = divmod(int(_remaining), 60)
+    st.markdown(f"🔄 Próxima actualización en **{_m:02d}:{_s:02d}**")
+    # Sleep 2s máx — suficiente para actualizar el contador sin congelar el WebSocket
+    time.sleep(min(2.0, max(0.3, _remaining)))
     st.rerun()
