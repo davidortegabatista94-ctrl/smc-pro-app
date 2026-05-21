@@ -1696,27 +1696,23 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
         trending    = adxv > 20
         min_atr     = av > PIP * 6    # Evitar mercados sin movimiento
 
-        # TENDENCIA ALCISTA: EMA9 > EMA21 > EMA50 (alineacion completa)
+        # Calcular condiciones de tendencia y retroceso
         bull_align  = e9 > e21 > e50
-        # RETROCESO a zona EMA21 (precio cerca EMA21, no más lejos que 0.5 ATR)
-        near_e21_up = 0 <= (c - e21) < av * 0.5
-        # ENTRADA LONG: tendencia alcista + pullback a EMA21 + MACD positivo + RSI 38-65
+        bear_align  = e9 < e21 < e50
+        near_e21_up = 0 <= (c - e21) < av * 0.5   # precio ligeramente sobre EMA21
+        near_e21_dn = 0 <= (e21 - c) < av * 0.5   # precio ligeramente bajo EMA21
+
+        # ENTRADA LONG: tendencia alcista + pullback a EMA21 + MACD + RSI
         if (bull_align and near_e21_up and trending and min_atr and
                 hv > 0 and 38 <= r <= 65):
-            prev_c = float(close.iloc[i - 1])
-            if c > prev_c:   # Confirmacion: vela alcista tras pullback
+            if float(close.iloc[i - 1]) < c:       # vela alcista confirma rebote
                 ep = c;  dr = "LONG"
                 tp_p = c + tp_d;  sl_p = c - sl_d
                 in_trade = True; ei = i
-
-        # TENDENCIA BAJISTA: EMA9 < EMA21 < EMA50
-        bear_align   = e9 < e21 < e50
-        near_e21_dn  = 0 <= (e21 - c) < av * 0.5
-        # ENTRADA SHORT: tendencia bajista + rally a EMA21 + MACD negativo + RSI 35-62
+        # ENTRADA SHORT: tendencia bajista + rally a EMA21 + MACD + RSI
         elif (bear_align and near_e21_dn and trending and min_atr and
               hv < 0 and 35 <= r <= 62):
-            prev_c = float(close.iloc[i - 1])
-            if c < prev_c:   # Confirmacion: vela bajista tras rally
+            if float(close.iloc[i - 1]) > c:       # vela bajista confirma rechazo
                 ep = c;  dr = "SHORT"
                 tp_p = c - tp_d;  sl_p = c + sl_d
                 in_trade = True; ei = i
