@@ -1783,7 +1783,7 @@ def save_knowledge_base(kb):
     except Exception as e:
         logging.warning(f"KB save: {e}")
 
-def update_kb(comparison_result, cot=None, calendar=None):
+def update_kb(comparison_result, cot=None, calendar=None, market_ctx=None):
     kb = load_knowledge_base()
     best = comparison_result["best"]
     entry = {
@@ -1798,6 +1798,7 @@ def update_kb(comparison_result, cot=None, calendar=None):
                         for r in comparison_result["results"]],
         "cot_bias":    cot.get("bias") if cot else None,
         "events_high": sum(1 for e in (calendar or []) if e.get("impact","").upper() == "HIGH"),
+        "market_ctx":  (market_ctx or [])[:6],  # por qué se mueve el mercado
     }
     kb["runs"] = (kb.get("runs", []) + [entry])[-50:]
     wins = kb.get("strategy_wins", {})
@@ -1808,6 +1809,47 @@ def update_kb(comparison_result, cot=None, calendar=None):
     for r in recent:
         votes[r["best"]] = votes.get(r["best"], 0) + 1
     kb["best_strategy"] = max(votes, key=votes.get) if votes else best["strategy"]
+    save_knowledge_base(kb)
+    return kb
+
+
+def kb_record_pending_signal(direction, price, strategy, reason):
+    """Guarda la señal actual para evaluarla en el siguiente ciclo de análisis."""
+    kb = load_knowledge_base()
+    kb["pending_signal"] = {
+        "ts": datetime.now().isoformat()[:19],
+        "direction": direction,
+        "price": price,
+        "strategy": strategy,
+        "reason": reason,
+    }
+    save_knowledge_base(kb)
+
+
+def kb_evaluate_and_learn(current_price):
+    """Compara la señal pendiente con el precio actual y actualiza las estadísticas."""
+    kb = load_knowledge_base()
+    pending = kb.get("pending_signal")
+    if not pending or pending.get("direction") == "NO TRADE":
+        return kb
+    direction   = pending["direction"]
+    entry_price = pending.get("price")
+    strategy    = pending.get("strategy", "unknown")
+    if entry_price is None or current_price is None:
+        return kb
+    move_pips = (current_price - entry_price) / 0.0001
+    if direction == "LONG":
+        correct = move_pips > 3    # al menos 3 pips en la dirección correcta
+    elif direction == "SHORT":
+        correct = move_pips < -3
+    else:
+        return kb
+    stats = kb.get("signal_stats", {})
+    s = stats.get(strategy, {"correct": 0, "wrong": 0})
+    s["correct" if correct else "wrong"] += 1
+    stats[strategy] = s
+    kb["signal_stats"] = stats
+    kb.pop("pending_signal", None)
     save_knowledge_base(kb)
     return kb
 
@@ -2290,6 +2332,218 @@ def run_strategy_comparison(df, use_windows=True, utc_offset=2):
         reverse=True
     )
     return {"results": results, "best": results[0]}
+
+
+def _live_strategy_signal(df, strategy):
+    """Aplica las reglas de entrada de la estrategia al estado ACTUAL del mercado.
+    Devuelve: ("LONG"|"SHORT"|"NO TRADE", explicacion_str)
+    """
+    if df is None or df.empty or len(df) < 115:
+        return "NO TRADE", "Sin datos suficientes"
+    try:
+        close = df["Close"]
+        high  = df["High"]
+        low   = df["Low"]
+        opn   = df["Open"] if "Open" in df.columns else close.shift(1)
+        PIP   = 0.0001
+
+        # ── Indicadores base ───────────────────────────────────────────────
+        e3  = close.ewm(span=3,   adjust=False).mean()
+        e5  = close.ewm(span=5,   adjust=False).mean()
+        e8  = close.ewm(span=8,   adjust=False).mean()
+        e9  = close.ewm(span=9,   adjust=False).mean()
+        e10 = close.ewm(span=10,  adjust=False).mean()
+        e20 = close.ewm(span=20,  adjust=False).mean()
+        e21 = close.ewm(span=21,  adjust=False).mean()
+        e50 = close.ewm(span=50,  adjust=False).mean()
+        e100= close.ewm(span=100, adjust=False).mean()
+
+        # RSI(14)
+        d = close.diff()
+        gain = d.clip(lower=0).ewm(com=13, adjust=False).mean()
+        loss = (-d.clip(upper=0)).ewm(com=13, adjust=False).mean()
+        rs   = gain / loss.replace(0, 1e-9)
+        rsi  = 100 - 100 / (1 + rs)
+
+        # MACD histogram
+        macd_line   = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+        macd_signal = macd_line.ewm(span=9, adjust=False).mean()
+        macd_hist   = macd_line - macd_signal
+
+        # ATR(14) and ATR(10)
+        tr14 = pd.concat([high - low,
+                          (high - close.shift(1)).abs(),
+                          (low  - close.shift(1)).abs()], axis=1).max(axis=1)
+        atr14 = tr14.rolling(14).mean()
+        tr10  = tr14.copy()
+        atr10 = tr10.rolling(10).mean()
+
+        # Bollinger(20,2)
+        bb_mid = close.rolling(20).mean()
+        bb_std = close.rolling(20).std()
+        bb_lo  = bb_mid - 2 * bb_std
+        bb_hi  = bb_mid + 2 * bb_std
+
+        # Keltner(EMA20 ± 2.5×ATR14)
+        kc_lo = e20 - 2.5 * atr14
+        kc_hi = e20 + 2.5 * atr14
+
+        # Donchian(20, shift 1 para no lookahead)
+        don_hi = high.shift(1).rolling(20).max()
+        don_lo = low.shift(1).rolling(20).min()
+
+        # Momentum windows(10, shift 1)
+        mom_hi = high.shift(1).rolling(10).max()
+        mom_lo = low.shift(1).rolling(10).min()
+
+        # Stochastic(14,3)
+        lo14  = low.rolling(14).min()
+        hi14  = high.rolling(14).max()
+        stk   = (close - lo14) / (hi14 - lo14 + 1e-9) * 100
+        std   = stk.rolling(3).mean()
+
+        # SuperTrend(3×ATR10) — loop para estado correcto
+        mult   = 3.0
+        hl2    = (high + low) / 2.0
+        up_b   = hl2 + mult * atr10
+        dn_b   = hl2 - mult * atr10
+        n      = len(df)
+        st_dir = pd.Series(index=df.index, dtype=float)
+        final_up = up_b.copy(); final_dn = dn_b.copy()
+        for j in range(1, n):
+            c_prev = close.iloc[j-1]
+            fu_prev = final_up.iloc[j-1]
+            fd_prev = final_dn.iloc[j-1]
+            final_up.iloc[j] = min(up_b.iloc[j], fu_prev) if c_prev <= fu_prev else up_b.iloc[j]
+            final_dn.iloc[j] = max(dn_b.iloc[j], fd_prev) if c_prev >= fd_prev else dn_b.iloc[j]
+            d_prev = st_dir.iloc[j-1] if j > 1 else 1
+            if c_prev <= fu_prev:
+                st_dir.iloc[j] = -1 if close.iloc[j] <= final_up.iloc[j] else 1
+            else:
+                st_dir.iloc[j] = 1 if close.iloc[j] >= final_dn.iloc[j] else -1
+
+        # ── Leer valores del ÚLTIMO candle ──────────────────────────────────
+        i = len(df) - 1   # índice actual
+        c    = close.iloc[i];  c1 = close.iloc[i-1]
+        h    = high.iloc[i];   l  = low.iloc[i]
+        o    = opn.iloc[i];    o1 = opn.iloc[i-1]
+        h1   = high.iloc[i-1]; l1 = low.iloc[i-1]
+        av   = atr14.iloc[i]
+        r    = rsi.iloc[i];    r1 = rsi.iloc[i-1]
+        hv   = macd_hist.iloc[i]; hv1 = macd_hist.iloc[i-1]
+        sv   = e9.iloc[i]; sv21 = e21.iloc[i]; sv50 = e50.iloc[i]
+        stk_v = stk.iloc[i]; std_v = std.iloc[i]
+        stk1  = stk.iloc[i-1]; std1  = std.iloc[i-1]
+        st_d  = st_dir.iloc[i]; st_d1 = st_dir.iloc[i-1]
+        bb_l  = bb_lo.iloc[i]; bb_h = bb_hi.iloc[i]
+        kc_l  = kc_lo.iloc[i]; kc_h = kc_hi.iloc[i]
+        d_hi  = don_hi.iloc[i]; d_lo = don_lo.iloc[i]
+        m_hi  = mom_hi.iloc[i]; m_lo = mom_lo.iloc[i]
+        min_atr = av > PIP * 4
+
+        bull_align  = sv > sv21 > sv50
+        bear_align  = sv < sv21 < sv50
+        macd_long   = hv > 0
+        macd_short  = hv < 0
+        bull_candle = c > c1
+        bear_candle = c < c1
+        abv_e50     = c > sv50
+        blw_e50     = c < sv50
+
+        direction = "NO TRADE"
+        reason    = "Sin setup en este momento"
+
+        if strategy == "ema_trend":
+            if bull_align and macd_long  and 42<=r<=73 and min_atr and bull_candle:
+                direction, reason = "LONG",  "EMA 9>21>50, MACD+, RSI saludable, vela alcista"
+            elif bear_align and macd_short and 27<=r<=58 and min_atr and bear_candle:
+                direction, reason = "SHORT", "EMA 9<21<50, MACD−, RSI saludable, vela bajista"
+
+        elif strategy == "ema_crossover":
+            cross_up   = e9.iloc[i] > e21.iloc[i] and e9.iloc[i-1] <= e21.iloc[i-1]
+            cross_down = e9.iloc[i] < e21.iloc[i] and e9.iloc[i-1] >= e21.iloc[i-1]
+            if cross_up   and abv_e50 and min_atr: direction, reason = "LONG",  "EMA9 cruza EMA21 al alza + precio>EMA50"
+            elif cross_down and blw_e50 and min_atr: direction, reason = "SHORT", "EMA9 cruza EMA21 a la baja + precio<EMA50"
+
+        elif strategy == "triple_ema":
+            v3=e3.iloc[i]; v8=e8.iloc[i]; v3p=e3.iloc[i-1]; v8p=e8.iloc[i-1]
+            bull3 = v3 > v8 > e21.iloc[i] and v3>v3p and v8>v8p
+            bear3 = v3 < v8 < e21.iloc[i] and v3<v3p and v8<v8p
+            if bull3 and min_atr: direction, reason = "LONG",  "Triple EMA 3/8/21 alcista y subiendo"
+            elif bear3 and min_atr: direction, reason = "SHORT", "Triple EMA 3/8/21 bajista y bajando"
+
+        elif strategy == "ema_ribbon":
+            v5=e5.iloc[i]; v10=e10.iloc[i]; v20=e20.iloc[i]
+            ribbon_bull = v5>v10>v20>sv50 and c>e100.iloc[i]
+            ribbon_bear = v5<v10<v20<sv50 and c<e100.iloc[i]
+            if ribbon_bull and min_atr: direction, reason = "LONG",  "Ribbon EMA 5>10>20>50, precio>EMA100"
+            elif ribbon_bear and min_atr: direction, reason = "SHORT", "Ribbon EMA 5<10<20<50, precio<EMA100"
+
+        elif strategy == "macd_cross":
+            cross_bull = hv > 0 and hv1 <= 0
+            cross_bear = hv < 0 and hv1 >= 0
+            if cross_bull and abv_e50 and min_atr: direction, reason = "LONG",  "MACD hist cruza cero al alza + precio>EMA50"
+            elif cross_bear and blw_e50 and min_atr: direction, reason = "SHORT", "MACD hist cruza cero a la baja + precio<EMA50"
+
+        elif strategy == "rsi_reversion":
+            pull_bull = bull_align and 40<=r<=48 and r>r1
+            pull_bear = bear_align and 52<=r<=60 and r<r1
+            if pull_bull and min_atr: direction, reason = "LONG",  "Pullback RSI 40–48 en tendencia alcista, rebotando"
+            elif pull_bear and min_atr: direction, reason = "SHORT", "Pullback RSI 52–60 en tendencia bajista, rebotando"
+
+        elif strategy == "rsi_50_cross":
+            r50_bull = r > 50 and r1 <= 50
+            r50_bear = r < 50 and r1 >= 50
+            if r50_bull and macd_long  and abv_e50 and min_atr: direction, reason = "LONG",  "RSI cruza 50 al alza + MACD+ + precio>EMA50"
+            elif r50_bear and macd_short and blw_e50 and min_atr: direction, reason = "SHORT", "RSI cruza 50 a la baja + MACD− + precio<EMA50"
+
+        elif strategy == "stochastic_trend":
+            stoch_bull = stk_v > std_v and stk1 <= std1 and stk_v < 80
+            stoch_bear = stk_v < std_v and stk1 >= std1 and stk_v > 20
+            if stoch_bull and abv_e50 and min_atr: direction, reason = f"LONG",  f"Estocástico %K cruza %D al alza ({stk_v:.0f}), en tendencia alcista"
+            elif stoch_bear and blw_e50 and min_atr: direction, reason = f"SHORT", f"Estocástico %K cruza %D a la baja ({stk_v:.0f}), en tendencia bajista"
+
+        elif strategy == "bb_touch":
+            touch_lo = l <= bb_l and c > bb_l
+            touch_hi = h >= bb_h and c < bb_h
+            if touch_lo and abv_e50 and r < 45 and min_atr: direction, reason = "LONG",  f"Toca Bollinger inferior, RSI={r:.0f}, en tendencia alcista"
+            elif touch_hi and blw_e50 and r > 55 and min_atr: direction, reason = "SHORT", f"Toca Bollinger superior, RSI={r:.0f}, en tendencia bajista"
+
+        elif strategy == "keltner_touch":
+            touch_lo = l <= kc_l and c > kc_l
+            touch_hi = h >= kc_h and c < kc_h
+            if touch_lo and r < 48 and min_atr: direction, reason = "LONG",  f"Toca Keltner inferior, RSI={r:.0f}"
+            elif touch_hi and r > 52 and min_atr: direction, reason = "SHORT", f"Toca Keltner superior, RSI={r:.0f}"
+
+        elif strategy == "donchian_break":
+            break_up   = c > d_hi
+            break_down = c < d_lo
+            if break_up   and abv_e50 and min_atr: direction, reason = "LONG",  f"Rompe máximo Donchian 20 ({d_hi:.5f}) + precio>EMA50"
+            elif break_down and blw_e50 and min_atr: direction, reason = "SHORT", f"Rompe mínimo Donchian 20 ({d_lo:.5f}) + precio<EMA50"
+
+        elif strategy == "momentum_break":
+            break_up   = c > m_hi
+            break_down = c < m_lo
+            if break_up   and 45<=r<=70 and macd_long  and min_atr: direction, reason = "LONG",  "Breakout momentum 10 barras al alza + RSI + MACD+"
+            elif break_down and 30<=r<=55 and macd_short and min_atr: direction, reason = "SHORT", "Breakout momentum 10 barras a la baja + RSI + MACD−"
+
+        elif strategy == "supertrend":
+            flip_bull = st_d == 1  and st_d1 == -1
+            flip_bear = st_d == -1 and st_d1 == 1
+            if st_d == 1  and min_atr: direction, reason = "LONG",  "SuperTrend alcista" + (" — FLIP reciente" if flip_bull else "")
+            elif st_d == -1 and min_atr: direction, reason = "SHORT", "SuperTrend bajista" + (" — FLIP reciente" if flip_bear else "")
+
+        elif strategy == "engulfing":
+            bull_eng = c > o and o <= c1 and c >= o1 and (c - o) > (o1 - c1) * 0.8
+            bear_eng = c < o and o >= c1 and c <= o1 and (o - c) > (c1 - o1) * 0.8
+            if bull_eng and abv_e50 and min_atr: direction, reason = "LONG",  "Vela envolvente alcista sobre EMA50"
+            elif bear_eng and blw_e50 and min_atr: direction, reason = "SHORT", "Vela envolvente bajista bajo EMA50"
+
+        return direction, reason
+    except Exception as ex:
+        logging.warning(f"_live_strategy_signal {strategy}: {ex}")
+        return "NO TRADE", "Error de cálculo"
+
 
 # ============================================
 # INDICADORES
@@ -3140,6 +3394,20 @@ def generate_signal():
     tp, sl, rr, viable, risk_pips, liquidity_warnings = calc_scalp_levels(
         sig["price"], sig["direction"], df_1h, sig["atr_1h_pips"], liq_levels)
     sig.update({"tp": tp, "sl": sl, "rr": rr, "viable": viable, "risk_pips": risk_pips, "liquidity_warnings": liquidity_warnings})
+
+    # ── Señal KB: aplica la mejor estrategia conocida al mercado actual ──────
+    kb = load_knowledge_base()
+    best_strat = kb.get("best_strategy")
+    strat_wins = kb.get("strategy_wins", {})
+    kb_direction, kb_reason = "NO TRADE", "Sin historial de backtest"
+    if best_strat and not df_1h.empty:
+        kb_direction, kb_reason = _live_strategy_signal(df_1h, best_strat)
+    sig["kb_best_strategy"]  = best_strat
+    sig["kb_direction"]      = kb_direction
+    sig["kb_reason"]         = kb_reason
+    sig["kb_strategy_wins"]  = strat_wins
+    sig["kb_runs"]           = len(kb.get("runs", []))
+    sig["kb_signal_stats"]   = kb.get("signal_stats", {})
     return sig
 
 # ============================================
@@ -3514,6 +3782,34 @@ if st.session_state.analysis_executed:
             signal.get("price"), signal.get("direction"), df_1h, liq_levels,
             ms_1h, signal.get("atr_1h_pips"))
 
+        # ── Auto-aprendizaje: evaluar señal anterior + generar contexto ────────
+        _cur_price = signal.get("price")
+        if _cur_price:
+            # Evalúa si la señal anterior fue correcta y actualiza KB
+            try:
+                kb_evaluate_and_learn(_cur_price)
+            except Exception:
+                pass
+            # Guarda la nueva señal KB como pendiente para evaluarla en el próximo ciclo
+            _kb_dir = signal.get("kb_direction", "NO TRADE")
+            _kb_strat = signal.get("kb_best_strategy") or "none"
+            _kb_rsn   = signal.get("kb_reason", "")
+            if _kb_dir != "NO TRADE":
+                try:
+                    kb_record_pending_signal(_kb_dir, _cur_price, _kb_strat, _kb_rsn)
+                except Exception:
+                    pass
+
+        # ── Contexto fundamental automático ─────────────────────────────────
+        try:
+            _cot_auto = st.session_state.get("cot_data")
+            _cal_auto = st.session_state.get("economic_calendar") or get_economic_calendar()
+            _news_auto = signal.get("news", [])
+            _ctx_auto  = explain_market_context(df_1h, cot=_cot_auto, calendar=_cal_auto, news=_news_auto)
+            st.session_state.market_context_reasons = _ctx_auto
+        except Exception:
+            pass
+
         # Guardar resultados en caché para los reruns del temporizador
         st.session_state._analysis_cache = {
             "signal": signal, "tick": tick, "df_1h": df_1h, "df_15": df_15,
@@ -3591,6 +3887,42 @@ if st.session_state.analysis_executed:
     c2.metric("❌ Señales VENTA",  signal["sell_signals"])
     c3.metric(f"{signal['sess_icon']} Sesión", signal["session"].split(" ")[0])
     c4.metric("⚡ Volatilidad",    signal["volatility"])
+
+    # ── Panel Inteligencia Adaptativa (KB + Señal Estrategia) ─────────────────
+    kb_dir   = signal.get("kb_direction", "NO TRADE")
+    kb_strat = signal.get("kb_best_strategy")
+    kb_rsn   = signal.get("kb_reason", "Sin historial")
+    kb_runs  = signal.get("kb_runs", 0)
+    kb_wins  = signal.get("kb_strategy_wins", {})
+    kb_stats = signal.get("kb_signal_stats", {})
+    if kb_strat:
+        st.markdown("---")
+        st.subheader("🧠 Señal Inteligente — Mejor Estrategia Histórica")
+        meta_label = _STRATEGY_META.get(kb_strat, {}).get("label", kb_strat)
+        _kb_css = "sl" if kb_dir == "LONG" else ("ss" if kb_dir == "SHORT" else "sw")
+        _kb_emoji = "🟢" if kb_dir == "LONG" else ("🔴" if kb_dir == "SHORT" else "⚪")
+        _kb_txt   = "COMPRA" if kb_dir == "LONG" else ("VENTA" if kb_dir == "SHORT" else "SIN SETUP")
+        st.markdown(
+            f'<div class="big-signal {_kb_css}" style="font-size:1.4rem;padding:12px">'
+            f'{_kb_emoji} {_kb_txt} — {meta_label}</div>',
+            unsafe_allow_html=True
+        )
+        st.caption(f"💡 {kb_rsn}")
+        _a1, _a2, _a3, _a4 = st.columns(4)
+        _a1.metric("Backtests en KB", kb_runs)
+        _a2.metric("Veces nº1", kb_wins.get(kb_strat, 0))
+        _strat_s = kb_stats.get(kb_strat, {})
+        _ok = _strat_s.get("correct", 0); _ko = _strat_s.get("wrong", 0)
+        _acc = f"{_ok/(_ok+_ko)*100:.0f}%" if (_ok + _ko) > 0 else "—"
+        _a3.metric("Aciertos señal", f"{_ok}✅ / {_ko}❌")
+        _a4.metric("Tasa acierto", _acc)
+        # Contexto fundamental automático (por qué se mueve)
+        _ctx = st.session_state.get("market_context_reasons")
+        if _ctx:
+            with st.expander("🔍 Por qué se mueve el mercado ahora (técnico + fundamental)", expanded=False):
+                for _r in _ctx:
+                    st.markdown(f"- {_r}")
+                st.caption("Fuentes: EMA · RSI · MACD · COT CFTC · Calendario ForexFactory · RSS noticias")
 
     # ── Score de confluencia ──────────────────────────────────────────────────
     st.markdown("---")
@@ -3934,7 +4266,7 @@ st.caption(
 bt_ctrl_l, bt_ctrl_r = st.columns([1, 2])
 with bt_ctrl_l:
     bt_use_windows = st.checkbox("Solo ventanas 7-12h / 15-20h", value=True, key="bt_windows")
-    run_bt_btn = st.button("🚀 Comparar 4 Estrategias (~1 año)", type="primary", key="run_bt")
+    run_bt_btn = st.button("🚀 Comparar 14 Estrategias (~1 año)", type="primary", key="run_bt")
     if run_bt_btn:
         with st.spinner("Descargando hasta 1 año de datos EURUSD 1h..."):
             bt_df = get_backtest_data("1h")
@@ -3942,25 +4274,24 @@ with bt_ctrl_l:
             st.error("Sin datos históricos — verifica conexión a internet.")
         else:
             n_c = len(bt_df)
-            with st.spinner(f"Comparando 4 estrategias sobre {n_c} velas ({n_c//24}d)..."):
+            with st.spinner(f"Comparando 14 estrategias sobre {n_c} velas ({n_c//24}d) — puede tardar 20-60s..."):
                 cmp = run_strategy_comparison(bt_df, use_windows=bt_use_windows)
             if not cmp:
                 st.warning("Sin operaciones — pocos datos o mercado lateral extremo.")
             else:
                 st.session_state.strategy_comparison = cmp
                 st.session_state.backtest_result = cmp["best"]
-                # Guardar en base de conocimiento
+                # Contexto de mercado sobre los mismos datos del backtest
                 cot_snap  = st.session_state.get("cot_data")
-                cal_snap  = st.session_state.get("economic_calendar") or []
-                kb = update_kb(cmp, cot=cot_snap, calendar=cal_snap)
+                cal_snap  = st.session_state.get("economic_calendar") or get_economic_calendar()
+                news_snap = st.session_state.get("current_news") or []
+                ctx_snap  = explain_market_context(bt_df, cot=cot_snap, calendar=cal_snap, news=news_snap)
+                st.session_state.market_context_reasons = ctx_snap
+                # Guardar en base de conocimiento (incluye contexto fundamental)
+                kb = update_kb(cmp, cot=cot_snap, calendar=cal_snap, market_ctx=ctx_snap)
                 st.success(
                     f"✅ Comparación completada. Mejor estrategia: **{cmp['best']['label']}** "
                     f"(PF={cmp['best']['profit_factor']} · WR={cmp['best']['winrate']}%)"
-                )
-                # Contexto de mercado en el mismo dato
-                news_snap = st.session_state.get("current_news") or []
-                st.session_state.market_context_reasons = explain_market_context(
-                    bt_df, cot=cot_snap, calendar=cal_snap, news=news_snap
                 )
 
 with bt_ctrl_r:
@@ -4051,27 +4382,45 @@ if cmp_result:
     # Base de conocimiento histórica
     kb = load_knowledge_base()
     if kb.get("runs"):
-        with st.expander(f"📚 Base de conocimiento ({len(kb['runs'])} backtests guardados)", expanded=False):
-            if kb.get("strategy_wins"):
-                st.markdown("**Historial de ganadores:**")
-                for s, cnt in sorted(kb["strategy_wins"].items(), key=lambda x: -x[1]):
-                    meta = _STRATEGY_META.get(s, {})
-                    st.markdown(f"- **{meta.get('label', s)}**: ganó {cnt} vez/veces")
+        _kb_total_runs = len(kb["runs"])
+        _kb_sig_stats  = kb.get("signal_stats", {})
+        with st.expander(f"📚 Base de conocimiento ({_kb_total_runs} backtests · señales evaluadas)", expanded=False):
+            _col_kb1, _col_kb2 = st.columns(2)
+            with _col_kb1:
+                if kb.get("strategy_wins"):
+                    st.markdown("**Ranking histórico de estrategias:**")
+                    for s, cnt in sorted(kb["strategy_wins"].items(), key=lambda x: -x[1]):
+                        meta = _STRATEGY_META.get(s, {})
+                        st.markdown(f"- **{meta.get('label', s)}**: nº1 en {cnt} backtest(s)")
+            with _col_kb2:
+                if _kb_sig_stats:
+                    st.markdown("**Aciertos de señal KB por estrategia:**")
+                    for s, ss in sorted(_kb_sig_stats.items(), key=lambda x: -(x[1].get("correct",0))):
+                        ok = ss.get("correct", 0); ko = ss.get("wrong", 0)
+                        acc = f"{ok/(ok+ko)*100:.0f}%" if (ok+ko) > 0 else "—"
+                        meta = _STRATEGY_META.get(s, {})
+                        st.markdown(f"- **{meta.get('label',s)}**: {ok}✅ {ko}❌ → {acc}")
             hist_rows = []
             for run in reversed(kb["runs"][-15:]):
                 hist_rows.append({
-                    "Fecha":  run.get("ts","?")[:10],
+                    "Fecha":    run.get("ts","?")[:10],
                     "Ganadora": _STRATEGY_META.get(run.get("best",""), {}).get("label", run.get("best","?")),
-                    "PF":     run.get("pf","?"),
-                    "WR":     f"{run.get('wr','?')}%",
-                    "Ops":    run.get("total","?"),
-                    "NetPips":run.get("net_pips","?"),
-                    "COT":    run.get("cot_bias") or "—",
-                    "Eventos":run.get("events_high",0),
+                    "PF":       run.get("pf","?"),
+                    "WR":       f"{run.get('wr','?')}%",
+                    "Ops":      run.get("total","?"),
+                    "NetPips":  run.get("net_pips","?"),
+                    "COT":      run.get("cot_bias") or "—",
+                    "Eventos":  run.get("events_high",0),
                 })
             st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+            # Mostrar el "por qué" del último backtest
+            _last_run = kb["runs"][-1]
+            if _last_run.get("market_ctx"):
+                st.markdown("**Contexto fundamental del último backtest:**")
+                for _rc in _last_run["market_ctx"]:
+                    st.markdown(f"  - {_rc}")
 else:
-    st.info("Pulsa **'Comparar 4 Estrategias'** para encontrar la mejor estrategia en el año actual.")
+    st.info("Pulsa **'Comparar 14 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
 
 # ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
 st.markdown("---")
@@ -4370,7 +4719,7 @@ st.markdown("---")
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
 # ── Auto-rerun (Streamlit-nativo, preserva session_state) ─────────────────
-# Siempre se ejecuta cuando auto-refresh está activo (se controla con sleep corto).
+# Sleep inteligente: no recargar cada segundo — solo cuando sea necesario.
 # El análisis pesado solo corre cuando elapsed >= refresh_secs (should_auto_refresh).
 if refresh_secs > 0:
     now = time.time()
@@ -4379,8 +4728,14 @@ if refresh_secs > 0:
     remaining_secs = max(0.0, refresh_secs - elapsed)
     m, s = divmod(int(remaining_secs), 60)
     st.markdown(f"🔄 Próxima actualización en **{m:02d}:{s:02d}**")
-    exec_time = time.time() - _APP_RERUN_START
-    sleep_t = max(0.5, min(1.0, remaining_secs)) if remaining_secs > 0 else 1.0
-    sleep_t = max(0.5, sleep_t - max(0.0, exec_time - 0.5))
+    # Smart sleep: reducir reruns innecesarios que causan recarga prematura visual
+    if remaining_secs > 30:
+        sleep_t = 10.0   # rerun cada 10s cuando queda tiempo
+    elif remaining_secs > 10:
+        sleep_t = 5.0    # rerun cada 5s cuando se acerca
+    elif remaining_secs > 2:
+        sleep_t = 2.0    # rerun cada 2s en los últimos 10s
+    else:
+        sleep_t = max(0.3, remaining_secs)  # segundos finales exactos
     time.sleep(sleep_t)
     st.rerun()
