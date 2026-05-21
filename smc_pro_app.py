@@ -1296,59 +1296,99 @@ def detect_liquidity_levels(df):
 # SCORE DE CONFLUENCIA
 # ============================================
 def calculate_confluence_score(signal, consensus, dxy_dir, session,
-                                vol_spikes, liq_levels, delta=None):
+                                vol_spikes, liq_levels, delta=None,
+                                cot=None, trend_strength=None):
     score = 0
     reasons = []
     direction = signal.get("direction")
 
-    # Técnico 35pts
+    # ── Ventana horaria: requisito duro ──────────────────────────────────
+    in_window = signal.get("in_trading_window", True)
+    if not in_window:
+        win_lbl = signal.get("window_label", "fuera de horario")
+        reasons.append(f"⛔ FUERA DE HORARIO — {win_lbl} (NO OPERAR)")
+        return 0, reasons   # Score 0 fuerza si estamos fuera de ventana
+
+    # ── Técnico multi-TF: 30 pts ─────────────────────────────────────────
     tfs = signal.get("timeframes", {})
     aligned = sum(
         1 for a in tfs.values()
         if (direction == "LONG"  and a.get("signal") == "COMPRA") or
            (direction == "SHORT" and a.get("signal") == "VENTA")
     )
-    tf_score = min(int(aligned / max(len(tfs), 1) * 35), 35)
+    tf_score = min(int(aligned / max(len(tfs), 1) * 30), 30)
     score += tf_score
     reasons.append(f"📊 Técnico: {aligned}/{len(tfs)} TF alineados (+{tf_score})")
 
-    # DXY 15pts
+    # ── ADX/Fuerza de tendencia: 10 pts ──────────────────────────────────
+    if trend_strength:
+        adx_v = trend_strength.get("adx", 0)
+        ts_dir = trend_strength.get("tendencia", "")
+        if adx_v >= 30:
+            score += 10; reasons.append(f"📈 ADX {adx_v:.0f} — tendencia FUERTE (+10)")
+        elif adx_v >= 20:
+            score += 6;  reasons.append(f"📈 ADX {adx_v:.0f} — tendencia moderada (+6)")
+        else:
+            reasons.append(f"📈 ADX {adx_v:.0f} — mercado LATERAL sin tendencia (+0)")
+        # Confirmación de dirección por ADX
+        if (direction == "LONG"  and ts_dir == "ALCISTA") or \
+           (direction == "SHORT" and ts_dir == "BAJISTA"):
+            score += 5; reasons.append(f"📈 ADX confirma dirección {ts_dir} (+5)")
+
+    # ── DXY: 12 pts ──────────────────────────────────────────────────────
     if (direction == "SHORT" and dxy_dir == "UP") or \
        (direction == "LONG"  and dxy_dir == "DOWN"):
-        score += 15; reasons.append("💵 DXY confirma dirección (+15)")
+        score += 12; reasons.append("💵 DXY confirma dirección (+12)")
     elif dxy_dir == "LATERAL":
-        score += 5;  reasons.append("💵 DXY neutral (+5)")
+        score += 4;  reasons.append("💵 DXY neutral (+4)")
+    else:
+        reasons.append("💵 DXY en contra (+0)")
 
-    # Fundamental 10pts
+    # ── COT institucional: 10 pts ─────────────────────────────────────────
+    if cot:
+        cot_dir, cot_pts = interpret_cot_for_signal(cot)
+        if cot_dir == direction:
+            score += cot_pts
+            reasons.append(f"🏦 COT institucional confirma {direction} (+{cot_pts})")
+        elif cot_dir == "NEUTRAL":
+            reasons.append("🏦 COT neutral (+0)")
+        else:
+            reasons.append(f"🏦 COT en contra de {direction} (+0)")
+
+    # ── Fundamental: 8 pts ───────────────────────────────────────────────
     cons = consensus.get("consensus", "")
     if (direction == "LONG"  and "Bullish" in cons) or \
        (direction == "SHORT" and "Bearish" in cons):
-        score += 10; reasons.append("📰 Fundamental confirma (+10)")
+        score += 8; reasons.append("📰 Fundamental confirma (+8)")
     elif "Mixed" in cons:
-        score += 3;  reasons.append("📰 Fundamental mixto (+3)")
+        score += 2; reasons.append("📰 Fundamental mixto (+2)")
 
-    # Sesión 10pts
+    # ── Sesión óptima: 8 pts ─────────────────────────────────────────────
     if "Londres" in session or "NY" in session:
-        score += 10; reasons.append(f"🕐 Sesión óptima: {session} (+10)")
+        score += 8; reasons.append(f"🕐 Sesión óptima: {session} (+8)")
+    elif "Tokio" in session:
+        score += 3; reasons.append(f"🕐 Sesión Tokio — volatilidad media (+3)")
 
-    # Volumen spike 10pts
+    # ── Volumen spike: 8 pts ─────────────────────────────────────────────
     if vol_spikes:
-        score += 10; reasons.append("⚡ Spike de volumen detectado (+10)")
+        score += 8; reasons.append("⚡ Spike de volumen institucional (+8)")
 
-    # Delta volumen 10pts
+    # ── Delta volumen: 8 pts ─────────────────────────────────────────────
     if delta:
         if (direction == "LONG"  and delta["delta"] > 0) or \
            (direction == "SHORT" and delta["delta"] < 0):
-            score += 10
-            reasons.append(f"📦 Delta volumen confirma: {delta['bias']} ({delta['delta_pct']:+.1f}%) (+10)")
+            score += 8
+            reasons.append(f"📦 Delta volumen confirma: {delta['bias']} ({delta['delta_pct']:+.1f}%) (+8)")
         else:
-            reasons.append(f"📦 Delta volumen en contra: {delta['bias']} (+0)")
+            reasons.append(f"📦 Delta volumen en contra (+0)")
 
-    # Liquidez cercana 10pts
+    # ── Liquidez estructural: 9 pts ──────────────────────────────────────
     close_liq = [l for l in liq_levels if l["dist"] < 15]
     if close_liq:
-        score += 10
-        reasons.append(f"🎯 Liquidez cercana: {close_liq[0]['tipo']} (+10)")
+        fuerza = close_liq[0].get("fuerza", "MEDIA")
+        pts = 9 if fuerza == "MUY ALTA" else 6 if fuerza == "ALTA" else 4
+        score += pts
+        reasons.append(f"🎯 Liquidez {fuerza}: {close_liq[0]['tipo']} (+{pts})")
 
     return min(score, 100), reasons
 
@@ -1494,159 +1534,238 @@ def run_backtest(df, direction="LONG", sl_pips=17, tp_pips=34, max_candles=20):
 # BACKTEST COMPLETO — AÑO ANTERIOR
 # ============================================
 def get_backtest_data(tf="1h"):
-    """Descarga hasta 2 años de datos para backtest (máximo disponible en yfinance)."""
+    """Descarga datos para backtest. Intenta períodos largos con fallback a cortos."""
     yf = get_yf()
-    if yf:
-        try:
-            if tf in ("1h", "4h"):
-                df = yf.download("EURUSD=X", period="730d", interval="1h",
+    if not yf:
+        return pd.DataFrame()
+    # Para 1h yfinance soporta hasta ~60 días de forma fiable en la API gratuita.
+    # Descargamos varios bloques de 60d y los concatenamos para obtener hasta ~1 año.
+    if tf in ("1h", "4h"):
+        from datetime import date, timedelta as _td
+        frames = []
+        end = datetime.now()
+        for chunk in range(6):  # 6 bloques de ~60d = ~1 año
+            start = end - _td(days=59)
+            try:
+                df_chunk = yf.download(
+                    "EURUSD=X",
+                    start=start.strftime("%Y-%m-%d"),
+                    end=end.strftime("%Y-%m-%d"),
+                    interval="1h",
+                    progress=False, auto_adjust=True
+                )
+                df_chunk = flatten_columns(df_chunk)
+                if not df_chunk.empty:
+                    frames.append(df_chunk)
+            except Exception as e:
+                logging.warning(f"Backtest chunk {chunk}: {e}")
+            end = start - _td(days=1)
+        if not frames:
+            return pd.DataFrame()
+        df = pd.concat(frames).sort_index()
+        df = df[~df.index.duplicated(keep="first")]
+        if tf == "4h":
+            df = df.resample("4h").agg({
+                "Open": "first", "High": "max",
+                "Low": "min", "Close": "last", "Volume": "sum"
+            }).dropna()
+        return df
+    else:
+        for period in ["2y", "1y", "6mo"]:
+            try:
+                df = yf.download("EURUSD=X", period=period, interval="1d",
                                  progress=False, auto_adjust=True)
                 df = flatten_columns(df)
-                if not df.empty and tf == "4h":
-                    df = df.resample("4h").agg({
-                        "Open": "first", "High": "max",
-                        "Low": "min", "Close": "last", "Volume": "sum"
-                    }).dropna()
-            else:
-                df = yf.download("EURUSD=X", period="730d", interval="1d",
-                                 progress=False, auto_adjust=True)
-                df = flatten_columns(df)
-            return df
-        except Exception as e:
-            logging.warning(f"Backtest data error: {e}")
+                if not df.empty and len(df) > 50:
+                    return df
+            except Exception as e:
+                logging.warning(f"Backtest daily {period}: {e}")
     return pd.DataFrame()
 
 
-def run_full_backtest(df, sl_pips=SCALP_SL_PIPS, use_windows=True, utc_offset=2):
+def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
     """
-    Backtest completo: simula todas las entradas que haría el bot en el año anterior.
-    Señal: cruce EMA9/EMA21 + confirmación RSI + ventanas horarias opcionales.
+    Estrategia rentable con R:R 1:3 — objetivo: 40%+ win rate.
+    Lógica: solo entrar en mercados con tendencia (ADX>20), en retroceso
+    a EMA21 con alineacion de EMA50, confirmado por MACD+RSI.
+    Con 1:3 R:R, el break-even es solo 25% de win rate.
     """
-    if df.empty or len(df) < 50:
+    if df.empty or len(df) < 60:
         return None
 
-    close = df["Close"]
+    close = df["Close"].copy()
+    high  = df["High"].copy()
+    low   = df["Low"].copy()
+
+    # EMAs para tendencia y entrada
     ema9  = close.ewm(span=9,  adjust=False).mean()
     ema21 = close.ewm(span=21, adjust=False).mean()
-    delta_c = close.diff()
-    gain = delta_c.clip(lower=0).rolling(14).mean()
-    loss = (-delta_c.clip(upper=0)).rolling(14).mean()
+    ema50 = close.ewm(span=50, adjust=False).mean()
+
+    # RSI
+    dc   = close.diff()
+    gain = dc.clip(lower=0).rolling(14).mean()
+    loss = (-dc.clip(upper=0)).rolling(14).mean()
     rsi  = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
-    high, low = df["High"], df["Low"]
-    tr   = pd.concat([high - low,
-                      (high - close.shift()).abs(),
-                      (low  - close.shift()).abs()], axis=1).max(axis=1)
-    atr  = tr.rolling(14).mean()
 
-    trades    = []
-    equity    = [10000.0]
-    pip_value = 1.0          # $1 per pip for 0.01 lot on EURUSD
-    in_trade  = False
-    entry_price = direction = tp_price = sl_price = entry_idx = None
+    # MACD histogram
+    macd_line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+    macd_sig  = macd_line.ewm(span=9, adjust=False).mean()
+    hist      = macd_line - macd_sig
 
-    for i in range(25, len(df) - 1):
+    # ATR (14)
+    tr  = pd.concat([high - low,
+                     (high - close.shift()).abs(),
+                     (low  - close.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+
+    # ADX (14) — solo operar cuando ADX > 20 (mercado con tendencia)
+    hd, ld    = high.diff(), low.diff()
+    pdm = hd.where((hd > (-ld)) & (hd > 0), 0.0)
+    ndm = (-ld).where((-ld > hd) & (ld < 0), 0.0)
+    atr_s  = atr.replace(0, np.nan)
+    pdi    = 100 * pdm.rolling(14).mean() / atr_s
+    ndi    = 100 * ndm.rolling(14).mean() / atr_s
+    dx     = 100 * (pdi - ndi).abs() / (pdi + ndi).replace(0, np.nan)
+    adx    = dx.rolling(14).mean()
+
+    RR      = 3.0          # R:R objetivo 1:3
+    pip_val = 1.0          # $1/pip para 0.01 lot EURUSD
+
+    trades   = []
+    equity   = [10000.0]
+    in_trade = False
+    ep = dr = tp_p = sl_p = ei = None   # entry_price, direction, tp, sl, entry_idx
+
+    for i in range(55, len(df) - 1):
+        # Filtro ventana horaria
         if use_windows and hasattr(df.index[i], "hour"):
-            h_spain = (df.index[i].hour + utc_offset) % 24
-            in_win  = (7 <= h_spain < 12) or (15 <= h_spain < 20)
-            if not in_win and not in_trade:
+            hs = (df.index[i].hour + utc_offset) % 24
+            if not ((7 <= hs < 12) or (15 <= hs < 20)) and not in_trade:
                 continue
 
-        e9  = float(ema9.iloc[i]);  e21  = float(ema21.iloc[i])
-        e9p = float(ema9.iloc[i-1]); e21p = float(ema21.iloc[i-1])
-        r   = float(rsi.iloc[i]) if not np.isnan(rsi.iloc[i]) else 50.0
-        atr_val = float(atr.iloc[i]) if not np.isnan(atr.iloc[i]) else PIP * 10
+        c    = float(close.iloc[i])
+        e9   = float(ema9.iloc[i]);  e21  = float(ema21.iloc[i])
+        e50  = float(ema50.iloc[i])
+        r    = float(rsi.iloc[i])   if not np.isnan(rsi.iloc[i])  else 50.0
+        hv   = float(hist.iloc[i])  if not np.isnan(hist.iloc[i]) else 0.0
+        av   = float(atr.iloc[i])   if not np.isnan(atr.iloc[i])  else PIP * 12
+        adxv = float(adx.iloc[i])   if not np.isnan(adx.iloc[i])  else 0.0
 
-        # Use ATR-based SL/TP when possible (min sl_pips, max 20 pips)
-        sl_use = max(min(atr_val / PIP * 1.2, 20), sl_pips)
-        tp_use = sl_use * 2.2
+        # SL dinámico: 1.2x ATR, mínimo 8p, máximo 18p
+        sl_d = max(min(av * 1.2, PIP * 18), PIP * 8)
+        tp_d = sl_d * RR
 
+        # ── Gestionar trade abierto ───────────────────────────────────────
         if in_trade:
-            h_c = float(high.iloc[i]); l_c = float(low.iloc[i])
-            if direction == "LONG":
-                if l_c <= sl_price:
-                    pnl = -sl_use * pip_value
+            hc = float(high.iloc[i]); lc = float(low.iloc[i])
+            sl_pips_real = sl_d / PIP; tp_pips_real = tp_d / PIP
+            if dr == "LONG":
+                if lc <= sl_p:
+                    pnl = -sl_pips_real * pip_val
                     equity.append(equity[-1] + pnl)
-                    trades.append({"dir": "LONG", "outcome": "SL", "pips": -sl_use,
-                                   "pnl": pnl, "time": str(df.index[entry_idx])[:16]})
+                    trades.append({"dir": "LONG", "outcome": "SL",
+                                   "pips": round(-sl_pips_real, 1), "pnl": round(pnl, 2),
+                                   "time": str(df.index[ei])[:16]})
                     in_trade = False
-                elif h_c >= tp_price:
-                    pnl = tp_use * pip_value
+                elif hc >= tp_p:
+                    pnl = tp_pips_real * pip_val
                     equity.append(equity[-1] + pnl)
-                    trades.append({"dir": "LONG", "outcome": "TP", "pips": tp_use,
-                                   "pnl": pnl, "time": str(df.index[entry_idx])[:16]})
+                    trades.append({"dir": "LONG", "outcome": "TP",
+                                   "pips": round(tp_pips_real, 1), "pnl": round(pnl, 2),
+                                   "time": str(df.index[ei])[:16]})
                     in_trade = False
             else:
-                if h_c >= sl_price:
-                    pnl = -sl_use * pip_value
+                if hc >= sl_p:
+                    pnl = -sl_pips_real * pip_val
                     equity.append(equity[-1] + pnl)
-                    trades.append({"dir": "SHORT", "outcome": "SL", "pips": -sl_use,
-                                   "pnl": pnl, "time": str(df.index[entry_idx])[:16]})
+                    trades.append({"dir": "SHORT", "outcome": "SL",
+                                   "pips": round(-sl_pips_real, 1), "pnl": round(pnl, 2),
+                                   "time": str(df.index[ei])[:16]})
                     in_trade = False
-                elif l_c <= tp_price:
-                    pnl = tp_use * pip_value
+                elif lc <= tp_p:
+                    pnl = tp_pips_real * pip_val
                     equity.append(equity[-1] + pnl)
-                    trades.append({"dir": "SHORT", "outcome": "TP", "pips": tp_use,
-                                   "pnl": pnl, "time": str(df.index[entry_idx])[:16]})
+                    trades.append({"dir": "SHORT", "outcome": "TP",
+                                   "pips": round(tp_pips_real, 1), "pnl": round(pnl, 2),
+                                   "time": str(df.index[ei])[:16]})
                     in_trade = False
             continue
 
-        # Cruce alcista: EMA9 cruza arriba EMA21, RSI no sobrecomprado
-        if e9 > e21 and e9p <= e21p and r < 68:
-            entry_price = float(close.iloc[i])
-            direction   = "LONG"
-            tp_price    = entry_price + tp_use * PIP
-            sl_price    = entry_price - sl_use * PIP
-            in_trade    = True; entry_idx = i
-        # Cruce bajista: EMA9 cruza abajo EMA21, RSI no sobrevendido
-        elif e9 < e21 and e9p >= e21p and r > 32:
-            entry_price = float(close.iloc[i])
-            direction   = "SHORT"
-            tp_price    = entry_price - tp_use * PIP
-            sl_price    = entry_price + sl_use * PIP
-            in_trade    = True; entry_idx = i
+        # ── Condiciones de entrada ────────────────────────────────────────
+        trending    = adxv > 20
+        min_atr     = av > PIP * 6    # Evitar mercados sin movimiento
 
-    # Cerrar trade abierto al final del dataset
-    if in_trade and entry_price is not None:
-        last_p  = float(close.iloc[-1])
-        pips_cl = (last_p - entry_price) / PIP if direction == "LONG" else (entry_price - last_p) / PIP
-        pnl_cl  = pips_cl * pip_value
-        equity.append(equity[-1] + pnl_cl)
-        trades.append({"dir": direction, "outcome": "OPEN",
-                       "pips": round(pips_cl, 1), "pnl": round(pnl_cl, 2),
-                       "time": str(df.index[entry_idx])[:16]})
+        # TENDENCIA ALCISTA: EMA9 > EMA21 > EMA50 (alineacion completa)
+        bull_align  = e9 > e21 > e50
+        # RETROCESO a zona EMA21 (precio cerca EMA21, no más lejos que 0.5 ATR)
+        near_e21_up = 0 <= (c - e21) < av * 0.5
+        # ENTRADA LONG: tendencia alcista + pullback a EMA21 + MACD positivo + RSI 38-65
+        if (bull_align and near_e21_up and trending and min_atr and
+                hv > 0 and 38 <= r <= 65):
+            prev_c = float(close.iloc[i - 1])
+            if c > prev_c:   # Confirmacion: vela alcista tras pullback
+                ep = c;  dr = "LONG"
+                tp_p = c + tp_d;  sl_p = c - sl_d
+                in_trade = True; ei = i
+
+        # TENDENCIA BAJISTA: EMA9 < EMA21 < EMA50
+        bear_align   = e9 < e21 < e50
+        near_e21_dn  = 0 <= (e21 - c) < av * 0.5
+        # ENTRADA SHORT: tendencia bajista + rally a EMA21 + MACD negativo + RSI 35-62
+        elif (bear_align and near_e21_dn and trending and min_atr and
+              hv < 0 and 35 <= r <= 62):
+            prev_c = float(close.iloc[i - 1])
+            if c < prev_c:   # Confirmacion: vela bajista tras rally
+                ep = c;  dr = "SHORT"
+                tp_p = c - tp_d;  sl_p = c + sl_d
+                in_trade = True; ei = i
+
+    # Cerrar trade abierto al final
+    if in_trade and ep is not None:
+        lp   = float(close.iloc[-1])
+        pcl  = (lp - ep) / PIP if dr == "LONG" else (ep - lp) / PIP
+        pnlc = pcl * pip_val
+        equity.append(equity[-1] + pnlc)
+        trades.append({"dir": dr, "outcome": "OPEN",
+                       "pips": round(pcl, 1), "pnl": round(pnlc, 2),
+                       "time": str(df.index[ei])[:16]})
 
     if not trades:
         return None
 
-    wins     = [t for t in trades if t["outcome"] == "TP"]
-    losses   = [t for t in trades if t["outcome"] == "SL"]
-    total    = len(trades)
-    winrate  = len(wins) / total * 100 if total > 0 else 0
-    net_pips = sum(t["pips"] for t in trades)
-    net_pnl  = sum(t["pnl"]  for t in trades)
+    wins    = [t for t in trades if t["outcome"] == "TP"]
+    losses  = [t for t in trades if t["outcome"] == "SL"]
+    total   = len(trades)
+    wr      = len(wins) / total * 100 if total > 0 else 0
+    np_     = sum(t["pips"] for t in trades)
+    npnl    = sum(t["pnl"]  for t in trades)
 
-    # Max drawdown
     peak = equity[0]; max_dd = 0.0
     for e in equity:
         if e > peak: peak = e
         dd = (peak - e) / peak * 100
         if dd > max_dd: max_dd = dd
 
-    gross_w = sum(t["pnl"] for t in wins)    if wins   else 0.0
-    gross_l = abs(sum(t["pnl"] for t in losses)) if losses else 1.0
-    pf      = round(gross_w / gross_l, 2) if gross_l > 0 else 0.0
+    gw = sum(t["pnl"] for t in wins)    if wins   else 0.0
+    gl = abs(sum(t["pnl"] for t in losses)) if losses else 1.0
+    pf = round(gw / max(gl, 0.01), 2)
+
+    be_winrate = round(1 / (1 + RR) * 100, 1)  # Break-even teórico con este R:R
 
     return {
         "total":         total,
         "wins":          len(wins),
         "losses":        len(losses),
-        "winrate":       round(winrate, 1),
-        "net_pips":      round(net_pips, 1),
-        "net_pnl":       round(net_pnl, 2),
+        "winrate":       round(wr, 1),
+        "be_winrate":    be_winrate,
+        "net_pips":      round(np_, 1),
+        "net_pnl":       round(npnl, 2),
         "max_dd":        round(max_dd, 1),
         "profit_factor": pf,
+        "rr_ratio":      RR,
         "equity":        equity,
-        "trades":        trades[-200:],
+        "trades":        trades[-300:],
     }
 
 # ============================================
@@ -1845,8 +1964,8 @@ def find_support_resistance(df, lookback=20):
 def calc_scalp_levels(price, direction, df=None, atr_pips=None, liq_levels=None):
     if price is None or direction not in ("LONG", "SHORT"):
         return None, None, None, None, None, []
-    # Ratio variable entre 1:2 y 1:3 para mayor flexibilidad
-    MIN_RATIO = 2.0 + np.random.random() * 1.0  # Entre 2.0 y 3.0
+    # Ratio mínimo 1:2.8 (objetivo 1:3) — necesario para ser rentable con 40% WR
+    MIN_RATIO = 2.8 + np.random.random() * 0.4  # Entre 2.8 y 3.2
     MAX_SL = 12  # SL máximo 12 pips
     support, resistance = None, None
     liquidity_warnings = []
@@ -2753,16 +2872,19 @@ else:
 
     st.markdown("---")
     st.subheader("�🔄 Auto-actualización")
+    _refresh_opts = ["Desactivado", "1 minuto", "2 minutos", "5 minutos", "10 minutos"]
+    if "refresh_select" not in st.session_state:
+        st.session_state["refresh_select"] = "Desactivado"
     refresh_option = st.selectbox(
         "Refrescar cada:",
-        ["Desactivado", "1 minuto", "2 minutos", "5 minutos", "10 minutos"],
-        index=0
+        _refresh_opts,
+        key="refresh_select"
     )
     refresh_map  = {"Desactivado": 0, "1 minuto": 60, "2 minutos": 120,
                     "5 minutos": 300, "10 minutos": 600}
     refresh_secs = refresh_map[refresh_option]
-    if refresh_secs > 0: st.success(f"✅ Cada {refresh_option}")
-    else:                st.info("Pulsa el botón para analizar")
+    if refresh_secs > 0: st.success(f"✅ Auto-refresh activo: cada {refresh_option}")
+    else:                st.info("Auto-refresh desactivado — pulsa el boton para analizar")
     st.markdown("---")
     st.caption("⚠️ Solo informativo. No es consejo financiero.")
 
@@ -2943,7 +3065,9 @@ if st.session_state.analysis_executed:
     st.markdown("---")
     st.subheader("🎯 Score de Confluencia")
     score, score_reasons = calculate_confluence_score(
-        signal, consensus, dxy_dir, session, vol_spikes, liq_levels, delta)
+        signal, consensus, dxy_dir, session, vol_spikes, liq_levels, delta,
+        cot=st.session_state.get("cot_data"),
+        trend_strength=trend_strength_1h)
     label, color = score_label(score)
     col_sc1, col_sc2 = st.columns([1, 2])
     with col_sc1:
@@ -3270,63 +3394,85 @@ else:
 
 # ── BACKTEST COMPLETO ──────────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("📊 Backtest Completo — Año Anterior (EMA9/21 + RSI + Ventanas Horarias)")
+st.subheader("📊 Backtest — Estrategia Pullback EMA + ADX + R:R 1:3")
+st.caption("Estrategia: solo entra en tendencia confirmada (ADX>20) + retroceso a EMA21 + MACD + RSI. R:R 1:3 — break-even con solo 25% win rate.")
 
-bt_col_left, bt_col_right = st.columns([1, 2])
+bt_col_left, bt_col_right = st.columns([1, 3])
 with bt_col_left:
-    bt_use_windows = st.checkbox("Respetar ventanas 7-12h / 15-20h", value=True, key="bt_windows")
-    bt_sl = st.slider("SL (pips)", 5, 25, SCALP_SL_PIPS, key="bt_sl")
-    if st.button("🚀 Ejecutar Backtest Año Anterior", type="primary", key="run_bt"):
-        with st.spinner("Descargando hasta 2 años de datos EURUSD 1h..."):
+    bt_use_windows = st.checkbox("Solo ventanas 7-12h / 15-20h", value=True, key="bt_windows")
+    if st.button("🚀 Ejecutar Backtest (~1 año)", type="primary", key="run_bt"):
+        with st.spinner("Descargando datos EURUSD 1h (hasta 1 año)..."):
             bt_df = get_backtest_data("1h")
         if bt_df.empty:
-            st.error("No se pudo obtener datos históricos para el backtest")
+            st.error("Sin datos historicos — verifica la conexion a internet")
         else:
-            with st.spinner(f"Simulando {len(bt_df)} velas..."):
+            n_candles = len(bt_df)
+            with st.spinner(f"Simulando {n_candles} velas ({n_candles//24} dias aprox)..."):
                 st.session_state.backtest_result = run_full_backtest(
-                    bt_df, sl_pips=bt_sl, use_windows=bt_use_windows
+                    bt_df, use_windows=bt_use_windows
                 )
             if not st.session_state.backtest_result:
-                st.warning("No se generaron operaciones suficientes")
+                st.warning("Sin operaciones generadas — pocos datos o filtros muy estrictos")
+            else:
+                st.success(f"✅ Backtest completado: {st.session_state.backtest_result['total']} operaciones simuladas")
 
 with bt_col_right:
     bt_res = st.session_state.backtest_result
     if bt_res:
-        b1, b2, b3, b4 = st.columns(4)
-        b1.metric("Total Ops", bt_res["total"])
-        b2.metric("Win Rate", f"{bt_res['winrate']}%",
-                  delta="✅ Rentable" if bt_res["winrate"] >= 50 else "❌ Mejorar")
-        b3.metric("Net Pips", f"{bt_res['net_pips']:+.1f}p",
-                  delta="✅" if bt_res["net_pips"] > 0 else "❌")
+        rr = bt_res.get("rr_ratio", 3.0)
+        be_wr = bt_res.get("be_winrate", 25.0)
+        wr = bt_res["winrate"]
+        rentable = wr >= be_wr and bt_res["profit_factor"] >= 1.0
+
+        # Métricas principales
+        b1, b2, b3, b4, b5 = st.columns(5)
+        b1.metric("Operaciones", bt_res["total"])
+        b2.metric("Win Rate", f"{wr}%",
+                  delta=f"{'✅ Rentable' if rentable else '⚠️ Marginal'} (BE={be_wr}%)")
+        b3.metric("R:R Objetivo", f"1:{rr:.0f}")
         b4.metric("Profit Factor", f"{bt_res['profit_factor']}x",
-                  delta="✅ >1" if bt_res["profit_factor"] >= 1 else "❌ <1")
-        b5, b6, b7 = st.columns(3)
-        b5.metric("Wins/Losses", f"{bt_res['wins']}W / {bt_res['losses']}L")
-        b6.metric("Max Drawdown", f"{bt_res['max_dd']}%",
-                  delta="✅ Bajo" if bt_res["max_dd"] < 15 else "⚠️ Alto")
-        b7.metric("Net P&L (sim)", f"${bt_res['net_pnl']:+.2f}")
+                  delta="✅ Positivo" if bt_res["profit_factor"] >= 1 else "❌ Negativo")
+        b5.metric("Net Pips", f"{bt_res['net_pips']:+.1f}p",
+                  delta="✅" if bt_res["net_pips"] > 0 else "❌")
 
-        # Equity curve
-        if bt_res["equity"] and len(bt_res["equity"]) > 1:
-            st.write("**Curva de capital (0.01 lot):**")
-            eq_df = pd.DataFrame({"Capital": bt_res["equity"]})
+        b6, b7, b8 = st.columns(3)
+        b6.metric("Wins / Losses", f"{bt_res['wins']}W / {bt_res['losses']}L")
+        b7.metric("Max Drawdown", f"{bt_res['max_dd']}%",
+                  delta="✅ Controlado" if bt_res["max_dd"] < 20 else "⚠️ Alto")
+        b8.metric("P&L simulado", f"${bt_res['net_pnl']:+.2f}",
+                  delta="(0.01 lot = $1/pip)")
+
+        if rentable:
+            st.success(f"✅ ESTRATEGIA RENTABLE — Win Rate {wr}% supera el break-even ({be_wr}%) con R:R 1:{rr:.0f}")
+        else:
+            st.warning(f"⚠️ Win Rate {wr}% — necesita >{be_wr}% para ser rentable con R:R 1:{rr:.0f}. Ajusta filtros.")
+
+        # Curva de capital
+        eq_list = bt_res.get("equity", [])
+        if len(eq_list) > 2:
+            st.write("**Curva de capital (capital inicial $10,000 / 0.01 lot):**")
+            eq_df = pd.DataFrame({"Capital ($)": eq_list})
             eq_df.index.name = "Trade #"
-            st.line_chart(eq_df)
+            st.line_chart(eq_df, height=200)
 
-        # Últimas operaciones
-        if bt_res["trades"]:
-            st.write("**Últimas 20 operaciones:**")
-            trades_df = pd.DataFrame(bt_res["trades"][-20:])
-            trades_df["resultado"] = trades_df["outcome"].map(
-                {"TP": "✅ TP", "SL": "❌ SL", "OPEN": "🔄 Abierta"})
-            st.dataframe(
-                trades_df[["time", "dir", "resultado", "pips", "pnl"]].rename(
-                    columns={"time": "Entrada", "dir": "Dir",
-                             "resultado": "Resultado", "pips": "Pips", "pnl": "P&L $"}),
-                use_container_width=True, hide_index=True
-            )
+        # Tabla de operaciones
+        raw_trades = bt_res.get("trades", [])
+        if raw_trades:
+            with st.expander(f"Ver todas las operaciones ({len(raw_trades)})", expanded=False):
+                td = pd.DataFrame(raw_trades)
+                if "outcome" in td.columns:
+                    td["Resultado"] = td["outcome"].map(
+                        {"TP": "✅ TP", "SL": "❌ SL", "OPEN": "🔄 Abierta"})
+                cols_show = [c for c in ["time", "dir", "Resultado", "pips", "pnl"] if c in td.columns]
+                st.dataframe(
+                    td[cols_show].rename(columns={
+                        "time": "Entrada", "dir": "Direccion",
+                        "pips": "Pips", "pnl": "P&L $"
+                    }),
+                    use_container_width=True, hide_index=True
+                )
     else:
-        st.info("Pulsa 'Ejecutar Backtest' para ver los resultados del año anterior")
+        st.info("Pulsa 'Ejecutar Backtest' para simular ~1 año de operaciones con la estrategia actual")
 
 # ── BOT AUTOMÁTICO (SIEMPRE VISIBLE) ───────────────────────────────────────────
 st.markdown("---")
