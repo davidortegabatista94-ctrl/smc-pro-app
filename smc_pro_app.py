@@ -4721,16 +4721,35 @@ st.info(
 st.markdown("---")
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
-# ── Auto-rerun (Streamlit-nativo, preserva session_state) ─────────────────
-# IMPORTANTE: time.sleep() > 2s bloquea el WebSocket de Streamlit, congela la UI
-# y causa desconexión del navegador. Siempre usar <= 2s para mantener el heartbeat.
-# El análisis pesado está protegido por el guard elapsed >= refresh_secs.
+# ── Auto-rerun: timer limpio sin time.sleep() ─────────────────────────────
+# SOLUCIÓN DEFINITIVA:
+#   time.sleep() bloquea el WebSocket de Streamlit → congelación / desconexión.
+#   @st.fragment(run_every="1s") usa un timer JavaScript puro:
+#     • re-renderiza SOLO este widget cada segundo
+#     • NO bloquea el hilo de Python
+#     • NO provoca parpadeo en el resto de la página
+#     • el contador baja exactamente 1s en cada tick
+#   Cuando llega a 0 dispara st.rerun() completo → el guard de análisis
+#   (elapsed >= refresh_secs * 0.95) lanza generate_signal() solo en ese momento.
 if refresh_secs > 0:
-    _now  = time.time()
-    _last = st.session_state.get("last_analysis_time") or _now
-    _remaining = max(0.0, refresh_secs - (_now - _last))
-    _m, _s = divmod(int(_remaining), 60)
-    st.markdown(f"🔄 Próxima actualización en **{_m:02d}:{_s:02d}**")
-    # Sleep 2s máx — suficiente para actualizar el contador sin congelar el WebSocket
-    time.sleep(min(2.0, max(0.3, _remaining)))
-    st.rerun()
+    st.session_state["_refresh_secs_live"] = refresh_secs
+
+    @st.fragment(run_every="1s")
+    def _auto_refresh_fragment():
+        _rs   = st.session_state.get("_refresh_secs_live", 0)
+        _last = st.session_state.get("last_analysis_time")
+        _now  = time.time()
+        # Si no hay timestamp aún (primera carga sin análisis previo) forzar rerun
+        if not _last or _rs <= 0:
+            st.rerun()
+            return
+        _rem = max(0.0, _rs - (_now - _last))
+        _m, _s = divmod(int(_rem), 60)
+        st.markdown(f"🔄 Próxima actualización en **{_m:02d}:{_s:02d}**")
+        if _rem <= 0:
+            st.rerun()   # full rerun → activa should_auto_refresh → análisis
+
+    _auto_refresh_fragment()
+else:
+    # Auto-refresh desactivado: limpiar el valor para que el fragment pare si quedó activo
+    st.session_state["_refresh_secs_live"] = 0
