@@ -1813,21 +1813,40 @@ def update_kb(comparison_result, cot=None, calendar=None, market_ctx=None):
     return kb
 
 
-def kb_record_pending_signal(direction, price, strategy, reason):
-    """Guarda la señal actual para evaluarla en el siguiente ciclo de análisis."""
+def kb_record_pending_signal(direction, price, strategy, reason, df=None, cot=None, calendar=None):
+    """Guarda la señal actual con contexto técnico+fundamental para evaluarla después."""
     kb = load_knowledge_base()
+
+    context = {}
+    if df is not None and not df.empty:
+        try:
+            regime, regime_lbl, regime_details = detect_market_regime(df, calendar)
+            context["regime"]     = regime
+            context["regime_lbl"] = regime_lbl
+            context["rsi"]        = regime_details.get("rsi")
+            context["atr_pips"]   = regime_details.get("atr_pips")
+            context["high_vol"]   = regime_details.get("high_vol", False)
+            context["news_risk"]  = regime_details.get("news_risk", "low")
+            if "minutes_to_news" in regime_details:
+                context["minutes_to_news"] = regime_details["minutes_to_news"]
+        except Exception:
+            pass
+    if cot:
+        context["cot_bias"] = cot.get("bias", "neutral")
+
     kb["pending_signal"] = {
-        "ts": datetime.now().isoformat()[:19],
+        "ts":        datetime.now().isoformat()[:19],
         "direction": direction,
-        "price": price,
-        "strategy": strategy,
-        "reason": reason,
+        "price":     price,
+        "strategy":  strategy,
+        "reason":    reason,
+        "context":   context,
     }
     save_knowledge_base(kb)
 
 
 def kb_evaluate_and_learn(current_price):
-    """Compara la señal pendiente con el precio actual y actualiza las estadísticas."""
+    """Compara señal pendiente con precio actual y actualiza estadísticas con contexto."""
     kb = load_knowledge_base()
     pending = kb.get("pending_signal")
     if not pending or pending.get("direction") == "NO TRADE":
@@ -1835,18 +1854,38 @@ def kb_evaluate_and_learn(current_price):
     direction   = pending["direction"]
     entry_price = pending.get("price")
     strategy    = pending.get("strategy", "unknown")
+    context     = pending.get("context", {})
     if entry_price is None or current_price is None:
         return kb
     move_pips = (current_price - entry_price) / 0.0001
     if direction == "LONG":
-        correct = move_pips > 3    # al menos 3 pips en la dirección correcta
+        correct = move_pips > 3
     elif direction == "SHORT":
         correct = move_pips < -3
     else:
         return kb
+    outcome_key = "correct" if correct else "wrong"
+
     stats = kb.get("signal_stats", {})
-    s = stats.get(strategy, {"correct": 0, "wrong": 0})
-    s["correct" if correct else "wrong"] += 1
+    s = stats.get(strategy, {"correct": 0, "wrong": 0, "by_regime": {}, "by_news_risk": {}})
+    s[outcome_key] = s.get(outcome_key, 0) + 1
+
+    # Desglose por régimen de mercado
+    regime = context.get("regime", "unknown")
+    by_regime = s.get("by_regime", {})
+    r_s = by_regime.get(regime, {"correct": 0, "wrong": 0})
+    r_s[outcome_key] = r_s.get(outcome_key, 0) + 1
+    by_regime[regime] = r_s
+    s["by_regime"] = by_regime
+
+    # Desglose por riesgo de noticias
+    news_risk = context.get("news_risk", "low")
+    by_news = s.get("by_news_risk", {})
+    n_s = by_news.get(news_risk, {"correct": 0, "wrong": 0})
+    n_s[outcome_key] = n_s.get(outcome_key, 0) + 1
+    by_news[news_risk] = n_s
+    s["by_news_risk"] = by_news
+
     stats[strategy] = s
     kb["signal_stats"] = stats
     kb.pop("pending_signal", None)
@@ -1994,6 +2033,218 @@ def explain_market_context(df, cot=None, calendar=None, news=None):
             )
 
     return reasons
+
+
+# ── Detección de régimen de mercado ─────────────────────────────────────────
+def detect_market_regime(df, calendar=None):
+    """
+    Clasifica el mercado actual: trending_bull, trending_bear, ranging,
+    volatile, volatile_trend, pre_news.
+    Devuelve (regime_key, regime_label, details_dict).
+    """
+    if df.empty or len(df) < 50:
+        return "unknown", "Desconocido", {}
+
+    close = df["Close"]
+    high  = df["High"]
+    low   = df["Low"]
+    c     = float(close.iloc[-1])
+    PIP   = 0.0001
+
+    e9  = float(close.ewm(span=9,  adjust=False).mean().iloc[-1])
+    e21 = float(close.ewm(span=21, adjust=False).mean().iloc[-1])
+    e50 = float(close.ewm(span=50, adjust=False).mean().iloc[-1])
+
+    dc   = close.diff()
+    gain = dc.clip(lower=0).rolling(14).mean()
+    loss = (-dc.clip(upper=0)).rolling(14).mean()
+    rsi  = float((100 - 100 / (1 + gain / loss.replace(0, np.nan))).iloc[-1])
+    if np.isnan(rsi):
+        rsi = 50.0
+
+    tr = pd.concat([
+        high - low,
+        (high - close.shift()).abs(),
+        (low  - close.shift()).abs(),
+    ], axis=1).max(axis=1)
+    atr14  = float(tr.rolling(14).mean().iloc[-1]) / PIP
+    atr_avg = float(tr.rolling(50).mean().iloc[-1]) / PIP if len(tr) >= 50 else atr14
+    high_vol = atr14 > atr_avg * 1.3
+
+    ema_spread = abs(e9 - e50) / (PIP * 10)   # "spread" en unidades de 10 pips
+    trending   = ema_spread > 3.0
+    bull       = e9 > e21 > e50
+    bear       = e9 < e21 < e50
+
+    # Riesgo de noticias
+    news_risk        = "low"
+    minutes_to_news  = None
+    if calendar:
+        now_utc = datetime.utcnow()
+        high_ev = [e for e in calendar
+                   if e.get("impact", "").upper() == "HIGH"
+                   and e.get("currency", "") in ("EUR", "USD")]
+        best_delta = None
+        for ev in high_ev:
+            try:
+                ev_dt = datetime.strptime(str(ev.get("date", ""))[:16], "%Y-%m-%dT%H:%M")
+                dm = (ev_dt - now_utc).total_seconds() / 60
+                if -30 <= dm <= 120:
+                    if best_delta is None or abs(dm) < abs(best_delta):
+                        best_delta = dm
+            except Exception:
+                pass
+        if best_delta is not None:
+            minutes_to_news = int(best_delta)
+            news_risk = "high" if -30 <= best_delta <= 60 else "medium"
+
+    # Clasificación
+    if news_risk == "high":
+        regime, lbl = "pre_news",       "Riesgo Noticias — Precaución"
+    elif high_vol and trending:
+        regime, lbl = "volatile_trend", "Tendencia Explosiva (alta volatilidad)"
+    elif trending and bull:
+        regime, lbl = "trending_bull",  "Tendencia Alcista"
+    elif trending and bear:
+        regime, lbl = "trending_bear",  "Tendencia Bajista"
+    elif high_vol:
+        regime, lbl = "volatile",       "Volatilidad Alta (sin tendencia clara)"
+    else:
+        regime, lbl = "ranging",        "Mercado Lateral / Rango"
+
+    details = {
+        "regime":      regime,
+        "rsi":         round(rsi, 1),
+        "atr_pips":    round(atr14, 1),
+        "atr_avg":     round(atr_avg, 1),
+        "high_vol":    high_vol,
+        "trending":    trending,
+        "bull":        bull,
+        "bear":        bear,
+        "news_risk":   news_risk,
+        "ema_spread":  round(ema_spread, 1),
+    }
+    if minutes_to_news is not None:
+        details["minutes_to_news"] = minutes_to_news
+
+    return regime, lbl, details
+
+
+# ── Afinidad de estrategias por régimen de mercado ───────────────────────────
+_STRATEGY_REGIME_AFFINITY = {
+    "ema_trend":           ["trending_bull", "trending_bear", "volatile_trend"],
+    "ema_crossover":       ["trending_bull", "trending_bear", "volatile_trend"],
+    "triple_ema":          ["volatile_trend", "trending_bull", "trending_bear"],
+    "ema_ribbon":          ["trending_bull", "trending_bear"],
+    "macd_cross":          ["trending_bull", "trending_bear", "volatile_trend"],
+    "rsi_reversion":       ["trending_bull", "trending_bear"],
+    "rsi_50_cross":        ["ranging", "trending_bull", "trending_bear"],
+    "stochastic_trend":    ["ranging", "trending_bull"],
+    "bb_touch":            ["ranging"],
+    "keltner_touch":       ["ranging"],
+    "donchian_breakout":   ["volatile_trend", "trending_bull", "trending_bear"],
+    "supertrend":          ["trending_bull", "trending_bear", "volatile_trend"],
+    "market_structure_bo": ["trending_bull", "trending_bear", "volatile_trend"],
+    "momentum_breakout":   ["volatile_trend", "volatile"],
+    "aggressive_momentum": ["volatile_trend", "volatile"],
+    "meta_composite":      ["trending_bull", "trending_bear", "ranging", "volatile_trend"],
+}
+
+# Etiquetas de régimen en español para UI
+_REGIME_LABELS = {
+    "trending_bull":  "Tendencia Alcista",
+    "trending_bear":  "Tendencia Bajista",
+    "volatile_trend": "Tendencia Explosiva",
+    "volatile":       "Alta Volatilidad",
+    "ranging":        "Mercado Lateral",
+    "pre_news":       "Riesgo Noticias",
+    "unknown":        "Desconocido",
+}
+_REGIME_ICONS = {
+    "trending_bull":  "📈",
+    "trending_bear":  "📉",
+    "volatile_trend": "⚡",
+    "volatile":       "🌪️",
+    "ranging":        "↔️",
+    "pre_news":       "⚠️",
+    "unknown":        "❓",
+}
+
+
+def kb_best_strategy_for_conditions(df, cot=None, calendar=None):
+    """
+    Selecciona la mejor estrategia según régimen de mercado actual (técnico + fundamental).
+    Devuelve (strategy_key, regime_key, regime_label, regime_details, explanation_why).
+    """
+    kb     = load_knowledge_base()
+    regime, regime_lbl, regime_details = detect_market_regime(df, calendar)
+    stats  = kb.get("signal_stats", {})
+    wins   = kb.get("strategy_wins", {})
+    total_runs = len(kb.get("runs", []))
+
+    scores = {}
+    explanations = {}
+
+    for strat in _STRATEGY_META.keys():
+        score = 0.0
+        parts = []
+
+        # 1. Tasa de acierto global (0–40 pts)
+        s   = stats.get(strat, {})
+        ok  = s.get("correct", 0)
+        ko  = s.get("wrong", 0)
+        tot = ok + ko
+        if tot > 0:
+            wr = ok / tot
+            score += wr * 40
+            parts.append(f"{ok}/{tot} señales correctas ({wr*100:.0f}%)")
+
+        # 2. Tasa de acierto en el régimen actual (0–35 pts)
+        by_regime = s.get("by_regime", {})
+        r_s  = by_regime.get(regime, {})
+        r_ok = r_s.get("correct", 0)
+        r_ko = r_s.get("wrong", 0)
+        if r_ok + r_ko >= 2:
+            r_wr = r_ok / (r_ok + r_ko)
+            score += r_wr * 35
+            parts.append(f"En {regime_lbl}: {r_ok}/{r_ok+r_ko} ({r_wr*100:.0f}%)")
+        elif regime in _STRATEGY_REGIME_AFFINITY.get(strat, []):
+            score += 15  # bonus por afinidad de diseño
+            parts.append(f"Diseñada para {regime_lbl}")
+
+        # 3. Victorias en backtests (0–15 pts)
+        if total_runs > 0:
+            score += (wins.get(strat, 0) / total_runs) * 15
+
+        # 4. Alineación COT con dirección del régimen (0–10 pts)
+        if cot:
+            cot_bias = cot.get("bias", "neutral")
+            if cot_bias == "bullish" and regime in ("trending_bull", "volatile_trend"):
+                score += 10
+                parts.append("COT institucional alcista confirma dirección")
+            elif cot_bias == "bearish" and regime in ("trending_bear", "volatile_trend"):
+                score += 10
+                parts.append("COT institucional bajista confirma dirección")
+
+        scores[strat]       = score
+        explanations[strat] = parts
+
+    # Elegir mejor; fallback al mejor global si no hay datos suficientes
+    if any(v > 0 for v in scores.values()):
+        best = max(scores, key=scores.get)
+    else:
+        best = kb.get("best_strategy")
+
+    if best is None:
+        best = next(iter(_STRATEGY_META))
+
+    why_parts = explanations.get(best, [])
+    why = f"Seleccionada por régimen actual ({regime_lbl})"
+    if why_parts:
+        why += " — " + " · ".join(why_parts[:3])
+
+    return best, regime, regime_lbl, regime_details, why
+
 
 # ── Metadatos de estrategias ─────────────────────────────────────────────────
 _STRATEGY_META = {
@@ -3492,19 +3743,39 @@ def generate_signal():
         sig["price"], sig["direction"], df_1h, sig["atr_1h_pips"], liq_levels)
     sig.update({"tp": tp, "sl": sl, "rr": rr, "viable": viable, "risk_pips": risk_pips, "liquidity_warnings": liquidity_warnings})
 
-    # ── Señal KB: aplica la mejor estrategia conocida al mercado actual ──────
-    kb = load_knowledge_base()
-    best_strat = kb.get("best_strategy")
-    strat_wins = kb.get("strategy_wins", {})
+    # ── Señal KB: selecciona estrategia por régimen actual (técnico + fundamental) ──
+    kb          = load_knowledge_base()
+    strat_wins  = kb.get("strategy_wins", {})
+    _cot_sig    = None   # COT no disponible en generate_signal (viene del session_state en UI)
+    _cal_sig    = None
+    try:
+        _cal_sig = get_economic_calendar()
+    except Exception:
+        pass
+
     kb_direction, kb_reason = "NO TRADE", "Sin historial de backtest"
-    if best_strat and not df_1h.empty:
-        kb_direction, kb_reason = _live_strategy_signal(df_1h, best_strat)
-    sig["kb_best_strategy"]  = best_strat
-    sig["kb_direction"]      = kb_direction
-    sig["kb_reason"]         = kb_reason
-    sig["kb_strategy_wins"]  = strat_wins
-    sig["kb_runs"]           = len(kb.get("runs", []))
-    sig["kb_signal_stats"]   = kb.get("signal_stats", {})
+    best_strat = regime_key = regime_lbl = why_selection = None
+    regime_details = {}
+    if not df_1h.empty:
+        try:
+            best_strat, regime_key, regime_lbl, regime_details, why_selection = \
+                kb_best_strategy_for_conditions(df_1h, cot=_cot_sig, calendar=_cal_sig)
+        except Exception:
+            best_strat = kb.get("best_strategy")
+            why_selection = "Selección por histórico global"
+        if best_strat:
+            kb_direction, kb_reason = _live_strategy_signal(df_1h, best_strat)
+
+    sig["kb_best_strategy"]   = best_strat
+    sig["kb_direction"]       = kb_direction
+    sig["kb_reason"]          = kb_reason
+    sig["kb_strategy_wins"]   = strat_wins
+    sig["kb_runs"]            = len(kb.get("runs", []))
+    sig["kb_signal_stats"]    = kb.get("signal_stats", {})
+    sig["kb_regime"]          = regime_key
+    sig["kb_regime_label"]    = regime_lbl
+    sig["kb_regime_details"]  = regime_details
+    sig["kb_why_selection"]   = why_selection
     return sig
 
 # ============================================
@@ -3891,12 +4162,17 @@ if st.session_state.analysis_executed:
             except Exception:
                 pass
             # Guarda la nueva señal KB como pendiente para evaluarla en el próximo ciclo
-            _kb_dir = signal.get("kb_direction", "NO TRADE")
+            _kb_dir   = signal.get("kb_direction", "NO TRADE")
             _kb_strat = signal.get("kb_best_strategy") or "none"
             _kb_rsn   = signal.get("kb_reason", "")
             if _kb_dir != "NO TRADE":
                 try:
-                    kb_record_pending_signal(_kb_dir, _cur_price, _kb_strat, _kb_rsn)
+                    _cot_rec = st.session_state.get("cot_data")
+                    _cal_rec = st.session_state.get("economic_calendar") or get_economic_calendar()
+                    kb_record_pending_signal(
+                        _kb_dir, _cur_price, _kb_strat, _kb_rsn,
+                        df=df_1h, cot=_cot_rec, calendar=_cal_rec
+                    )
                 except Exception:
                     pass
 
@@ -3988,18 +4264,37 @@ if st.session_state.analysis_executed:
     c3.metric(f"{signal['sess_icon']} Sesión", signal["session"].split(" ")[0])
     c4.metric("⚡ Volatilidad",    signal["volatility"])
 
-    # ── Panel Inteligencia Adaptativa (KB + Señal Estrategia) ─────────────────
-    kb_dir   = signal.get("kb_direction", "NO TRADE")
-    kb_strat = signal.get("kb_best_strategy")
-    kb_rsn   = signal.get("kb_reason", "Sin historial")
-    kb_runs  = signal.get("kb_runs", 0)
-    kb_wins  = signal.get("kb_strategy_wins", {})
-    kb_stats = signal.get("kb_signal_stats", {})
+    # ── Panel Inteligencia Adaptativa (KB + Señal Estrategia + Régimen) ─────────
+    kb_dir          = signal.get("kb_direction", "NO TRADE")
+    kb_strat        = signal.get("kb_best_strategy")
+    kb_rsn          = signal.get("kb_reason", "Sin historial")
+    kb_runs         = signal.get("kb_runs", 0)
+    kb_wins         = signal.get("kb_strategy_wins", {})
+    kb_stats        = signal.get("kb_signal_stats", {})
+    kb_regime       = signal.get("kb_regime", "unknown")
+    kb_regime_lbl   = signal.get("kb_regime_label", "Desconocido")
+    kb_regime_det   = signal.get("kb_regime_details", {})
+    kb_why_sel      = signal.get("kb_why_selection", "")
     if kb_strat:
         st.markdown("---")
-        st.subheader("🧠 Señal Inteligente — Mejor Estrategia Histórica")
+        # Título con régimen actual
+        _regime_icon = _REGIME_ICONS.get(kb_regime, "❓")
+        st.subheader(f"🧠 Señal Inteligente — {_regime_icon} Régimen: {kb_regime_lbl}")
+
+        # Fila: régimen + stats de régimen
+        _r1, _r2, _r3, _r4 = st.columns(4)
+        _r1.metric("Régimen actual", f"{_regime_icon} {kb_regime_lbl}")
+        _r_s    = kb_stats.get(kb_strat, {}).get("by_regime", {}).get(kb_regime, {})
+        _r_ok   = _r_s.get("correct", 0)
+        _r_ko   = _r_s.get("wrong", 0)
+        _r_acc  = f"{_r_ok/(_r_ok+_r_ko)*100:.0f}%" if (_r_ok + _r_ko) > 0 else "Sin datos"
+        _r2.metric(f"Acierto en {kb_regime_lbl[:12]}", _r_acc)
+        _r3.metric("ATR actual (pips)", f"{kb_regime_det.get('atr_pips', '—')}")
+        _r4.metric("RSI actual", f"{kb_regime_det.get('rsi', '—')}")
+
+        # Señal principal
         meta_label = _STRATEGY_META.get(kb_strat, {}).get("label", kb_strat)
-        _kb_css = "sl" if kb_dir == "LONG" else ("ss" if kb_dir == "SHORT" else "sw")
+        _kb_css   = "sl" if kb_dir == "LONG" else ("ss" if kb_dir == "SHORT" else "sw")
         _kb_emoji = "🟢" if kb_dir == "LONG" else ("🔴" if kb_dir == "SHORT" else "⚪")
         _kb_txt   = "COMPRA" if kb_dir == "LONG" else ("VENTA" if kb_dir == "SHORT" else "SIN SETUP")
         st.markdown(
@@ -4008,14 +4303,41 @@ if st.session_state.analysis_executed:
             unsafe_allow_html=True
         )
         st.caption(f"💡 {kb_rsn}")
+        if kb_why_sel:
+            st.caption(f"📊 **Por qué esta estrategia:** {kb_why_sel}")
+
+        # Métricas globales de la estrategia
         _a1, _a2, _a3, _a4 = st.columns(4)
         _a1.metric("Backtests en KB", kb_runs)
-        _a2.metric("Veces nº1", kb_wins.get(kb_strat, 0))
+        _a2.metric("Veces nº1 global", kb_wins.get(kb_strat, 0))
         _strat_s = kb_stats.get(kb_strat, {})
-        _ok = _strat_s.get("correct", 0); _ko = _strat_s.get("wrong", 0)
+        _ok = _strat_s.get("correct", 0)
+        _ko = _strat_s.get("wrong", 0)
         _acc = f"{_ok/(_ok+_ko)*100:.0f}%" if (_ok + _ko) > 0 else "—"
-        _a3.metric("Aciertos señal", f"{_ok}✅ / {_ko}❌")
-        _a4.metric("Tasa acierto", _acc)
+        _a3.metric("Aciertos señal (global)", f"{_ok}✅ / {_ko}❌")
+        _a4.metric("Tasa acierto (global)", _acc)
+
+        # Tabla de aciertos por régimen para esta estrategia
+        _by_regime = _strat_s.get("by_regime", {})
+        if _by_regime:
+            with st.expander("📊 Rendimiento por régimen de mercado", expanded=False):
+                _rows = []
+                for _rk, _rv in _by_regime.items():
+                    _rok = _rv.get("correct", 0)
+                    _rko = _rv.get("wrong", 0)
+                    _rtot = _rok + _rko
+                    _rwr = f"{_rok/_rtot*100:.0f}%" if _rtot > 0 else "—"
+                    _rows.append({
+                        "Régimen": f"{_REGIME_ICONS.get(_rk,'❓')} {_REGIME_LABELS.get(_rk, _rk)}",
+                        "Señales": _rtot,
+                        "Correctas": _rok,
+                        "Erróneas": _rko,
+                        "Tasa acierto": _rwr,
+                    })
+                if _rows:
+                    import pandas as _pd_local
+                    st.dataframe(_pd_local.DataFrame(_rows), hide_index=True, use_container_width=True)
+
         # Contexto fundamental automático (por qué se mueve)
         _ctx = st.session_state.get("market_context_reasons")
         if _ctx:
