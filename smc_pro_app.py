@@ -5571,6 +5571,200 @@ st.info(
     f"**Sesión:** {session}  |  **DXY:** {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)"
 )
 
+
+# ── Trading Advisor AI ────────────────────────────────────────────────────────
+st.markdown("---")
+st.subheader("🧠 Trading Advisor AI — Compara tu Visión")
+st.caption("Cuéntame tu tesis. Analizo tu visión contra los backtests históricos (2008–hoy), posicionamiento institucional, técnico y fundamental.")
+
+import os as _os
+
+# API key: env var (Railway) o input de sesión
+_ant_key = _os.environ.get("ANTHROPIC_API_KEY", "").strip()
+if not _ant_key:
+    _ant_key = st.session_state.get("_advisor_key", "")
+if not _ant_key:
+    with st.expander("⚙️ Configurar API Key de Anthropic (solo la primera vez)", expanded=True):
+        _k_input = st.text_input(
+            "ANTHROPIC_API_KEY:",
+            type="password",
+            placeholder="sk-ant-...",
+            help="Obtén tu key en console.anthropic.com · O añádela como variable de entorno en Railway",
+            key="_advisor_key_field",
+        )
+        if _k_input:
+            st.session_state["_advisor_key"] = _k_input
+            _ant_key = _k_input
+            st.success("✅ Key guardada para esta sesión")
+        else:
+            st.info("📌 También puedes añadirla permanentemente en Railway → Settings → Variables → ANTHROPIC_API_KEY")
+
+# Inicializar historial
+if "advisor_chat" not in st.session_state:
+    st.session_state.advisor_chat = []
+
+
+def _advisor_context() -> str:
+    """Builds a rich snapshot of current app data for the AI system prompt."""
+    _lines = []
+    _s = signal if isinstance(signal, dict) else {}
+
+    _lines.append("=== DATOS EN TIEMPO REAL DE LA APP ===")
+    _lines.append(f"Par: EUR/USD")
+    _lines.append(f"Precio actual: {f'{price:.5f}' if price else 'N/A'}")
+    _lines.append(f"Señal: {_s.get('final_signal', 'NEUTRAL')} | Score: {score}/100 ({label})")
+    _lines.append(f"Señales alcistas: {_s.get('buy_signals', 0)} | Bajistas: {_s.get('sell_signals', 0)}")
+    if _s.get('entry'):
+        _lines.append(f"Setup sugerido: Entrada {_s.get('entry','?')} | SL {_s.get('stop_loss','?')} | TP {_s.get('take_profit','?')}")
+    if _s.get('regime'):
+        _lines.append(f"Régimen detectado: {_s.get('regime')}")
+    if _s.get('strategy'):
+        _lines.append(f"Estrategia activa: {_s.get('strategy')}")
+    _lines.append(f"Sesión activa: {session}")
+    _lines.append(f"DXY: {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%) — {'DXY sube → presión bajista EUR' if dxy_dir == 'UP' else 'DXY baja → presión alcista EUR' if dxy_dir == 'DOWN' else 'DXY neutro'}")
+
+    if delta:
+        _dir_d = "compradores dominan" if delta.get("delta", 0) > 0 else "vendedores dominan"
+        _lines.append(f"Delta de volumen: {delta.get('delta_pct', 0):+.1f}% ({_dir_d})")
+    if vol_spikes:
+        _lines.append(f"Spike de volumen: {vol_spikes[0].get('ratio', 0):.1f}x — posible movimiento institucional")
+    if poc:
+        _lines.append(f"POC (Volume Profile): {poc['precio']:.5f} — nivel de mayor liquidez")
+
+    # Fundamental
+    _c = consensus if isinstance(consensus, dict) else {}
+    if _c:
+        _lines.append(f"\n=== FUNDAMENTAL ===")
+        _lines.append(f"Consenso: {_c.get('consensus', 'N/A')} | Sentimiento ponderado: {_c.get('weighted_sentiment', 0):+.3f}")
+        _lines.append(f"Impacto medio noticias: {avg_impact:.0f}% | Fuentes procesadas: {total_sources}")
+
+    # Market context reasons
+    _reasons = st.session_state.get("market_context_reasons", [])
+    if _reasons:
+        _lines.append(f"\n=== RAZONES DETECTADAS POR LA APP ===")
+        for _r in _reasons[:10]:
+            _lines.append(f"  • {_r}")
+
+    # 1-year backtest
+    _cmp = st.session_state.get("strategy_comparison")
+    if _cmp:
+        _b = _cmp.get("best", {})
+        _lines.append(f"\n=== BACKTEST 1 AÑO ===")
+        _lines.append(f"Mejor estrategia: {_b.get('label', 'N/A')}")
+        _lines.append(f"  WR: {_b.get('winrate', 0)}% | PF: {_b.get('profit_factor', 0)}x | Pips netos: {_b.get('net_pips', 0):+.1f} | Max DD: {_b.get('max_dd', 0)}%")
+        _lines.append(f"  Operaciones: {_b.get('total', 0)} | Por qué funciona: {_b.get('why', 'N/A')}")
+        _lines.append(f"  Ventajas: {_b.get('pros', 'N/A')}")
+        _lines.append(f"  Limitaciones: {_b.get('cons', 'N/A')}")
+        _rs = _cmp.get("results", [])
+        if _rs:
+            _lines.append("  Ranking completo (1 año):")
+            for _ri, _r in enumerate(_rs[:6]):
+                _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
+                _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p netos | DD {_r.get('max_dd',0)}%")
+
+    # 2008 historical backtest
+    _lt = st.session_state.get("lt_comparison")
+    if _lt:
+        _b2 = _lt.get("best", {})
+        _lines.append(f"\n=== BACKTEST HISTÓRICO 2008–HOY (18+ AÑOS) ===")
+        _lines.append(f"Mejor estrategia histórica: {_b2.get('label', 'N/A')}")
+        _lines.append(f"  WR: {_b2.get('winrate', 0)}% | PF: {_b2.get('profit_factor', 0)}x | Pips netos: {_b2.get('net_pips', 0):+.1f} | Max DD: {_b2.get('max_dd', 0)}%")
+        _lines.append(f"  Operaciones en 18 años: {_b2.get('total', 0)} (incluye: crisis 2008, flash crash 2015, Brexit 2016, COVID 2020, subidas Fed 2022-23)")
+        _lt_rs = _lt.get("results", [])
+        if _lt_rs:
+            _lines.append("  Ranking histórico (todas las estrategias):")
+            for _ri, _r in enumerate(_lt_rs):
+                _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
+                _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p | DD {_r.get('max_dd',0)}%")
+
+    return "\n".join(_lines)
+
+
+def _advisor_call(user_msg: str, history: list, context: str, api_key: str) -> str:
+    """Sends user message to Claude and returns the advisor response."""
+    try:
+        import anthropic as _ant_mod
+    except ImportError:
+        return "⚠️ Paquete `anthropic` no instalado. Espera a que Railway redeploy con el nuevo requirements.txt."
+
+    _system = f"""Eres un Trading Advisor cuantitativo especializado en EUR/USD. Trabajas integrado en una app de trading que monitoriza el mercado en tiempo real y ha ejecutado backtests sobre 17 estrategias distintas desde 2008 hasta hoy (18+ años, incluyendo todas las crisis).
+
+{context}
+
+INSTRUCCIONES:
+El usuario compartirá su visión/tesis de trading. Tu misión es analizarla de forma objetiva contra los datos de la app y responder SIEMPRE con esta estructura:
+
+📊 **TU VISIÓN ENTENDIDA**
+Resumir brevemente lo que propone el usuario en 1-2 frases.
+
+✅ **POR QUÉ SÍ** (confluencias a favor)
+Lista de argumentos que respaldan su visión. Usa datos concretos del backtest histórico, posicionamiento institucional, contexto técnico (EMA/RSI/MACD), fundamental (BCE/Fed/macro) y la señal actual de la app. Cita profit factors y win rates cuando sean relevantes.
+
+❌ **POR QUÉ NO** (riesgos y contradicciones)
+Lista de argumentos en contra. Menciona estrategias que fallen en este contexto, drawdowns históricos relevantes, alertas de la app, niveles de resistencia/soporte, o contexto macro adverso.
+
+🎯 **VEREDICTO**
+Conclusión directa: ¿la visión del usuario confluye con los datos o los contradice? Indica nivel de convicción (ALTA/MEDIA/BAJA) y si procede, sugiere ajustes concretos (entrada, SL, TP, timing).
+
+REGLAS:
+- Responde en español
+- Sé cuantitativo y directo — cita los datos del backtest como evidencia
+- Máximo 400 palabras en total
+- Si los datos de la app aún no están cargados (N/A), indícalo y razona con lo que tengas"""
+
+    _messages = []
+    for _h in history[-8:]:
+        _messages.append({"role": _h["role"], "content": _h["content"]})
+    _messages.append({"role": "user", "content": user_msg})
+
+    try:
+        _client = _ant_mod.Anthropic(api_key=api_key)
+        _resp = _client.messages.create(
+            model="claude-opus-4-7",
+            max_tokens=1200,
+            system=_system,
+            messages=_messages,
+        )
+        return _resp.content[0].text
+    except Exception as _e:
+        return f"⚠️ Error al llamar a la API: {_e}"
+
+
+# Mostrar historial de conversación
+for _msg in st.session_state.advisor_chat:
+    _av = "👤" if _msg["role"] == "user" else "🧠"
+    with st.chat_message(_msg["role"], avatar=_av):
+        st.markdown(_msg["content"])
+
+# Input del chat
+_chat_prompt = st.chat_input(
+    "Ej: Creo que el EUR/USD va a subir porque el BCE está hawkish y el DXY está cayendo..."
+)
+if _chat_prompt:
+    if not _ant_key:
+        st.error("⚠️ Configura la ANTHROPIC_API_KEY primero (ver configuración arriba).")
+    else:
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(_chat_prompt)
+        st.session_state.advisor_chat.append({"role": "user", "content": _chat_prompt})
+
+        with st.chat_message("assistant", avatar="🧠"):
+            with st.spinner("Analizando tu visión contra los datos históricos..."):
+                _ctx_snap  = _advisor_context()
+                _ai_answer = _advisor_call(
+                    _chat_prompt,
+                    st.session_state.advisor_chat[:-1],
+                    _ctx_snap,
+                    _ant_key,
+                )
+            st.markdown(_ai_answer)
+        st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})
+
+if st.session_state.advisor_chat:
+    if st.button("🗑️ Limpiar conversación", key="_advisor_clear"):
+        st.session_state.advisor_chat = []
+        st.rerun()
+
 st.markdown("---")
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
