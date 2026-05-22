@@ -99,11 +99,30 @@ def is_yf_available():
 
 logging.basicConfig(level=logging.WARNING)
 
-# ── Persistencia de backtests en disco ────────────────────────────────────────
+# ── Persistencia con PostgreSQL (+ fallback pickle si la DB no está lista) ────
 import pickle as _pickle
 _BT_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bt_cache.pkl")
 
+try:
+    import db as _db
+    _DB_OK = True
+except ImportError:
+    _DB_OK = False
+
 def _save_bt_cache(strategy_cmp, lt_cmp):
+    # DB primaria
+    if _DB_OK and strategy_cmp:
+        try:
+            _db.save_backtest("1year", strategy_cmp.get("results", []), strategy_cmp.get("best", {}))
+        except Exception:
+            pass
+    if _DB_OK and lt_cmp:
+        try:
+            _db.save_backtest("2008", lt_cmp.get("results", []), lt_cmp.get("best", {}),
+                              lt_cmp.get("n_bars", 0))
+        except Exception:
+            pass
+    # Pickle fallback
     try:
         with open(_BT_CACHE_PATH, "wb") as _f:
             _pickle.dump({"sc": strategy_cmp, "lt": lt_cmp}, _f, protocol=_pickle.HIGHEST_PROTOCOL)
@@ -111,6 +130,25 @@ def _save_bt_cache(strategy_cmp, lt_cmp):
         pass
 
 def _load_bt_cache():
+    result = {}
+    # Intentar DB primero
+    if _DB_OK:
+        try:
+            _sc = _db.load_backtest("1year")
+            if _sc:
+                result["sc"] = {"results": _sc["results"], "best": _sc["best"]}
+        except Exception:
+            pass
+        try:
+            _lt = _db.load_backtest("2008")
+            if _lt:
+                result["lt"] = {"results": _lt["results"], "best": _lt["best"],
+                                "n_bars": _lt["n_bars"]}
+        except Exception:
+            pass
+        if result:
+            return result
+    # Fallback pickle
     try:
         if os.path.exists(_BT_CACHE_PATH):
             with open(_BT_CACHE_PATH, "rb") as _f:
@@ -4310,6 +4348,27 @@ else:
     if refresh_secs > 0: st.success(f"✅ Auto-refresh activo: cada {refresh_option}")
     else:                st.info("Auto-refresh desactivado — pulsa el boton para analizar")
     st.markdown("---")
+    # ── Estado de la base de datos ────────────────────────────────────────────
+    st.subheader("🗄️ Base de Datos")
+    if _DB_OK:
+        try:
+            _db_alive = _db.is_connected()
+            if _db_alive:
+                st.success("✅ PostgreSQL conectada")
+                _ts = _db.trades_summary()
+                if _ts and _ts.get("total"):
+                    st.metric("Trades guardados", int(_ts["total"] or 0))
+                    st.metric("Win rate global", f"{float(_ts.get('winrate') or 0):.1f}%")
+                    st.metric("Net P&L", f"${float(_ts.get('net_pnl') or 0):+.2f}")
+                else:
+                    st.caption("Sin trades aún")
+            else:
+                st.warning("⚠️ DB no responde")
+        except Exception:
+            st.warning("⚠️ DB no disponible")
+    else:
+        st.info("DB no configurada")
+    st.markdown("---")
     st.caption("⚠️ Solo informativo. No es consejo financiero.")
 
 # ── Botón ─────────────────────────────────────────────────────────────────────
@@ -4967,8 +5026,23 @@ with bt_ctrl_l:
             else:
                 st.session_state.strategy_comparison = cmp
                 st.session_state.backtest_result = cmp["best"]
-                # Persistir en disco para sobrevivir recargas de página
+                # Persistir en DB + disco
                 _save_bt_cache(cmp, st.session_state.get("lt_comparison"))
+                if _DB_OK:
+                    try:
+                        _sig_snap = signal if isinstance(signal, dict) else {}
+                        _db.save_snapshot(
+                            price=price or 0,
+                            signal=_sig_snap.get("final_signal", "NEUTRAL"),
+                            score=score or 0,
+                            dxy_trend=dxy_trend or "",
+                            regime=_sig_snap.get("regime", ""),
+                            strategy=cmp["best"].get("strategy", ""),
+                            extra={"best_pf": cmp["best"].get("profit_factor", 0),
+                                   "best_wr": cmp["best"].get("winrate", 0)},
+                        )
+                    except Exception:
+                        pass
                 # Contexto de mercado sobre los mismos datos del backtest
                 cot_snap  = st.session_state.get("cot_data")
                 cal_snap  = st.session_state.get("economic_calendar") or get_economic_calendar()
@@ -5406,6 +5480,22 @@ if is_mt5_available() and mt5_connect():
                 if _ok:
                     st.success(f"🚀 Bot ejecutó trade: {_msg}")
                     st.session_state.bot_last_signal = _bot_signal.get("direction")
+                    # Persistir trade en DB
+                    if _DB_OK:
+                        try:
+                            _db.save_trade(
+                                direction=_bot_signal.get("direction", ""),
+                                entry_price=float(_bot_signal.get("entry", price or 0)),
+                                sl_price=float(_bot_signal.get("stop_loss", 0) or 0),
+                                tp_price=float(_bot_signal.get("take_profit", 0) or 0),
+                                outcome="OPEN",
+                                pips=0.0,
+                                pnl=0.0,
+                                strategy=_bot_signal.get("strategy", ""),
+                                score=_bot_score,
+                            )
+                        except Exception:
+                            pass
                     try:
                         send_telegram_alert(_bot_signal, _bot_score, definitive=True, reason=f"Bot auto: {_msg}")
                     except Exception:
@@ -5599,9 +5689,22 @@ if not _ant_key:
         else:
             st.info("📌 También puedes añadirla permanentemente en Railway → Settings → Variables → GROQ_API_KEY")
 
-# Inicializar historial
+# Generar session_id estable para esta sesión de navegador
+if "advisor_session_id" not in st.session_state:
+    import uuid as _uuid
+    st.session_state.advisor_session_id = str(_uuid.uuid4())
+
+# Inicializar historial: cargar desde DB si está disponible
 if "advisor_chat" not in st.session_state:
-    st.session_state.advisor_chat = []
+    if _DB_OK:
+        try:
+            st.session_state.advisor_chat = _db.load_chat_history(
+                st.session_state.advisor_session_id
+            )
+        except Exception:
+            st.session_state.advisor_chat = []
+    else:
+        st.session_state.advisor_chat = []
 
 
 def _advisor_context() -> str:
@@ -5747,6 +5850,11 @@ if _chat_prompt:
         with st.chat_message("user", avatar="👤"):
             st.markdown(_chat_prompt)
         st.session_state.advisor_chat.append({"role": "user", "content": _chat_prompt})
+        if _DB_OK:
+            try:
+                _db.save_chat_message(st.session_state.advisor_session_id, "user", _chat_prompt)
+            except Exception:
+                pass
 
         with st.chat_message("assistant", avatar="🧠"):
             with st.spinner("Analizando tu visión contra los datos históricos..."):
@@ -5759,9 +5867,19 @@ if _chat_prompt:
                 )
             st.markdown(_ai_answer)
         st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})
+        if _DB_OK:
+            try:
+                _db.save_chat_message(st.session_state.advisor_session_id, "assistant", _ai_answer)
+            except Exception:
+                pass
 
 if st.session_state.advisor_chat:
     if st.button("🗑️ Limpiar conversación", key="_advisor_clear"):
+        if _DB_OK:
+            try:
+                _db.clear_chat_history(st.session_state.advisor_session_id)
+            except Exception:
+                pass
         st.session_state.advisor_chat = []
         st.rerun()
 

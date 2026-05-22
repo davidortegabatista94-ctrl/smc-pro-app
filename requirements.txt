@@ -8,3 +8,4 @@ MetaTrader5>=5.0.0; sys_platform == "win32"
 textblob>=0.17.0
 streamlit-autorefresh>=0.0.1
 groq>=0.4.0
+psycopg2-binary>=2.9.0
