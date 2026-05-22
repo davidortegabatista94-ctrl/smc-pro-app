@@ -2725,6 +2725,8 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
     }
 
 _ALL_STRATEGIES = list(_STRATEGY_META.keys())
+_RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟",
+               "⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
 
 def run_strategy_comparison(df, use_windows=True, utc_offset=2):
     """Ejecuta las 17 estrategias sobre los mismos datos. Devuelve ranking + ganadora."""
@@ -4920,8 +4922,6 @@ if cmp_result:
     best_name = cmp_result["best"]["strategy"]
 
     # Tabla comparativa
-    _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟",
-                   "⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
     rows = []
     for i, r in enumerate(cmp_result["results"]):
         rentable = r.get("profit_factor", 0) >= 1.0 and r.get("winrate", 0) >= r.get("be_winrate", 0)
