@@ -2086,6 +2086,19 @@ _STRATEGY_META = {
         "pros":  "Señal de acción del precio pura · Sin indicadores",
         "cons":  "Necesita contexto (nivel de soporte/tendencia)",
     },
+    # ── ESPECIALES ──────────────────────────────────────────────────────────
+    "aggressive_momentum": {
+        "label": "AGRESIVA: Momentum Explosivo (ATR alto + vela fuerte)",
+        "why":   "Entra en movimientos explosivos: vela fuerte (cuerpo > 55% del rango) + ATR ≥ 6 pips + EMA alineadas. Sin filtro RSI — diseñada para capturas rápidas en mercado en movimiento. Cooldown de 4 velas para mayor frecuencia.",
+        "pros":  "Captura impulsos explosivos · Más operaciones en tendencias fuertes · Sin filtro RSI restrictivo",
+        "cons":  "Mayor drawdown que filtradas · Requiere volatilidad alta · Más stop losses consecutivos",
+    },
+    "meta_composite": {
+        "label": "META-Composite: Consenso Inteligente (6 estrategias)",
+        "why":   "Vota entre 6 estrategias diversas (EMA Trend, MACD, SuperTrend, RSI-50, Momentum Breakout, Estocástico). Entra solo cuando ≥3 coinciden en la misma dirección. La señal de mayor calidad posible — identifica los factores comunes que hacen ganar al resto de estrategias.",
+        "pros":  "Señales de altísima calidad · Drawdown mínimo · Confluencia total multi-sistema",
+        "cons":  "Pocas señales — solo en confluencia perfecta · Puede perderse impulsos rápidos",
+    },
 }
 
 def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=2):
@@ -2272,6 +2285,42 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
             bear_eng = (o_c>prev_c) and (c<prev_o) and (c<o_c) and (prev_c>prev_o)
             long_sig  = bull_eng and c>e50 and r<65 and matr and cd_ok
             short_sig = bear_eng and c<e50 and r>35 and matr and cd_ok
+
+        elif strategy == "aggressive_momentum":
+            # AGRESIVA: vela con cuerpo fuerte + ATR alto + EMA alineadas, sin filtro RSI
+            body       = abs(c - o_c)
+            rng        = (h_c - l_c) if (h_c - l_c) > 1e-9 else 1e-9
+            strong     = (body / rng) > 0.55          # vela decisiva
+            high_atr   = av > PIP * 6                 # mercado moviéndose fuerte
+            cd_ok_agg  = (i - last_entry_i) >= 4      # cooldown corto
+            long_sig   = (e9>e21>e50) and c>prev_c and strong and high_atr and cd_ok_agg
+            short_sig  = (e9<e21<e50) and c<prev_c and strong and high_atr and cd_ok_agg
+
+        elif strategy == "meta_composite":
+            # CONSENSO: ≥3 de 6 estrategias diversas deben coincidir en la misma dirección
+            lv = sv_ = 0   # long votes, short votes
+            # 1) EMA trend
+            if (e9>e21>e50) and hv>0 and 42<=r<=73 and c>prev_c:          lv  += 1
+            elif (e9<e21<e50) and hv<0 and 27<=r<=58 and c<prev_c:        sv_ += 1
+            # 2) MACD cross (histograma cruza cero)
+            if (c>e50) and (hv>0 and hv_p<=0):                            lv  += 1
+            elif (c<e50) and (hv<0 and hv_p>=0):                          sv_ += 1
+            # 3) SuperTrend dirección
+            if sdir == 1:                                                   lv  += 1
+            elif sdir == -1:                                                sv_ += 1
+            # 4) RSI cruza 50
+            if (r>50 and r_p<=50) and c>e50:                               lv  += 1
+            elif (r<50 and r_p>=50) and c<e50:                             sv_ += 1
+            # 5) Momentum breakout
+            if c>mbhi and r>50 and hv>0:                                   lv  += 1
+            elif c<mblo and r<50 and hv<0:                                 sv_ += 1
+            # 6) Estocástico en tendencia
+            stx_u = sk>sd and sk_p<=sd_p and sk<35
+            stx_d = sk<sd and sk_p>=sd_p and sk>65
+            if stx_u and e21>e50:                                          lv  += 1
+            elif stx_d and e21<e50:                                        sv_ += 1
+            long_sig  = lv  >= 3 and matr and cd_ok
+            short_sig = sv_ >= 3 and matr and cd_ok
 
         if long_sig:
             ep=c; dr="LONG";  tp_p=c+tp_d; sl_p=c-sl_d; in_trade=True; ei=i; last_entry_i=i
@@ -2538,6 +2587,54 @@ def _live_strategy_signal(df, strategy):
             bear_eng = c < o and o >= c1 and c <= o1 and (o - c) > (c1 - o1) * 0.8
             if bull_eng and abv_e50 and min_atr: direction, reason = "LONG",  "Vela envolvente alcista sobre EMA50"
             elif bear_eng and blw_e50 and min_atr: direction, reason = "SHORT", "Vela envolvente bajista bajo EMA50"
+
+        elif strategy == "aggressive_momentum":
+            body  = abs(c - o);  rng = (h - l) if (h - l) > 1e-9 else 1e-9
+            strong   = (body / rng) > 0.55
+            high_atr = av > PIP * 6
+            if bull_align and bull_candle and strong and high_atr:
+                direction, reason = "LONG",  f"AGRESIVA: tendencia alcista + vela fuerte ({body/rng*100:.0f}% rango) + ATR {av/PIP:.1f}p — sin filtro RSI"
+            elif bear_align and bear_candle and strong and high_atr:
+                direction, reason = "SHORT", f"AGRESIVA: tendencia bajista + vela fuerte ({body/rng*100:.0f}% rango) + ATR {av/PIP:.1f}p — sin filtro RSI"
+            else:
+                _why = []
+                if not bull_align and not bear_align: _why.append("EMAs no alineadas")
+                if not strong: _why.append(f"vela débil ({body/rng*100:.0f}% rango, necesita >55%)")
+                if not high_atr: _why.append(f"ATR bajo ({av/PIP:.1f}p, necesita >6p)")
+                reason = "AGRESIVA sin setup: " + " · ".join(_why)
+
+        elif strategy == "meta_composite":
+            # Voto entre 6 sistemas distintos — entra con ≥3 de acuerdo
+            lv = 0; sv_ = 0
+            names_l = []; names_s = []
+            # 1) EMA trend
+            if bull_align and macd_long  and 42<=r<=73 and bull_candle: lv+=1;  names_l.append("EMA-Trend")
+            elif bear_align and macd_short and 27<=r<=58 and bear_candle: sv_+=1; names_s.append("EMA-Trend")
+            # 2) MACD cross cero
+            if hv>0 and hv1<=0 and abv_e50: lv+=1;  names_l.append("MACD-cross")
+            elif hv<0 and hv1>=0 and blw_e50: sv_+=1; names_s.append("MACD-cross")
+            # 3) SuperTrend
+            if st_d == 1:  lv+=1;  names_l.append("SuperTrend")
+            elif st_d == -1: sv_+=1; names_s.append("SuperTrend")
+            # 4) RSI cruza 50
+            if r>50 and r1<=50 and macd_long  and abv_e50: lv+=1;  names_l.append("RSI-50↑")
+            elif r<50 and r1>=50 and macd_short and blw_e50: sv_+=1; names_s.append("RSI-50↓")
+            # 5) Momentum breakout
+            if c>m_hi and r>50 and macd_long:  lv+=1;  names_l.append("Breakout")
+            elif c<m_lo and r<50 and macd_short: sv_+=1; names_s.append("Breakout")
+            # 6) Estocástico
+            stx_u = stk_v>std_v and stk1<=std1 and stk_v<35
+            stx_d = stk_v<std_v and stk1>=std1 and stk_v>65
+            if stx_u and abv_e50: lv+=1;  names_l.append("Estoc")
+            elif stx_d and blw_e50: sv_+=1; names_s.append("Estoc")
+            if lv >= 3 and min_atr:
+                direction = "LONG"
+                reason = f"META {lv}/6: {', '.join(names_l)} — máxima confluencia"
+            elif sv_ >= 3 and min_atr:
+                direction = "SHORT"
+                reason = f"META {sv_}/6: {', '.join(names_s)} — máxima confluencia"
+            else:
+                reason = f"META sin consenso suficiente (LONG={lv}/6, SHORT={sv_}/6 — necesita ≥3)"
 
         return direction, reason
     except Exception as ex:
@@ -4269,7 +4366,7 @@ st.caption(
 bt_ctrl_l, bt_ctrl_r = st.columns([1, 2])
 with bt_ctrl_l:
     bt_use_windows = st.checkbox("Solo ventanas 7-12h / 15-20h", value=True, key="bt_windows")
-    run_bt_btn = st.button("🚀 Comparar 14 Estrategias (~1 año)", type="primary", key="run_bt")
+    run_bt_btn = st.button("🚀 Comparar 16 Estrategias (~1 año)", type="primary", key="run_bt")
     if run_bt_btn:
         with st.spinner("Descargando hasta 1 año de datos EURUSD 1h..."):
             bt_df = get_backtest_data("1h")
@@ -4277,7 +4374,7 @@ with bt_ctrl_l:
             st.error("Sin datos históricos — verifica conexión a internet.")
         else:
             n_c = len(bt_df)
-            with st.spinner(f"Comparando 14 estrategias sobre {n_c} velas ({n_c//24}d) — puede tardar 20-60s..."):
+            with st.spinner(f"Comparando 16 estrategias sobre {n_c} velas ({n_c//24}d) — puede tardar 30-90s..."):
                 cmp = run_strategy_comparison(bt_df, use_windows=bt_use_windows)
             if not cmp:
                 st.warning("Sin operaciones — pocos datos o mercado lateral extremo.")
@@ -4423,7 +4520,7 @@ if cmp_result:
                 for _rc in _last_run["market_ctx"]:
                     st.markdown(f"  - {_rc}")
 else:
-    st.info("Pulsa **'Comparar 14 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
+    st.info("Pulsa **'Comparar 16 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
 
 # ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
 st.markdown("---")
