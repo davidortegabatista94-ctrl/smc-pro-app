@@ -5580,16 +5580,16 @@ st.caption("Cuéntame tu tesis. Analizo tu visión contra los backtests históri
 import os as _os
 
 # API key: env var (Railway) o input de sesión
-_ant_key = _os.environ.get("ANTHROPIC_API_KEY", "").strip()
+_ant_key = _os.environ.get("GROQ_API_KEY", "").strip()
 if not _ant_key:
     _ant_key = st.session_state.get("_advisor_key", "")
 if not _ant_key:
-    with st.expander("⚙️ Configurar API Key de Anthropic (solo la primera vez)", expanded=True):
+    with st.expander("⚙️ Configurar API Key de Groq (solo la primera vez)", expanded=True):
         _k_input = st.text_input(
-            "ANTHROPIC_API_KEY:",
+            "GROQ_API_KEY:",
             type="password",
-            placeholder="sk-ant-...",
-            help="Obtén tu key en console.anthropic.com · O añádela como variable de entorno en Railway",
+            placeholder="gsk_...",
+            help="Gratuito en console.groq.com · O añádela como variable de entorno en Railway",
             key="_advisor_key_field",
         )
         if _k_input:
@@ -5597,7 +5597,7 @@ if not _ant_key:
             _ant_key = _k_input
             st.success("✅ Key guardada para esta sesión")
         else:
-            st.info("📌 También puedes añadirla permanentemente en Railway → Settings → Variables → ANTHROPIC_API_KEY")
+            st.info("📌 También puedes añadirla permanentemente en Railway → Settings → Variables → GROQ_API_KEY")
 
 # Inicializar historial
 if "advisor_chat" not in st.session_state:
@@ -5681,11 +5681,11 @@ def _advisor_context() -> str:
 
 
 def _advisor_call(user_msg: str, history: list, context: str, api_key: str) -> str:
-    """Sends user message to Claude and returns the advisor response."""
+    """Sends user message to Groq (LLaMA 3.3 70B) and returns the advisor response."""
     try:
-        import anthropic as _ant_mod
+        from groq import Groq as _Groq
     except ImportError:
-        return "⚠️ Paquete `anthropic` no instalado. Espera a que Railway redeploy con el nuevo requirements.txt."
+        return "⚠️ Paquete `groq` instalándose — espera 1 minuto y recarga la app."
 
     _system = f"""Eres un Trading Advisor cuantitativo especializado en EUR/USD. Trabajas integrado en una app de trading que monitoriza el mercado en tiempo real y ha ejecutado backtests sobre 17 estrategias distintas desde 2008 hasta hoy (18+ años, incluyendo todas las crisis).
 
@@ -5712,22 +5712,22 @@ REGLAS:
 - Máximo 400 palabras en total
 - Si los datos de la app aún no están cargados (N/A), indícalo y razona con lo que tengas"""
 
-    _messages = []
+    _messages = [{"role": "system", "content": _system}]
     for _h in history[-8:]:
         _messages.append({"role": _h["role"], "content": _h["content"]})
     _messages.append({"role": "user", "content": user_msg})
 
     try:
-        _client = _ant_mod.Anthropic(api_key=api_key)
-        _resp = _client.messages.create(
-            model="claude-opus-4-7",
-            max_tokens=1200,
-            system=_system,
+        _client = _Groq(api_key=api_key)
+        _resp = _client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
             messages=_messages,
+            max_tokens=1200,
+            temperature=0.4,
         )
-        return _resp.content[0].text
+        return _resp.choices[0].message.content
     except Exception as _e:
-        return f"⚠️ Error al llamar a la API: {_e}"
+        return f"⚠️ Error al llamar a Groq: {_e}"
 
 
 # Mostrar historial de conversación
@@ -5742,7 +5742,7 @@ _chat_prompt = st.chat_input(
 )
 if _chat_prompt:
     if not _ant_key:
-        st.error("⚠️ Configura la ANTHROPIC_API_KEY primero (ver configuración arriba).")
+        st.error("⚠️ Configura la GROQ_API_KEY primero (ver configuración arriba).")
     else:
         with st.chat_message("user", avatar="👤"):
             st.markdown(_chat_prompt)
