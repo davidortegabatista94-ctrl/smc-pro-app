@@ -2395,16 +2395,17 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
     # Escala de umbrales ATR según timeframe
     if daily_mode:
         use_windows  = False   # sin filtro de horario en datos diarios
-        _atr_min     = PIP * 40   # ATR mínimo: 40 pips (vs 4p en 1h)
-        _sl_min      = PIP * 40   # SL mínimo
-        _sl_max      = PIP * 120  # SL máximo (bajado de 150 para forzar más operaciones)
-        _cd_base     = 2          # cooldown: 2 días (bajado de 3)
-        _agg_atr_min = PIP * 60   # aggressive_momentum mínimo ATR
-        _be_atr_min  = PIP * 50   # precision_be mínimo ATR
-        _be_near_pip = PIP * 100  # pullback EMA21 ± 100 pips
+        _atr_min     = PIP * 15   # ATR mínimo: 15 pips (permite entradas en baja volatilidad)
+        _sl_min      = PIP * 30   # SL mínimo
+        _sl_max      = PIP * 120  # SL máximo
+        _cd_base     = 2          # cooldown: 2 días
+        _agg_atr_min = PIP * 30   # aggressive_momentum mínimo ATR
+        _be_atr_min  = PIP * 30   # precision_be mínimo ATR
+        _be_near_pip = PIP * 150  # pullback EMA21 ± 150 pips (más amplio en diario)
         _sl_mult     = 1.0        # multiplicador SL: 1×ATR diario (~51 pips)
-        _entry_rr    = 2.0        # RR diario más bajo = TP alcanzable más rápido
-        _max_bars    = 25         # máximo de días en operación antes de forzar cierre
+        _entry_rr    = 2.0        # RR diario: TP = 2×SL (~102 pips)
+        _max_bars    = 20         # máximo días en operación
+        _rsi_mul     = 15         # ampliar rangos RSI en ±15 para datos diarios
     else:
         _atr_min     = PIP * 4
         _sl_min      = PIP * 6
@@ -2416,6 +2417,7 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
         _sl_mult     = 1.2
         _entry_rr    = RR
         _max_bars    = 9999
+        _rsi_mul     = 0          # sin ajuste para datos horarios
 
     close = df["Close"].copy(); high = df["High"].copy(); low = df["Low"].copy()
     opn   = df["Open"].copy() if "Open" in df.columns else close.shift(1)
@@ -2573,54 +2575,58 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
         long_sig = short_sig = False
 
         if strategy == "ema_trend":
-            long_sig  = (e9>e21>e50) and hv>0 and 42<=r<=73 and c>prev_c and matr and cd_ok
-            short_sig = (e9<e21<e50) and hv<0 and 27<=r<=58 and c<prev_c and matr and cd_ok
+            long_sig  = (e9>e21>e50) and hv>0 and (42-_rsi_mul)<=r<=(73+_rsi_mul) and c>prev_c and matr and cd_ok
+            short_sig = (e9<e21<e50) and hv<0 and (27-_rsi_mul)<=r<=(58+_rsi_mul) and c<prev_c and matr and cd_ok
         elif strategy == "ema_crossover":
-            long_sig  = (e9>e21 and e9p<=e21p) and c>e50 and 45<=r<=72 and matr and cd_ok
-            short_sig = (e9<e21 and e9p>=e21p) and c<e50 and 28<=r<=55 and matr and cd_ok
+            long_sig  = (e9>e21 and e9p<=e21p) and c>e50 and (45-_rsi_mul)<=r<=(72+_rsi_mul) and matr and cd_ok
+            short_sig = (e9<e21 and e9p>=e21p) and c<e50 and (28-_rsi_mul)<=r<=(55+_rsi_mul) and matr and cd_ok
         elif strategy == "triple_ema":
-            long_sig  = (e3>e8>e21) and e3>e3p and e8>e8p and 44<=r<=75 and matr and cd_ok
-            short_sig = (e3<e8<e21) and e3<e3p and e8<e8p and 25<=r<=56 and matr and cd_ok
+            long_sig  = (e3>e8>e21) and e3>e3p and e8>e8p and (44-_rsi_mul)<=r<=(75+_rsi_mul) and matr and cd_ok
+            short_sig = (e3<e8<e21) and e3<e3p and e8<e8p and (25-_rsi_mul)<=r<=(56+_rsi_mul) and matr and cd_ok
         elif strategy == "ema_ribbon":
-            long_sig  = (e5>e10>e20>e50) and c>e100 and 44<=r<=74 and matr and cd_ok
-            short_sig = (e5<e10<e20<e50) and c<e100 and 26<=r<=56 and matr and cd_ok
+            long_sig  = (e5>e10>e20>e50) and c>e100 and (44-_rsi_mul)<=r<=(74+_rsi_mul) and matr and cd_ok
+            short_sig = (e5<e10<e20<e50) and c<e100 and (26-_rsi_mul)<=r<=(56+_rsi_mul) and matr and cd_ok
         elif strategy == "macd_cross":
-            long_sig  = (c>e50) and (hv>0 and hv_p<=0) and 30<=r<=72 and matr and cd_ok
-            short_sig = (c<e50) and (hv<0 and hv_p>=0) and 28<=r<=70 and matr and cd_ok
+            long_sig  = (c>e50) and (hv>0 and hv_p<=0) and (30-_rsi_mul)<=r<=(72+_rsi_mul) and matr and cd_ok
+            short_sig = (c<e50) and (hv<0 and hv_p>=0) and (28-_rsi_mul)<=r<=(70+_rsi_mul) and matr and cd_ok
         elif strategy == "rsi_reversion":
-            long_sig  = (e21>e50) and (r_p<=48 and r>r_p) and r<62 and c>e50 and matr and cd_ok
-            short_sig = (e21<e50) and (r_p>=52 and r<r_p) and r>38 and c<e50 and matr and cd_ok
+            long_sig  = (e21>e50) and (r_p<=48 and r>r_p) and r<(62+_rsi_mul) and c>e50 and matr and cd_ok
+            short_sig = (e21<e50) and (r_p>=52 and r<r_p) and r>(38-_rsi_mul) and c<e50 and matr and cd_ok
         elif strategy == "rsi_50_cross":
             long_sig  = (r>50 and r_p<=50) and hv>0 and c>e50 and matr and cd_ok
             short_sig = (r<50 and r_p>=50) and hv<0 and c<e50 and matr and cd_ok
         elif strategy == "stochastic_trend":
-            stoch_xu = sk>sd and sk_p<=sd_p and sk<35
-            stoch_xd = sk<sd and sk_p>=sd_p and sk>65
-            long_sig  = (e21>e50) and stoch_xu and c>e50 and matr and cd_ok
-            short_sig = (e21<e50) and stoch_xd and c<e50 and matr and cd_ok
+            _sk_lev    = 35 + _rsi_mul   # 35 en 1h, 50 en diario
+            stoch_xu   = sk>sd and sk_p<=sd_p and sk<_sk_lev
+            stoch_xd   = sk<sd and sk_p>=sd_p and sk>(100-_sk_lev)
+            long_sig   = (e21>e50) and stoch_xu and c>e50 and matr and cd_ok
+            short_sig  = (e21<e50) and stoch_xd and c<e50 and matr and cd_ok
         elif strategy == "bb_touch":
-            long_sig  = (e21>e50) and (c<=bbl*1.001) and r<45 and c>prev_c and matr and cd_ok
-            short_sig = (e21<e50) and (c>=bbu*0.999) and r>55 and c<prev_c and matr and cd_ok
+            _dir_ok_l  = True if daily_mode else c>prev_c
+            _dir_ok_s  = True if daily_mode else c<prev_c
+            long_sig   = (e21>e50) and (c<=bbl*1.002) and r<(45+_rsi_mul) and _dir_ok_l and matr and cd_ok
+            short_sig  = (e21<e50) and (c>=bbu*0.998) and r>(55-_rsi_mul) and _dir_ok_s and matr and cd_ok
         elif strategy == "keltner_touch":
-            long_sig  = (e21>e50) and (c<=kcl*1.001) and r<45 and c>prev_c and matr and cd_ok
-            short_sig = (e21<e50) and (c>=kcu*0.999) and r>55 and c<prev_c and matr and cd_ok
+            _dir_ok_l  = True if daily_mode else c>prev_c
+            _dir_ok_s  = True if daily_mode else c<prev_c
+            long_sig   = (e21>e50) and (c<=kcl*1.002) and r<(45+_rsi_mul) and _dir_ok_l and matr and cd_ok
+            short_sig  = (e21<e50) and (c>=kcu*0.998) and r>(55-_rsi_mul) and _dir_ok_s and matr and cd_ok
         elif strategy == "donchian_break":
-            long_sig  = (c>dchi) and c>e50 and 50<=r<=76 and matr and cd_ok
-            short_sig = (c<dclo) and c<e50 and 24<=r<=50 and matr and cd_ok
+            long_sig  = (c>dchi) and c>e50 and (50-_rsi_mul)<=r<=(76+_rsi_mul) and matr and cd_ok
+            short_sig = (c<dclo) and c<e50 and (24-_rsi_mul)<=r<=(50+_rsi_mul) and matr and cd_ok
         elif strategy == "momentum_break":
-            long_sig  = (c>mbhi) and r>50 and hv>0 and matr and cd_ok
-            short_sig = (c<mblo) and r<50 and hv<0 and matr and cd_ok
+            long_sig  = (c>mbhi) and r>(50-_rsi_mul) and hv>0 and matr and cd_ok
+            short_sig = (c<mblo) and r<(50+_rsi_mul) and hv<0 and matr and cd_ok
         elif strategy == "supertrend":
             long_sig  = (sdir==1  and sdir_p==-1) and matr and cd_ok
             short_sig = (sdir==-1 and sdir_p==1)  and matr and cd_ok
         elif strategy == "engulfing":
             bull_eng = (o_c<prev_c) and (c>prev_o) and (c>o_c) and (prev_c<prev_o)
             bear_eng = (o_c>prev_c) and (c<prev_o) and (c<o_c) and (prev_c>prev_o)
-            long_sig  = bull_eng and c>e50 and r<65 and matr and cd_ok
-            short_sig = bear_eng and c<e50 and r>35 and matr and cd_ok
+            long_sig  = bull_eng and c>e50 and r<(65+_rsi_mul) and matr and cd_ok
+            short_sig = bear_eng and c<e50 and r>(35-_rsi_mul) and matr and cd_ok
 
         elif strategy == "aggressive_momentum":
-            # AGRESIVA: vela con cuerpo fuerte + ATR alto + EMA alineadas, sin filtro RSI
             body       = abs(c - o_c)
             rng        = (h_c - l_c) if (h_c - l_c) > 1e-9 else 1e-9
             strong     = (body / rng) > 0.55
@@ -2631,11 +2637,11 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
 
         elif strategy == "meta_composite":
             # CONSENSO: ≥3 de 6 estrategias diversas deben coincidir en la misma dirección
-            lv = sv_ = 0   # long votes, short votes
-            # 1) EMA trend
-            if (e9>e21>e50) and hv>0 and 42<=r<=73 and c>prev_c:          lv  += 1
-            elif (e9<e21<e50) and hv<0 and 27<=r<=58 and c<prev_c:        sv_ += 1
-            # 2) MACD cross (histograma cruza cero)
+            lv = sv_ = 0
+            # 1) EMA trend (RSI ampliado en diario)
+            if (e9>e21>e50) and hv>0 and (42-_rsi_mul)<=r<=(73+_rsi_mul) and c>prev_c: lv  += 1
+            elif (e9<e21<e50) and hv<0 and (27-_rsi_mul)<=r<=(58+_rsi_mul) and c<prev_c: sv_ += 1
+            # 2) MACD cross
             if (c>e50) and (hv>0 and hv_p<=0):                            lv  += 1
             elif (c<e50) and (hv<0 and hv_p>=0):                          sv_ += 1
             # 3) SuperTrend dirección
@@ -2644,38 +2650,42 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
             # 4) RSI cruza 50
             if (r>50 and r_p<=50) and c>e50:                               lv  += 1
             elif (r<50 and r_p>=50) and c<e50:                             sv_ += 1
-            # 5) Momentum breakout
-            if c>mbhi and r>50 and hv>0:                                   lv  += 1
-            elif c<mblo and r<50 and hv<0:                                 sv_ += 1
-            # 6) Estocástico en tendencia
-            stx_u = sk>sd and sk_p<=sd_p and sk<35
-            stx_d = sk<sd and sk_p>=sd_p and sk>65
+            # 5) Momentum breakout (umbral RSI ampliado)
+            if c>mbhi and r>(50-_rsi_mul) and hv>0:                        lv  += 1
+            elif c<mblo and r<(50+_rsi_mul) and hv<0:                      sv_ += 1
+            # 6) Estocástico en tendencia (nivel ampliado en diario)
+            _sk_lv = 35 + _rsi_mul
+            stx_u = sk>sd and sk_p<=sd_p and sk<_sk_lv
+            stx_d = sk<sd and sk_p>=sd_p and sk>(100-_sk_lv)
             if stx_u and e21>e50:                                          lv  += 1
             elif stx_d and e21<e50:                                        sv_ += 1
             long_sig  = lv  >= 3 and matr and cd_ok
             short_sig = sv_ >= 3 and matr and cd_ok
 
         elif strategy == "precision_be":
-            # PRECISIÓN BE: pullback exacto a EMA21 en tendencia + BE automático
-            # Entrada LONG: precio entre EMA50 y EMA21+10pip · RSI saludable ·
-            #               MACD creciente · Estocástico girando al alza · vela alcista
             near_e21_long  = e50 < c <= e21 + _be_near_pip
             near_e21_short = e50 > c >= e21 - _be_near_pip
             macd_growing   = hv > hv_p and hv > 0
             macd_turning   = hv > 0 and hv_p <= 0
             macd_ok_l      = macd_growing or macd_turning
             macd_ok_s      = (hv < hv_p and hv < 0) or (hv < 0 and hv_p >= 0)
-            stoch_turn_up  = sk > sd and sk_p <= sd_p and sk < 50
-            stoch_turn_dn  = sk < sd and sk_p >= sd_p and sk > 50
+            stoch_turn_up  = sk > sd and sk_p <= sd_p and sk < (50 + _rsi_mul)
+            stoch_turn_dn  = sk < sd and sk_p >= sd_p and sk > (50 - _rsi_mul)
             bull_candle    = c > o_c
             bear_candle    = c < o_c
-            cd_ok_be       = (i - last_entry_i) >= max(8, _cd_base + 2)
+            cd_ok_be       = (i - last_entry_i) >= max(4, _cd_base + 2)
             atr_ok_be      = av > _be_atr_min
-            long_sig  = (e9>e21>e50) and near_e21_long  and 38<=r<=58 and macd_ok_l and stoch_turn_up and bull_candle and atr_ok_be and cd_ok_be
-            short_sig = (e9<e21<e50) and near_e21_short and 42<=r<=62 and macd_ok_s and stoch_turn_dn and bear_candle and atr_ok_be and cd_ok_be
+            if daily_mode:
+                # En diario: condiciones simplificadas (pullback EMA21 + MACD + RSI no extremo)
+                # El stochastic crossover es demasiado raro en datos diarios para usarlo como filtro
+                long_sig  = (e9>e21>e50) and near_e21_long  and macd_ok_l and 20<=r<=75 and atr_ok_be and cd_ok_be
+                short_sig = (e9<e21<e50) and near_e21_short and macd_ok_s and 25<=r<=80 and atr_ok_be and cd_ok_be
+            else:
+                long_sig  = (e9>e21>e50) and near_e21_long  and 38<=r<=58 and macd_ok_l and stoch_turn_up and bull_candle and atr_ok_be and cd_ok_be
+                short_sig = (e9<e21<e50) and near_e21_short and 42<=r<=62 and macd_ok_s and stoch_turn_dn and bear_candle and atr_ok_be and cd_ok_be
 
-        # Entrada — precision_be usa RR=2.5; el resto RR=3.0
-        _tp_d = sl_d * (2.5 if strategy == "precision_be" else RR)
+        # Entrada — precision_be usa RR=2.5; en modo diario _entry_rr=2.0; en horario RR=3.0
+        _tp_d = sl_d * (2.5 if strategy == "precision_be" else _entry_rr)
         if long_sig:
             ep=c; dr="LONG";  tp_p=c+_tp_d; sl_p=c-sl_d; in_trade=True; ei=i; last_entry_i=i
         elif short_sig:
