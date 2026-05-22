@@ -2148,6 +2148,7 @@ _STRATEGY_REGIME_AFFINITY = {
     "momentum_breakout":   ["volatile_trend", "volatile"],
     "aggressive_momentum": ["volatile_trend", "volatile"],
     "meta_composite":      ["trending_bull", "trending_bear", "ranging", "volatile_trend"],
+    "precision_be":        ["trending_bull", "trending_bear"],
 }
 
 # Etiquetas de régimen en español para UI
@@ -2350,6 +2351,12 @@ _STRATEGY_META = {
         "pros":  "Señales de altísima calidad · Drawdown mínimo · Confluencia total multi-sistema",
         "cons":  "Pocas señales — solo en confluencia perfecta · Puede perderse impulsos rápidos",
     },
+    "precision_be": {
+        "label": "Precisión BE: Pullback EMA21 con Break-Even Automático",
+        "why":   "Entra en pullbacks exactos a la EMA21 dentro de tendencia (EMA 9>21>50), confirmados por RSI saludable + MACD creciente + Estocástico girando. Una vez el precio avanza 1× SL en favor, el stop se mueve automáticamente al punto de entrada (break-even) — el trade no puede perder dinero después de ese punto.",
+        "pros":  "Capital protegido tras activar BE · Win rate efectiva alta · Entradas de alta precisión en pullbacks",
+        "cons":  "Requiere tendencia + pullback exacto · Algunas operaciones cierran en BE sin ganancia",
+    },
 }
 
 def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=2):
@@ -2424,7 +2431,7 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
     RR = 3.0; pip_val = 1.0
     trades = []; equity = [10000.0]
     in_trade = False; ep = dr = tp_p = sl_p = ei = None
-    last_entry_i = -999
+    last_entry_i = -999; be_activated = False
 
     for i in range(110, len(df) - 1):
         if use_windows and hasattr(df.index[i], "hour"):
@@ -2466,24 +2473,39 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
 
         if in_trade:
             spr = sl_d / PIP; tpr = tp_d / PIP
+            # Break-even: cuando precio avanza 1× SL en favor, mover SL a entrada
+            if strategy == "precision_be" and not be_activated and ep is not None:
+                _be_dist = abs(ep - sl_p)
+                if dr == "LONG"  and h_c >= ep + _be_dist:
+                    sl_p = ep; be_activated = True
+                elif dr == "SHORT" and l_c <= ep - _be_dist:
+                    sl_p = ep; be_activated = True
             if dr == "LONG":
                 if l_c <= sl_p:
-                    pnl = -spr*pip_val; equity.append(equity[-1]+pnl)
-                    trades.append({"dir":"LONG","outcome":"SL","pips":round(-spr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
-                    in_trade = False
+                    if strategy == "precision_be" and be_activated:
+                        equity.append(equity[-1])
+                        trades.append({"dir":"LONG","outcome":"BE","pips":0.0,"pnl":0.0,"time":str(df.index[ei])[:16]})
+                    else:
+                        pnl = -spr*pip_val; equity.append(equity[-1]+pnl)
+                        trades.append({"dir":"LONG","outcome":"SL","pips":round(-spr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                    in_trade = False; be_activated = False
                 elif h_c >= tp_p:
                     pnl = tpr*pip_val; equity.append(equity[-1]+pnl)
                     trades.append({"dir":"LONG","outcome":"TP","pips":round(tpr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
-                    in_trade = False
+                    in_trade = False; be_activated = False
             else:
                 if h_c >= sl_p:
-                    pnl = -spr*pip_val; equity.append(equity[-1]+pnl)
-                    trades.append({"dir":"SHORT","outcome":"SL","pips":round(-spr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
-                    in_trade = False
+                    if strategy == "precision_be" and be_activated:
+                        equity.append(equity[-1])
+                        trades.append({"dir":"SHORT","outcome":"BE","pips":0.0,"pnl":0.0,"time":str(df.index[ei])[:16]})
+                    else:
+                        pnl = -spr*pip_val; equity.append(equity[-1]+pnl)
+                        trades.append({"dir":"SHORT","outcome":"SL","pips":round(-spr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                    in_trade = False; be_activated = False
                 elif l_c <= tp_p:
                     pnl = tpr*pip_val; equity.append(equity[-1]+pnl)
                     trades.append({"dir":"SHORT","outcome":"TP","pips":round(tpr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
-                    in_trade = False
+                    in_trade = False; be_activated = False
             continue
 
         cd_ok = (i - last_entry_i) >= 6
@@ -2573,10 +2595,31 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
             long_sig  = lv  >= 3 and matr and cd_ok
             short_sig = sv_ >= 3 and matr and cd_ok
 
+        elif strategy == "precision_be":
+            # PRECISIÓN BE: pullback exacto a EMA21 en tendencia + BE automático
+            # Entrada LONG: precio entre EMA50 y EMA21+10pip · RSI saludable ·
+            #               MACD creciente · Estocástico girando al alza · vela alcista
+            near_e21_long  = e50 < c <= e21 + PIP * 10   # pullback tocó EMA21
+            near_e21_short = e50 > c >= e21 - PIP * 10
+            macd_growing   = hv > hv_p and hv > 0
+            macd_turning   = hv > 0 and hv_p <= 0
+            macd_ok_l      = macd_growing or macd_turning
+            macd_ok_s      = (hv < hv_p and hv < 0) or (hv < 0 and hv_p >= 0)
+            stoch_turn_up  = sk > sd and sk_p <= sd_p and sk < 50
+            stoch_turn_dn  = sk < sd and sk_p >= sd_p and sk > 50
+            bull_candle    = c > o_c
+            bear_candle    = c < o_c
+            cd_ok_be       = (i - last_entry_i) >= 8
+            atr_ok_be      = av > PIP * 5
+            long_sig  = (e9>e21>e50) and near_e21_long  and 38<=r<=58 and macd_ok_l and stoch_turn_up and bull_candle and atr_ok_be and cd_ok_be
+            short_sig = (e9<e21<e50) and near_e21_short and 42<=r<=62 and macd_ok_s and stoch_turn_dn and bear_candle and atr_ok_be and cd_ok_be
+
+        # Entrada — precision_be usa RR=2.5; el resto RR=3.0
+        _tp_d = sl_d * (2.5 if strategy == "precision_be" else RR)
         if long_sig:
-            ep=c; dr="LONG";  tp_p=c+tp_d; sl_p=c-sl_d; in_trade=True; ei=i; last_entry_i=i
+            ep=c; dr="LONG";  tp_p=c+_tp_d; sl_p=c-sl_d; in_trade=True; ei=i; last_entry_i=i
         elif short_sig:
-            ep=c; dr="SHORT"; tp_p=c-tp_d; sl_p=c+sl_d; in_trade=True; ei=i; last_entry_i=i
+            ep=c; dr="SHORT"; tp_p=c-_tp_d; sl_p=c+sl_d; in_trade=True; ei=i; last_entry_i=i
 
     if in_trade and ep is not None:
         lp   = float(close.iloc[-1])
@@ -2590,8 +2633,12 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
 
     wins   = [t for t in trades if t["outcome"] == "TP"]
     losses = [t for t in trades if t["outcome"] == "SL"]
+    bes    = [t for t in trades if t["outcome"] == "BE"]
     total  = len(trades)
     wr     = len(wins) / total * 100 if total > 0 else 0
+    # be_winrate: TP/(TP+SL) excluyendo trades cerrados en BE (0 pips)
+    _decisive = len(wins) + len(losses)
+    be_wr  = round(len(wins) / _decisive * 100, 1) if _decisive > 0 else 0.0
     np_    = sum(t["pips"] for t in trades)
     npnl   = sum(t["pnl"]  for t in trades)
     peak   = equity[0]; max_dd = 0.0
@@ -2609,8 +2656,8 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
         "why":      meta.get("why",   ""),
         "pros":     meta.get("pros",  ""),
         "cons":     meta.get("cons",  ""),
-        "total":    total, "wins": len(wins), "losses": len(losses),
-        "winrate":  round(wr, 1), "be_winrate": 25.0,
+        "total":    total, "wins": len(wins), "losses": len(losses), "be_count": len(bes),
+        "winrate":  round(wr, 1), "be_winrate": be_wr,
         "net_pips": round(np_, 1), "net_pnl": round(npnl, 2),
         "max_dd":   round(max_dd, 1), "profit_factor": pf,
         "rr_ratio": RR, "equity": equity, "trades": trades[-300:],
@@ -2619,7 +2666,7 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
 _ALL_STRATEGIES = list(_STRATEGY_META.keys())
 
 def run_strategy_comparison(df, use_windows=True, utc_offset=2):
-    """Ejecuta las 14 estrategias sobre los mismos datos. Devuelve ranking + ganadora."""
+    """Ejecuta las 17 estrategias sobre los mismos datos. Devuelve ranking + ganadora."""
     results = []
     for name in _ALL_STRATEGIES:
         r = _run_single_strategy(df, strategy=name, use_windows=use_windows, utc_offset=utc_offset)
@@ -2886,6 +2933,33 @@ def _live_strategy_signal(df, strategy):
                 reason = f"META {sv_}/6: {', '.join(names_s)} — máxima confluencia"
             else:
                 reason = f"META sin consenso suficiente (LONG={lv}/6, SHORT={sv_}/6 — necesita ≥3)"
+
+        elif strategy == "precision_be":
+            # Pullback exacto a EMA21 en tendencia + MACD creciente + Estocástico girando
+            sv21v  = float(e21.iloc[i])
+            near_l = sv50 < float(c) <= sv21v + PIP * 10
+            near_s = sv50 > float(c) >= sv21v - PIP * 10
+            macd_ok_l = (hv > hv1 and hv > 0) or (hv > 0 and hv1 <= 0)
+            macd_ok_s = (hv < hv1 and hv < 0) or (hv < 0 and hv1 >= 0)
+            stoch_up  = stk_v > std_v and stk1 <= std1 and stk_v < 50
+            stoch_dn  = stk_v < std_v and stk1 >= std1 and stk_v > 50
+            if bull_align and near_l and 38<=r<=58 and macd_ok_l and stoch_up and bull_candle and min_atr:
+                direction = "LONG"
+                reason = (f"PRECISIÓN BE: pullback a EMA21 ({sv21v:.5f}) en tendencia alcista · "
+                          f"MACD creciente · Estoc {stk_v:.0f} girando · RSI {r:.0f} — "
+                          f"BE automático al avanzar 1×SL")
+            elif bear_align and near_s and 42<=r<=62 and macd_ok_s and stoch_dn and bear_candle and min_atr:
+                direction = "SHORT"
+                reason = (f"PRECISIÓN BE: pullback a EMA21 ({sv21v:.5f}) en tendencia bajista · "
+                          f"MACD decreciente · Estoc {stk_v:.0f} girando · RSI {r:.0f} — "
+                          f"BE automático al retroceder 1×SL")
+            else:
+                _why = []
+                if not bull_align and not bear_align: _why.append("EMAs sin tendencia")
+                if not (near_l or near_s):            _why.append("precio no en pullback EMA21")
+                if not (stoch_up or stoch_dn):        _why.append(f"Estoc sin giro ({stk_v:.0f})")
+                if not (macd_ok_l or macd_ok_s):      _why.append("MACD no creciente")
+                reason = "BE sin setup: " + (" · ".join(_why) if _why else "condiciones no alineadas")
 
         return direction, reason
     except Exception as ex:
@@ -4688,7 +4762,7 @@ st.caption(
 bt_ctrl_l, bt_ctrl_r = st.columns([1, 2])
 with bt_ctrl_l:
     bt_use_windows = st.checkbox("Solo ventanas 7-12h / 15-20h", value=True, key="bt_windows")
-    run_bt_btn = st.button("🚀 Comparar 16 Estrategias (~1 año)", type="primary", key="run_bt")
+    run_bt_btn = st.button("🚀 Comparar 17 Estrategias (~1 año)", type="primary", key="run_bt")
     if run_bt_btn:
         with st.spinner("Descargando hasta 1 año de datos EURUSD 1h..."):
             bt_df = get_backtest_data("1h")
@@ -4696,7 +4770,7 @@ with bt_ctrl_l:
             st.error("Sin datos históricos — verifica conexión a internet.")
         else:
             n_c = len(bt_df)
-            with st.spinner(f"Comparando 16 estrategias sobre {n_c} velas ({n_c//24}d) — puede tardar 30-90s..."):
+            with st.spinner(f"Comparando 17 estrategias sobre {n_c} velas ({n_c//24}d) — puede tardar 30-90s..."):
                 cmp = run_strategy_comparison(bt_df, use_windows=bt_use_windows)
             if not cmp:
                 st.warning("Sin operaciones — pocos datos o mercado lateral extremo.")
@@ -4842,7 +4916,7 @@ if cmp_result:
                 for _rc in _last_run["market_ctx"]:
                     st.markdown(f"  - {_rc}")
 else:
-    st.info("Pulsa **'Comparar 16 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
+    st.info("Pulsa **'Comparar 17 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
 
 # ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
 st.markdown("---")
