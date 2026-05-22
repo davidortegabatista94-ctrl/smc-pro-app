@@ -1,6 +1,8 @@
 from functools import lru_cache
 # Cargas pesadas y opcionales se realizan de forma perezosa (lazy) dentro de helpers
 # para acelerar el import/reload de la aplicación Streamlit.
+_RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟",
+               "⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
 _st = None
 _requests = None
 _textblob = None
@@ -5009,6 +5011,8 @@ if cmp_result:
     st.markdown("### 📊 Ranking de Estrategias")
     best_name = cmp_result["best"]["strategy"]
 
+    if "_RANK_EMOJI" not in globals():
+        _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
     # Tabla comparativa
     rows = []
     for i, r in enumerate(cmp_result["results"]):
@@ -5171,7 +5175,7 @@ if _lt_cmp_result:
     _lt_years  = round(_lt_n_bars / 252) if _lt_n_bars else "?"
     st.markdown(f"### 📊 Ranking Histórico 2008–Hoy ({_lt_n_bars} barras · ~{_lt_years} años)")
 
-    if "_RANK_EMOJI" not in dir():
+    if "_RANK_EMOJI" not in globals():
         _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
     _lt_rows = []
     for _i, _r in enumerate(_lt_cmp_result["results"]):
