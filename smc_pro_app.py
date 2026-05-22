@@ -4087,6 +4087,64 @@ else:
         page_icon="⚡", layout="wide"
     )
 
+    # ── Login persistente ─────────────────────────────────────────────────────
+    _USERS_OFFLINE = {"david": "david", "javi": "javi"}
+    _USER_NAMES    = {"david": "David", "javi": "Javi"}
+
+    if "current_user" not in st.session_state:
+        st.session_state.current_user  = None
+        st.session_state.session_token = None
+
+    # Restaurar sesión desde token URL si session_state se perdió (nueva pestaña)
+    if st.session_state.current_user is None:
+        _tok = st.query_params.get("t", "")
+        if _tok and _DB_OK:
+            try:
+                _uid = _db.validate_session(_tok)
+                if _uid:
+                    st.session_state.current_user  = _uid
+                    st.session_state.session_token = _tok
+            except Exception:
+                pass
+
+    if st.session_state.current_user is None:
+        st.markdown("""
+        <style>
+        .block-container{max-width:500px!important;padding-top:80px!important}
+        </style>""", unsafe_allow_html=True)
+        st.title("⚡ SMC Pro v2")
+        st.subheader("Iniciar Sesión")
+        with st.form("_login_form"):
+            _lu = st.selectbox("Usuario", ["david", "javi"])
+            _lp = st.text_input("Contraseña", type="password", placeholder="tu nombre")
+            _ls = st.form_submit_button("🔐 Entrar", use_container_width=True)
+        if _ls:
+            _auth_ok = False
+            if _DB_OK:
+                try:
+                    _auth_ok = _db.authenticate_user(_lu, _lp)
+                except Exception:
+                    pass
+            if not _auth_ok:
+                _auth_ok = (_USERS_OFFLINE.get(_lu) == _lp)
+            if _auth_ok:
+                st.session_state.current_user = _lu
+                if _DB_OK:
+                    try:
+                        _tok2 = _db.create_session(_lu)
+                        st.session_state.session_token = _tok2
+                        st.query_params["t"] = _tok2
+                        _db.update_last_login(_lu)
+                    except Exception:
+                        pass
+                st.rerun()
+            else:
+                st.error("❌ Contraseña incorrecta")
+        st.stop()
+
+    current_user      = st.session_state.current_user
+    current_user_name = _USER_NAMES.get(current_user, current_user.capitalize())
+
     # Inicializar session state para análisis y credenciales
     if "last_analysis_time" not in st.session_state:
         st.session_state.last_analysis_time = None
@@ -4144,7 +4202,7 @@ else:
     )
     data_src  = "🟢 MT5 (tiempo real)" if connected else "🟡 yfinance (delay ~15min)"
 
-    st.title("⚡ SMC Pro v2 — EURUSD Scalper + MT5")
+    st.title(f"⚡ SMC Pro v2 — EURUSD Scalper + MT5  ·  👤 {current_user_name}")
     st.caption(
         f"UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}  |  "
         f"Datos: {data_src}  |  "
@@ -4184,6 +4242,18 @@ else:
     # ── Sidebar ───────────────────────────────────────────────────────────────────
     with st.sidebar:
         st.header("⚙️ Configuración")
+        st.markdown(f"👤 **{current_user_name}** — sesión activa")
+        if st.button("🚪 Cerrar sesión", key="_logout_btn"):
+            if _DB_OK and st.session_state.get("session_token"):
+                try:
+                    _db.invalidate_session(st.session_state.session_token)
+                except Exception:
+                    pass
+            st.session_state.current_user  = None
+            st.session_state.session_token = None
+            st.query_params.clear()
+            st.rerun()
+        st.markdown("---")
         st.subheader("🖥️ MetaTrader 5")
         if is_mt5_available():
             # Campos para login
@@ -4355,10 +4425,10 @@ else:
             _db_alive = _db.is_connected()
             if _db_alive:
                 st.success("✅ PostgreSQL conectada")
-                _ts = _db.trades_summary()
+                _ts = _db.trades_summary(user_id=current_user)
                 if _ts and _ts.get("total"):
-                    st.metric("Trades guardados", int(_ts["total"] or 0))
-                    st.metric("Win rate global", f"{float(_ts.get('winrate') or 0):.1f}%")
+                    st.metric("Mis trades", int(_ts["total"] or 0))
+                    st.metric("Win rate", f"{float(_ts.get('winrate') or 0):.1f}%")
                     st.metric("Net P&L", f"${float(_ts.get('net_pnl') or 0):+.2f}")
                 else:
                     st.caption("Sin trades aún")
@@ -4368,6 +4438,24 @@ else:
             st.warning("⚠️ DB no disponible")
     else:
         st.info("DB no configurada")
+    st.markdown("---")
+    st.subheader(f"🧠 Memoria IA — {current_user_name}")
+    if _DB_OK:
+        try:
+            _mem_count = _db.count_ai_memories(current_user)
+            _user_mems = _db.load_ai_memories(current_user, limit=5)
+            st.caption(f"{_mem_count} aprendizajes guardados")
+            if _user_mems:
+                for _m in _user_mems:
+                    _ct = _m.get("content", "")
+                    st.caption(f"• {_ct[:90]}{'…' if len(_ct)>90 else ''}")
+                if st.button("🗑️ Borrar memorias", key="_clear_mems"):
+                    _db.clear_ai_memories(current_user)
+                    st.rerun()
+            else:
+                st.caption("Chatea con el Advisor para generar aprendizajes")
+        except Exception:
+            st.caption("Memorias no disponibles")
     st.markdown("---")
     st.caption("⚠️ Solo informativo. No es consejo financiero.")
 
@@ -5664,8 +5752,8 @@ st.info(
 
 # ── Trading Advisor AI ────────────────────────────────────────────────────────
 st.markdown("---")
-st.subheader("🧠 Trading Advisor AI — Compara tu Visión")
-st.caption("Cuéntame tu tesis. Analizo tu visión contra los backtests históricos (2008–hoy), posicionamiento institucional, técnico y fundamental.")
+st.subheader(f"🧠 Trading Advisor AI — Asesor Personal de {current_user_name}")
+st.caption(f"Hola {current_user_name}, cuéntame tu tesis. Analizo tu visión contra tus operaciones reales, los backtests históricos (2008–hoy), posicionamiento institucional, técnico y fundamental. Aprendo de cada conversación.")
 
 import os as _os
 
@@ -5689,22 +5777,27 @@ if not _ant_key:
         else:
             st.info("📌 También puedes añadirla permanentemente en Railway → Settings → Variables → GROQ_API_KEY")
 
-# Generar session_id estable para esta sesión de navegador
-if "advisor_session_id" not in st.session_state:
+# Session_id estable por usuario (aislado entre David y Javi)
+_adv_sess_key = f"advisor_session_{current_user}"
+if _adv_sess_key not in st.session_state:
     import uuid as _uuid
-    st.session_state.advisor_session_id = str(_uuid.uuid4())
+    st.session_state[_adv_sess_key] = str(_uuid.uuid4())
+st.session_state.advisor_session_id = st.session_state[_adv_sess_key]
 
-# Inicializar historial: cargar desde DB si está disponible
-if "advisor_chat" not in st.session_state:
+# Historial de chat: cargar desde DB filtrado por usuario
+_adv_chat_key = f"advisor_chat_{current_user}"
+if _adv_chat_key not in st.session_state:
     if _DB_OK:
         try:
-            st.session_state.advisor_chat = _db.load_chat_history(
-                st.session_state.advisor_session_id
+            st.session_state[_adv_chat_key] = _db.load_chat_history(
+                st.session_state.advisor_session_id, user_id=current_user
             )
         except Exception:
-            st.session_state.advisor_chat = []
+            st.session_state[_adv_chat_key] = []
     else:
-        st.session_state.advisor_chat = []
+        st.session_state[_adv_chat_key] = []
+# Alias genérico usado en el resto del código
+st.session_state.advisor_chat = st.session_state[_adv_chat_key]
 
 
 def _advisor_context() -> str:
@@ -5780,7 +5873,62 @@ def _advisor_context() -> str:
                 _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
                 _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p | DD {_r.get('max_dd',0)}%")
 
+    # ── Patrones de trading del usuario ──────────────────────────────────────
+    if _DB_OK:
+        try:
+            _pats = _db.get_user_trade_patterns(current_user)
+            if _pats and _pats.get("total"):
+                _lines.append(f"\n=== HISTORIAL REAL DE {current_user_name.upper()} EN ESTA APP ===")
+                _lines.append(f"Total operaciones: {_pats.get('total', 0)} | Win Rate: {float(_pats.get('winrate') or 0):.1f}%")
+                _lines.append(f"Net pips acumulados: {float(_pats.get('net_pips') or 0):+.1f} | P&L neto: ${float(_pats.get('net_pnl') or 0):+.2f}")
+                if _pats.get("by_strategy"):
+                    _lines.append("  Rendimiento por estrategia:")
+                    for _s in _pats["by_strategy"][:5]:
+                        _lines.append(f"    • {_s.get('strategy','?')}: {_s.get('total',0)} ops | {float(_s.get('winrate') or 0):.0f}% WR | {float(_s.get('net_pips') or 0):+.1f}p")
+                if _pats.get("recent_streak"):
+                    _lines.append(f"  Racha reciente: {_pats['recent_streak']}")
+        except Exception:
+            pass
+
+    # ── Memorias del Advisor (aprendizajes acumulados) ────────────────────────
+    if _DB_OK:
+        try:
+            _mems = _db.load_ai_memories(current_user, limit=12)
+            if _mems:
+                _lines.append(f"\n=== LO QUE HE APRENDIDO DE {current_user_name.upper()} ===")
+                for _m in _mems:
+                    _ct = _m.get("content", "")
+                    if _ct:
+                        _lines.append(f"  [{_m.get('memory_type','insight')}] {_ct}")
+        except Exception:
+            pass
+
     return "\n".join(_lines)
+
+
+def _extract_lesson(user_msg: str, ai_response: str, api_key: str) -> str | None:
+    """Extract a 1-sentence learning from a conversation. Returns None if nothing new."""
+    try:
+        from groq import Groq as _Groq
+        _prompt = (
+            f"Conversación de trading EUR/USD:\n"
+            f"USUARIO: {user_msg[:250]}\n"
+            f"ADVISOR: {ai_response[:400]}\n\n"
+            f"En UNA frase corta (máx 120 caracteres), extrae el insight o patrón de trading "
+            f"más importante que el ADVISOR ha identificado sobre este usuario o mercado. "
+            f"Si no hay nada nuevo o relevante que aprender, responde exactamente: NONE"
+        )
+        _client = _Groq(api_key=api_key)
+        _resp = _client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": _prompt}],
+            max_tokens=160,
+            temperature=0.2,
+        )
+        _r = _resp.choices[0].message.content.strip()
+        return None if _r.upper().startswith("NONE") or len(_r) < 12 else _r
+    except Exception:
+        return None
 
 
 def _advisor_call(user_msg: str, history: list, context: str, api_key: str) -> str:
@@ -5790,29 +5938,35 @@ def _advisor_call(user_msg: str, history: list, context: str, api_key: str) -> s
     except ImportError:
         return "⚠️ Paquete `groq` instalándose — espera 1 minuto y recarga la app."
 
-    _system = f"""Eres un Trading Advisor cuantitativo especializado en EUR/USD. Trabajas integrado en una app de trading que monitoriza el mercado en tiempo real y ha ejecutado backtests sobre 17 estrategias distintas desde 2008 hasta hoy (18+ años, incluyendo todas las crisis).
+    _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamiento, y los aprendizajes acumulados de todas vuestras conversaciones anteriores.
+
+Tu objetivo no es solo analizar — es convertirte en el mejor consejero posible para {current_user_name} adaptándote a su estilo, sus errores pasados y sus puntos fuertes.
 
 {context}
 
 INSTRUCCIONES:
-El usuario compartirá su visión/tesis de trading. Tu misión es analizarla de forma objetiva contra los datos de la app y responder SIEMPRE con esta estructura:
+{current_user_name} compartirá su visión/tesis. Analízala contra los datos de la app y su historial personal. Responde SIEMPRE con esta estructura:
 
 📊 **TU VISIÓN ENTENDIDA**
-Resumir brevemente lo que propone el usuario en 1-2 frases.
+Resumir lo que propone {current_user_name} en 1-2 frases.
 
 ✅ **POR QUÉ SÍ** (confluencias a favor)
-Lista de argumentos que respaldan su visión. Usa datos concretos del backtest histórico, posicionamiento institucional, contexto técnico (EMA/RSI/MACD), fundamental (BCE/Fed/macro) y la señal actual de la app. Cita profit factors y win rates cuando sean relevantes.
+Argumentos que respaldan la visión: backtest histórico (18+ años), señal actual de la app, técnico (EMA/RSI/MACD), fundamental (BCE/Fed/macro), patrones del usuario si aplican. Cita profit factors y win rates.
 
 ❌ **POR QUÉ NO** (riesgos y contradicciones)
-Lista de argumentos en contra. Menciona estrategias que fallen en este contexto, drawdowns históricos relevantes, alertas de la app, niveles de resistencia/soporte, o contexto macro adverso.
+Argumentos en contra: estrategias que fallen en este contexto, drawdowns históricos, alertas de la app, errores pasados de {current_user_name} si los hay en su historial.
 
 🎯 **VEREDICTO**
-Conclusión directa: ¿la visión del usuario confluye con los datos o los contradice? Indica nivel de convicción (ALTA/MEDIA/BAJA) y si procede, sugiere ajustes concretos (entrada, SL, TP, timing).
+Conclusión directa con nivel de convicción (ALTA/MEDIA/BAJA) y ajustes concretos (entrada, SL, TP, timing). Si detectas un patrón recurrente en {current_user_name}, menciónalo.
+
+🧠 **APRENDIZAJE** (solo si hay algo nuevo)
+En 1 frase: qué nuevo insight has extraído de esta conversación sobre el mercado o sobre {current_user_name}.
 
 REGLAS:
-- Responde en español
-- Sé cuantitativo y directo — cita los datos del backtest como evidencia
-- Máximo 400 palabras en total
+- Responde en español, tutea a {current_user_name}
+- Sé cuantitativo — cita datos concretos del backtest como evidencia
+- Usa el historial real del usuario cuando sea relevante
+- Máximo 450 palabras en total
 - Si los datos de la app aún no están cargados (N/A), indícalo y razona con lo que tengas"""
 
     _messages = [{"role": "system", "content": _system}]
@@ -5852,12 +6006,15 @@ if _chat_prompt:
         st.session_state.advisor_chat.append({"role": "user", "content": _chat_prompt})
         if _DB_OK:
             try:
-                _db.save_chat_message(st.session_state.advisor_session_id, "user", _chat_prompt)
+                _db.save_chat_message(
+                    st.session_state.advisor_session_id, "user",
+                    _chat_prompt, user_id=current_user
+                )
             except Exception:
                 pass
 
         with st.chat_message("assistant", avatar="🧠"):
-            with st.spinner("Analizando tu visión contra los datos históricos..."):
+            with st.spinner(f"Analizando tu visión, {current_user_name}..."):
                 _ctx_snap  = _advisor_context()
                 _ai_answer = _advisor_call(
                     _chat_prompt,
@@ -5869,7 +6026,22 @@ if _chat_prompt:
         st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})
         if _DB_OK:
             try:
-                _db.save_chat_message(st.session_state.advisor_session_id, "assistant", _ai_answer)
+                _db.save_chat_message(
+                    st.session_state.advisor_session_id, "assistant",
+                    _ai_answer, user_id=current_user
+                )
+            except Exception:
+                pass
+        # Auto-aprendizaje: extraer insight y guardar en ai_memory
+        if _DB_OK and _ant_key:
+            try:
+                _lesson = _extract_lesson(_chat_prompt, _ai_answer, _ant_key)
+                if _lesson:
+                    _db.save_ai_memory(
+                        current_user, "insight",
+                        f"Chat {datetime.now().strftime('%Y-%m-%d')}",
+                        _lesson, 0.7, "chat",
+                    )
             except Exception:
                 pass
 
@@ -5877,10 +6049,13 @@ if st.session_state.advisor_chat:
     if st.button("🗑️ Limpiar conversación", key="_advisor_clear"):
         if _DB_OK:
             try:
-                _db.clear_chat_history(st.session_state.advisor_session_id)
+                _db.clear_chat_history(
+                    st.session_state.advisor_session_id, user_id=current_user
+                )
             except Exception:
                 pass
         st.session_state.advisor_chat = []
+        st.session_state[f"advisor_chat_{current_user}"] = []
         st.rerun()
 
 st.markdown("---")
