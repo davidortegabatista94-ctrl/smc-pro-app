@@ -97,6 +97,26 @@ def is_yf_available():
 
 logging.basicConfig(level=logging.WARNING)
 
+# ── Persistencia de backtests en disco ────────────────────────────────────────
+import pickle as _pickle
+_BT_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bt_cache.pkl")
+
+def _save_bt_cache(strategy_cmp, lt_cmp):
+    try:
+        with open(_BT_CACHE_PATH, "wb") as _f:
+            _pickle.dump({"sc": strategy_cmp, "lt": lt_cmp}, _f, protocol=_pickle.HIGHEST_PROTOCOL)
+    except Exception:
+        pass
+
+def _load_bt_cache():
+    try:
+        if os.path.exists(_BT_CACHE_PATH):
+            with open(_BT_CACHE_PATH, "rb") as _f:
+                return _pickle.load(_f)
+    except Exception:
+        pass
+    return {}
+
 """
 DOCUMENTACIÓN RÁPIDA — `smc_pro_app.py`
 
@@ -817,32 +837,81 @@ def auto_trade_signal(signal, volume=0.01, liq_levels=None, check_windows=True):
         return False, f"Error en auto-trading: {str(e)}"
 
 def auto_close_positions():
-    """Cierra automáticamente posiciones basadas en el estado local"""
+    """Cierra todas las posiciones abiertas del símbolo en MT5"""
     try:
         positions_mt5 = get_mt5_positions()
         if not positions_mt5:
             return False, "No hay posiciones abiertas en MT5"
-
-        state = load_position_state()
-        if not state["is_open"]:
-            return False, "No hay posición registrada localmente"
-
-        # Cerrar todas las posiciones del símbolo
+        mt5_mod = get_mt5()
+        done_code = getattr(mt5_mod, "TRADE_RETCODE_DONE", None) if mt5_mod else None
         closed_count = 0
         for position in positions_mt5:
             if position.symbol == SYMBOL:
                 result = close_mt5_position(position.ticket, comment="SMC Pro Auto Close")
-                if result and result.retcode == mt5.TRADE_RETCODE_DONE:
+                ok = (result is not None) and (done_code is None or getattr(result, "retcode", None) == done_code or getattr(result, "order", 0) != 0)
+                if ok:
                     closed_count += 1
-
         if closed_count > 0:
-            close_position("AUTO_CLOSE")
-            return True, f"Cerradas {closed_count} posiciones automáticamente"
-        else:
-            return False, "Error cerrando posiciones"
-
+            try:
+                close_position("AUTO_CLOSE")
+            except Exception:
+                pass
+            return True, f"Cerradas {closed_count} posiciones"
+        return False, "No se pudo cerrar ninguna posición"
     except Exception as e:
         return False, f"Error en auto-cierre: {str(e)}"
+
+
+def manage_positions_be():
+    """Gestión automática de Break-Even: mueve SL a entrada cuando ganancia >= 1×SL.
+    Devuelve lista de mensajes con acciones realizadas."""
+    msgs = []
+    try:
+        if not is_mt5_available() or not mt5_connect():
+            return msgs
+        mt5_mod = get_mt5()
+        positions = get_mt5_positions()
+        for pos in positions:
+            if pos.symbol != SYMBOL:
+                continue
+            # Distancia original SL
+            sl_dist = abs(pos.price_open - pos.sl) if pos.sl != 0 else None
+            if not sl_dist or sl_dist < 0.0001:
+                continue
+            # Verificar si el precio actual ya supera 1×SL en beneficio
+            current_price_buy  = getattr(pos, "price_current", pos.price_open)
+            if pos.type == 0:  # BUY
+                profit_dist = current_price_buy - pos.price_open
+                be_target   = pos.price_open + sl_dist
+                if current_price_buy >= be_target and pos.sl < pos.price_open:
+                    # Mover SL a entrada (break-even)
+                    request = {
+                        "action":   mt5_mod.TRADE_ACTION_SLTP,
+                        "position": pos.ticket,
+                        "sl":       pos.price_open,
+                        "tp":       pos.tp,
+                    }
+                    result = mt5_mod.order_send(request)
+                    done_code = getattr(mt5_mod, "TRADE_RETCODE_DONE", None)
+                    if result and (done_code is None or getattr(result, "retcode", None) == done_code):
+                        msgs.append(f"BE activado LONG ticket {pos.ticket} ({pos.price_open:.5f})")
+            else:  # SELL
+                profit_dist = pos.price_open - current_price_buy
+                be_target   = pos.price_open - sl_dist
+                if current_price_buy <= be_target and pos.sl > pos.price_open:
+                    request = {
+                        "action":   mt5_mod.TRADE_ACTION_SLTP,
+                        "position": pos.ticket,
+                        "sl":       pos.price_open,
+                        "tp":       pos.tp,
+                    }
+                    result = mt5_mod.order_send(request)
+                    done_code = getattr(mt5_mod, "TRADE_RETCODE_DONE", None)
+                    if result and (done_code is None or getattr(result, "retcode", None) == done_code):
+                        msgs.append(f"BE activado SHORT ticket {pos.ticket} ({pos.price_open:.5f})")
+    except Exception as e:
+        msgs.append(f"Error BE: {e}")
+    return msgs
 
 # ============================================
 # DATOS — MT5 primero, yfinance fallback
@@ -3986,7 +4055,9 @@ else:
     if "backtest_result" not in st.session_state:
         st.session_state.backtest_result = None
     if "strategy_comparison" not in st.session_state:
-        st.session_state.strategy_comparison = None
+        _bt_disk = _load_bt_cache()
+        st.session_state.strategy_comparison = _bt_disk.get("sc")
+        st.session_state.backtest_result = (_bt_disk["sc"]["best"] if _bt_disk.get("sc") else None)
     if "market_context_reasons" not in st.session_state:
         st.session_state.market_context_reasons = None
     if "economic_calendar" not in st.session_state:
@@ -4257,6 +4328,8 @@ if refresh_secs > 0:
             should_auto_refresh = True
 
 run_fresh_analysis = run_analysis or should_auto_refresh
+# True cuando es el timer automático (no botón manual) → análisis sin spinner visible
+_is_auto_refresh = should_auto_refresh and not run_analysis
 if run_fresh_analysis:
     # Fijar timestamp ANTES del análisis para que el timer empiece desde aquí
     st.session_state.last_analysis_time = time.time()
@@ -4297,7 +4370,10 @@ smart_warnings    = []
 
 if st.session_state.analysis_executed:
     if run_fresh_analysis:
-        with st.spinner("Obteniendo datos de MT5…"):
+        # En auto-refresh: sin spinner para que sea imperceptible para el usuario
+        import contextlib as _cl
+        _spin = st.spinner("Analizando mercado…") if not _is_auto_refresh else _cl.nullcontext()
+        with _spin:
             signal   = generate_signal()
             tick     = get_mt5_tick(SYMBOL) if connected else None
             df_1h    = get_eurusd_data("1h")
@@ -4889,6 +4965,8 @@ with bt_ctrl_l:
             else:
                 st.session_state.strategy_comparison = cmp
                 st.session_state.backtest_result = cmp["best"]
+                # Persistir en disco para sobrevivir recargas de página
+                _save_bt_cache(cmp, st.session_state.get("lt_comparison"))
                 # Contexto de mercado sobre los mismos datos del backtest
                 cot_snap  = st.session_state.get("cot_data")
                 cal_snap  = st.session_state.get("economic_calendar") or get_economic_calendar()
@@ -5045,7 +5123,8 @@ st.caption(
 )
 
 if "lt_comparison" not in st.session_state:
-    st.session_state.lt_comparison = None
+    _bt_disk2 = _load_bt_cache()
+    st.session_state.lt_comparison = _bt_disk2.get("lt")
 
 _lt_cols = st.columns([1, 2])
 with _lt_cols[0]:
@@ -5066,6 +5145,8 @@ with _lt_cols[0]:
             else:
                 st.session_state.lt_comparison = _lt_cmp
                 st.session_state.lt_n_bars = _lt_n
+                # Persistir en disco para sobrevivir recargas de página
+                _save_bt_cache(st.session_state.get("strategy_comparison"), _lt_cmp)
                 st.success(
                     f"✅ Completado — {_lt_n} barras diarias · Mejor estrategia: "
                     f"**{_lt_cmp['best']['label']}** "
@@ -5271,33 +5352,68 @@ if is_mt5_available() and mt5_connect():
         else:
             st.info("🎯 Sin pos.")
 
-    # Información de riesgo cuando bot está activo
-    if st.session_state.bot_enabled:
-        st.warning("⚠️ **BOT ACTIVO** - Ejecutará operaciones automáticamente")
-        st.info(f"💰 Volumen: {st.session_state.bot_volume} lotes | SL: {SCALP_SL_PIPS}p máximo")
+    # ── Panel de posiciones abiertas ──────────────────────────────────────────
+    _live_pos = get_mt5_positions()
+    if _live_pos:
+        st.markdown("#### 📊 Posiciones Abiertas")
+        for _p in _live_pos:
+            _be_dist = abs(_p.price_open - _p.sl) if _p.sl != 0 else 0
+            _dir_lbl = "LONG" if _p.type == 0 else "SHORT"
+            _profit_pips = (_p.price_current - _p.price_open) / 0.0001 if _p.type == 0 else (_p.price_open - _p.price_current) / 0.0001
+            _be_active = (_p.sl >= _p.price_open if _p.type == 0 else _p.sl <= _p.price_open) and _p.sl != 0
+            _be_icon = "⚖️ BE" if _be_active else "🎯"
+            st.markdown(
+                f"**#{_p.ticket}** {_dir_lbl} {_p.volume}L @ {_p.price_open:.5f} "
+                f"| Actual: {_p.price_current:.5f} "
+                f"| {_be_icon} P&L: {_profit_pips:+.1f}p (${_p.profit:.2f})"
+            )
+    else:
+        st.info("🎯 Sin posiciones abiertas")
 
-        # Lógica del bot automático
-        if st.session_state.analysis_executed:
-            try:
-                if not st.session_state.bot_just_activated and score >= MIN_DEFINITIVE_SCORE and signal.get("direction"):
-                    if st.session_state.bot_last_signal != signal.get("direction"):
-                        success, msg = auto_trade_signal(signal, st.session_state.bot_volume, liq_levels=liq_levels)
-                        if success:
-                            st.success(f"🚀 Bot ejecutó: {msg}")
-                            st.session_state.bot_last_signal = signal.get("direction")
-                        else:
-                            st.error(f"❌ Error del bot: {msg}")
-                    else:
-                        st.info("🔄 Señal ya ejecutada por el bot")
-                elif st.session_state.bot_just_activated:
-                    st.info("🤖 Bot activado - Esperando nueva señal...")
-                    st.session_state.bot_just_activated = False
-                else:
-                    st.session_state.bot_last_signal = None
-            except NameError:
-                st.info("🔄 Presiona 'ANALIZAR MERCADO' para que el bot comience")
-        else:
+    # ── Break-Even automático ─────────────────────────────────────────────────
+    if st.session_state.bot_enabled and _live_pos:
+        _be_msgs = manage_positions_be()
+        for _bm in _be_msgs:
+            st.success(f"⚖️ {_bm}")
+
+    # ── Información de riesgo y lógica del bot ────────────────────────────────
+    if st.session_state.bot_enabled:
+        st.warning("⚠️ **BOT ACTIVO** — Trading automático en curso")
+        st.info(f"💰 Volumen: {st.session_state.bot_volume} lotes | SL máx: {SCALP_SL_PIPS}p")
+
+        # Lógica del bot: ejecutar señal si condiciones se cumplen
+        _bot_score = score if st.session_state.analysis_executed else 0
+        _bot_signal = signal if st.session_state.analysis_executed else {}
+        _bot_liq = liq_levels if st.session_state.analysis_executed else []
+
+        if not st.session_state.analysis_executed:
             st.info("🔄 Presiona 'ANALIZAR MERCADO' primero para activar el bot")
+        elif st.session_state.bot_just_activated:
+            st.info("🤖 Bot activado — esperando próxima señal de calidad...")
+            st.session_state.bot_just_activated = False
+        elif _bot_signal.get("direction") and _bot_score >= MIN_DEFINITIVE_SCORE:
+            # Solo ejecutar si no hay posiciones abiertas y la señal cambió
+            if _live_pos:
+                st.info(f"🔒 Posición abierta — bot monitorea BE y gestión automática")
+            elif st.session_state.bot_last_signal != _bot_signal.get("direction"):
+                _ok, _msg = auto_trade_signal(_bot_signal, st.session_state.bot_volume, liq_levels=_bot_liq)
+                if _ok:
+                    st.success(f"🚀 Bot ejecutó trade: {_msg}")
+                    st.session_state.bot_last_signal = _bot_signal.get("direction")
+                    try:
+                        send_telegram_alert(_bot_signal, _bot_score, definitive=True, reason=f"Bot auto: {_msg}")
+                    except Exception:
+                        pass
+                else:
+                    st.error(f"❌ Error bot: {_msg}")
+            else:
+                st.info("🔄 Señal activa ya ejecutada — esperando nueva señal")
+        else:
+            _threshold_gap = MIN_DEFINITIVE_SCORE - _bot_score
+            if _threshold_gap > 0:
+                st.info(f"⏳ Score {_bot_score}/100 — faltan {_threshold_gap}p para ejecutar (mínimo {MIN_DEFINITIVE_SCORE})")
+            else:
+                st.info("⏳ Sin dirección clara — bot en espera")
 
 else:
     st.error("❌ MT5 no conectado - Bot no disponible")
