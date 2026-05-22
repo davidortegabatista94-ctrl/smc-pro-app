@@ -2397,11 +2397,14 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
         use_windows  = False   # sin filtro de horario en datos diarios
         _atr_min     = PIP * 40   # ATR mínimo: 40 pips (vs 4p en 1h)
         _sl_min      = PIP * 40   # SL mínimo
-        _sl_max      = PIP * 150  # SL máximo
-        _cd_base     = 3          # cooldown: 3 días (vs 6 velas 1h)
+        _sl_max      = PIP * 120  # SL máximo (bajado de 150 para forzar más operaciones)
+        _cd_base     = 2          # cooldown: 2 días (bajado de 3)
         _agg_atr_min = PIP * 60   # aggressive_momentum mínimo ATR
         _be_atr_min  = PIP * 50   # precision_be mínimo ATR
         _be_near_pip = PIP * 100  # pullback EMA21 ± 100 pips
+        _sl_mult     = 1.0        # multiplicador SL: 1×ATR diario (~51 pips)
+        _entry_rr    = 2.0        # RR diario más bajo = TP alcanzable más rápido
+        _max_bars    = 25         # máximo de días en operación antes de forzar cierre
     else:
         _atr_min     = PIP * 4
         _sl_min      = PIP * 6
@@ -2410,6 +2413,9 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
         _agg_atr_min = PIP * 6
         _be_atr_min  = PIP * 5
         _be_near_pip = PIP * 10
+        _sl_mult     = 1.2
+        _entry_rr    = RR
+        _max_bars    = 9999
 
     close = df["Close"].copy(); high = df["High"].copy(); low = df["Low"].copy()
     opn   = df["Open"].copy() if "Open" in df.columns else close.shift(1)
@@ -2516,8 +2522,8 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
         mblo= float(mb_lo.iloc[i])  if not np.isnan(mb_lo.iloc[i])  else c - av*2
         sdir= int(st_dir.iloc[i]);  sdir_p = int(st_dir.iloc[i-1])
 
-        sl_d = max(min(av * 1.2, _sl_max), _sl_min)
-        tp_d = sl_d * RR
+        sl_d = max(min(av * _sl_mult, _sl_max), _sl_min)
+        tp_d = sl_d * _entry_rr
 
         if in_trade:
             spr = sl_d / PIP; tpr = tp_d / PIP
@@ -2554,6 +2560,12 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
                     pnl = tpr*pip_val; equity.append(equity[-1]+pnl)
                     trades.append({"dir":"SHORT","outcome":"TP","pips":round(tpr,1),"pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
                     in_trade = False; be_activated = False
+            # Forzar cierre si la operación lleva demasiadas barras (solo modo diario)
+            if in_trade and ei is not None and (i - ei) >= _max_bars:
+                cur_pips = ((c - ep) / PIP) if dr == "LONG" else ((ep - c) / PIP)
+                pnl = cur_pips * pip_val; equity.append(equity[-1] + pnl)
+                trades.append({"dir": dr, "outcome": "MAX", "pips": round(cur_pips, 1), "pnl": round(pnl, 2), "time": str(df.index[ei])[:16]})
+                in_trade = False; be_activated = False
             continue
 
         cd_ok = (i - last_entry_i) >= _cd_base
@@ -2679,8 +2691,8 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
     if not trades:
         return None
 
-    wins   = [t for t in trades if t["outcome"] == "TP"]
-    losses = [t for t in trades if t["outcome"] == "SL"]
+    wins   = [t for t in trades if t["outcome"] == "TP" or (t["outcome"] == "MAX" and t["pips"] > 0)]
+    losses = [t for t in trades if t["outcome"] == "SL" or (t["outcome"] == "MAX" and t["pips"] <= 0)]
     bes    = [t for t in trades if t["outcome"] == "BE"]
     total  = len(trades)
     wr     = len(wins) / total * 100 if total > 0 else 0
@@ -4961,7 +4973,7 @@ if cmp_result:
         if raw:
             td = pd.DataFrame(raw)
             if "outcome" in td.columns:
-                td["Resultado"] = td["outcome"].map({"TP":"✅ TP","SL":"❌ SL","BE":"🔄 BE 0p","OPEN":"🔄 Abierta"})
+                td["Resultado"] = td["outcome"].map({"TP":"✅ TP","SL":"❌ SL","BE":"🔄 BE 0p","MAX":"⏱ MAX","OPEN":"🔄 Abierta"})
             cols_s = [c for c in ["time","dir","Resultado","pips","pnl"] if c in td.columns]
             st.dataframe(
                 td[cols_s].rename(columns={"time":"Entrada","dir":"Dirección","pips":"Pips","pnl":"P&L $"}),
