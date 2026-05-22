@@ -5171,6 +5171,8 @@ if _lt_cmp_result:
     _lt_years  = round(_lt_n_bars / 252) if _lt_n_bars else "?"
     st.markdown(f"### 📊 Ranking Histórico 2008–Hoy ({_lt_n_bars} barras · ~{_lt_years} años)")
 
+    if "_RANK_EMOJI" not in dir():
+        _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
     _lt_rows = []
     for _i, _r in enumerate(_lt_cmp_result["results"]):
         _rentable = _r.get("profit_factor", 0) >= 1.0
