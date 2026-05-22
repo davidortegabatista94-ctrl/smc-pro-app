@@ -1583,6 +1583,35 @@ def get_backtest_data(tf="1h"):
     return pd.DataFrame()
 
 
+def get_longterm_data_2008():
+    """
+    Descarga datos diarios EUR/USD desde 2008 hasta hoy via yfinance.
+    Los datos diarios están disponibles desde 1999 sin límite de período.
+    Devuelve DataFrame con columnas Open/High/Low/Close/Volume.
+    """
+    yf_mod = get_yf()
+    if not yf_mod:
+        return pd.DataFrame()
+    for attempt in ["2008-01-01", "2010-01-01"]:
+        try:
+            df = yf_mod.download(
+                "EURUSD=X",
+                start=attempt,
+                interval="1d",
+                progress=False,
+                auto_adjust=True,
+            )
+            df = flatten_columns(df)
+            df.dropna(subset=["Close", "High", "Low"], inplace=True)
+            df = df[df["Close"] > 0]
+            if len(df) > 500:
+                logging.info(f"Long-term data: {len(df)} bars desde {attempt}")
+                return df
+        except Exception as e:
+            logging.warning(f"Long-term data ({attempt}): {e}")
+    return pd.DataFrame()
+
+
 def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
     """
     Estrategia multi-confluencia equilibrada — EUR/USD 1h.
@@ -2359,9 +2388,28 @@ _STRATEGY_META = {
     },
 }
 
-def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=2):
-    if df.empty or len(df) < 110:
+def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=2, daily_mode=False):
+    min_bars = 200 if daily_mode else 110
+    if df.empty or len(df) < min_bars:
         return None
+    # Escala de umbrales ATR según timeframe
+    if daily_mode:
+        use_windows  = False   # sin filtro de horario en datos diarios
+        _atr_min     = PIP * 40   # ATR mínimo: 40 pips (vs 4p en 1h)
+        _sl_min      = PIP * 40   # SL mínimo
+        _sl_max      = PIP * 150  # SL máximo
+        _cd_base     = 3          # cooldown: 3 días (vs 6 velas 1h)
+        _agg_atr_min = PIP * 60   # aggressive_momentum mínimo ATR
+        _be_atr_min  = PIP * 50   # precision_be mínimo ATR
+        _be_near_pip = PIP * 100  # pullback EMA21 ± 100 pips
+    else:
+        _atr_min     = PIP * 4
+        _sl_min      = PIP * 6
+        _sl_max      = PIP * 20
+        _cd_base     = 6
+        _agg_atr_min = PIP * 6
+        _be_atr_min  = PIP * 5
+        _be_near_pip = PIP * 10
 
     close = df["Close"].copy(); high = df["High"].copy(); low = df["Low"].copy()
     opn   = df["Open"].copy() if "Open" in df.columns else close.shift(1)
@@ -2468,7 +2516,7 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
         mblo= float(mb_lo.iloc[i])  if not np.isnan(mb_lo.iloc[i])  else c - av*2
         sdir= int(st_dir.iloc[i]);  sdir_p = int(st_dir.iloc[i-1])
 
-        sl_d = max(min(av * 1.2, PIP * 20), PIP * 6)
+        sl_d = max(min(av * 1.2, _sl_max), _sl_min)
         tp_d = sl_d * RR
 
         if in_trade:
@@ -2508,8 +2556,8 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
                     in_trade = False; be_activated = False
             continue
 
-        cd_ok = (i - last_entry_i) >= 6
-        matr  = av > PIP * 4
+        cd_ok = (i - last_entry_i) >= _cd_base
+        matr  = av > _atr_min
         long_sig = short_sig = False
 
         if strategy == "ema_trend":
@@ -2563,9 +2611,9 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
             # AGRESIVA: vela con cuerpo fuerte + ATR alto + EMA alineadas, sin filtro RSI
             body       = abs(c - o_c)
             rng        = (h_c - l_c) if (h_c - l_c) > 1e-9 else 1e-9
-            strong     = (body / rng) > 0.55          # vela decisiva
-            high_atr   = av > PIP * 6                 # mercado moviéndose fuerte
-            cd_ok_agg  = (i - last_entry_i) >= 4      # cooldown corto
+            strong     = (body / rng) > 0.55
+            high_atr   = av > _agg_atr_min
+            cd_ok_agg  = (i - last_entry_i) >= max(4, _cd_base - 2)
             long_sig   = (e9>e21>e50) and c>prev_c and strong and high_atr and cd_ok_agg
             short_sig  = (e9<e21<e50) and c<prev_c and strong and high_atr and cd_ok_agg
 
@@ -2599,8 +2647,8 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
             # PRECISIÓN BE: pullback exacto a EMA21 en tendencia + BE automático
             # Entrada LONG: precio entre EMA50 y EMA21+10pip · RSI saludable ·
             #               MACD creciente · Estocástico girando al alza · vela alcista
-            near_e21_long  = e50 < c <= e21 + PIP * 10   # pullback tocó EMA21
-            near_e21_short = e50 > c >= e21 - PIP * 10
+            near_e21_long  = e50 < c <= e21 + _be_near_pip
+            near_e21_short = e50 > c >= e21 - _be_near_pip
             macd_growing   = hv > hv_p and hv > 0
             macd_turning   = hv > 0 and hv_p <= 0
             macd_ok_l      = macd_growing or macd_turning
@@ -2609,8 +2657,8 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
             stoch_turn_dn  = sk < sd and sk_p >= sd_p and sk > 50
             bull_candle    = c > o_c
             bear_candle    = c < o_c
-            cd_ok_be       = (i - last_entry_i) >= 8
-            atr_ok_be      = av > PIP * 5
+            cd_ok_be       = (i - last_entry_i) >= max(8, _cd_base + 2)
+            atr_ok_be      = av > _be_atr_min
             long_sig  = (e9>e21>e50) and near_e21_long  and 38<=r<=58 and macd_ok_l and stoch_turn_up and bull_candle and atr_ok_be and cd_ok_be
             short_sig = (e9<e21<e50) and near_e21_short and 42<=r<=62 and macd_ok_s and stoch_turn_dn and bear_candle and atr_ok_be and cd_ok_be
 
@@ -2651,16 +2699,17 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
     pf = round(gw / max(gl, 0.01), 2)
     meta = _STRATEGY_META.get(strategy, {})
     return {
-        "strategy": strategy,
-        "label":    meta.get("label", strategy),
-        "why":      meta.get("why",   ""),
-        "pros":     meta.get("pros",  ""),
-        "cons":     meta.get("cons",  ""),
-        "total":    total, "wins": len(wins), "losses": len(losses), "be_count": len(bes),
-        "winrate":  round(wr, 1), "be_winrate": be_wr,
-        "net_pips": round(np_, 1), "net_pnl": round(npnl, 2),
-        "max_dd":   round(max_dd, 1), "profit_factor": pf,
-        "rr_ratio": RR, "equity": equity, "trades": trades[-300:],
+        "strategy":   strategy,
+        "label":      meta.get("label", strategy),
+        "why":        meta.get("why",   ""),
+        "pros":       meta.get("pros",  ""),
+        "cons":       meta.get("cons",  ""),
+        "total":      total, "wins": len(wins), "losses": len(losses), "be_count": len(bes),
+        "winrate":    round(wr, 1), "be_winrate": be_wr,
+        "net_pips":   round(np_, 1), "net_pnl": round(npnl, 2),
+        "max_dd":     round(max_dd, 1), "profit_factor": pf,
+        "rr_ratio":   RR, "equity": equity, "trades": trades[-300:],
+        "daily_mode": daily_mode,
     }
 
 _ALL_STRATEGIES = list(_STRATEGY_META.keys())
@@ -2677,6 +2726,39 @@ def run_strategy_comparison(df, use_windows=True, utc_offset=2):
     results.sort(
         key=lambda r: r["profit_factor"] * (r["winrate"] / 100) * (r["total"] ** 0.5),
         reverse=True
+    )
+    return {"results": results, "best": results[0]}
+
+
+def run_longterm_comparison(df_daily):
+    """
+    Ejecuta las 17 estrategias sobre datos diarios desde 2008.
+    Usa daily_mode=True: ATR escalado, sin filtro de horario, cooldown en días.
+    Devuelve mismo formato que run_strategy_comparison.
+    """
+    if df_daily.empty or len(df_daily) < 200:
+        return None
+
+    results = []
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {
+            pool.submit(
+                _run_single_strategy,
+                df_daily, name, False, 2, True   # daily_mode=True
+            ): name
+            for name in _ALL_STRATEGIES
+        }
+        for fut in as_completed(futures):
+            r = fut.result()
+            if r:
+                results.append(r)
+
+    if not results:
+        return None
+
+    results.sort(
+        key=lambda r: r["profit_factor"] * (r["winrate"] / 100) * (r["total"] ** 0.5),
+        reverse=True,
     )
     return {"results": results, "best": results[0]}
 
@@ -3164,7 +3246,7 @@ def calc_scalp_levels(price, direction, df=None, atr_pips=None, liq_levels=None)
     if price is None or direction not in ("LONG", "SHORT"):
         return None, None, None, None, None, []
     # Ratio mínimo 1:2.8 (objetivo 1:3) — necesario para ser rentable con 40% WR
-    MIN_RATIO = 2.8 + np.random.random() * 0.4  # Entre 2.8 y 3.2
+    MIN_RATIO = 3.0  # Ratio fijo 1:3 (2.8 era variable/random — causaba inconsistencia)
     MAX_SL = 12  # SL máximo 12 pips
     support, resistance = None, None
     liquidity_warnings = []
@@ -3496,11 +3578,15 @@ def ai_market_bias(signal_data, market_structures, vol_absorption, stop_hunts, p
     scores  = {"LONG": 0, "SHORT": 0}
     evidence = []
     for tf, ms in market_structures.items():
+        if not ms:
+            continue
         w = {"1d": 30, "4h": 25, "1h": 20, "15m": 15}.get(tf, 10)
-        if ms["tendencia"] == "ALCISTA":
-            scores["LONG"]  += w; evidence.append(f"📈 Estructura {tf}: {ms['estructura']} (+{w})")
-        elif ms["tendencia"] == "BAJISTA":
-            scores["SHORT"] += w; evidence.append(f"📉 Estructura {tf}: {ms['estructura']} (+{w})")
+        t = ms.get("tendencia", "LATERAL")
+        e = ms.get("estructura", "?")
+        if t == "ALCISTA":
+            scores["LONG"]  += w; evidence.append(f"📈 Estructura {tf}: {e} (+{w})")
+        elif t == "BAJISTA":
+            scores["SHORT"] += w; evidence.append(f"📉 Estructura {tf}: {e} (+{w})")
     for sh in stop_hunts[-2:]:
         if sh["señal"] == "LONG":
             scores["LONG"]  += 20; evidence.append("🐂 Stop Hunt BULL detectado (+20)")
@@ -4329,14 +4415,16 @@ if st.session_state.analysis_executed:
 
     # ── Señal principal ───────────────────────────────────────────────────────
     st.markdown("---")
-    final = signal["final_signal"]
+    final = signal.get("final_signal", "⚪ NO TRADE")
     css   = "sl" if "COMPRA" in final else ("ss" if "VENTA" in final else "sw")
     st.markdown(f'<div class="big-signal {css}">{final}</div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("✅ Señales COMPRA", signal["buy_signals"])
-    c2.metric("❌ Señales VENTA",  signal["sell_signals"])
-    c3.metric(f"{signal['sess_icon']} Sesión", signal["session"].split(" ")[0])
-    c4.metric("⚡ Volatilidad",    signal["volatility"])
+    c1.metric("✅ Señales COMPRA", signal.get("buy_signals", 0))
+    c2.metric("❌ Señales VENTA",  signal.get("sell_signals", 0))
+    _sess_icon = signal.get("sess_icon", "🕐")
+    _session   = signal.get("session", "Desconocida")
+    c3.metric(f"{_sess_icon} Sesión", _session.split(" ")[0] if _session else "—")
+    c4.metric("⚡ Volatilidad", signal.get("volatility", "—"))
 
     # ── Panel Inteligencia Adaptativa (KB + Señal Estrategia + Régimen) ─────────
     kb_dir          = signal.get("kb_direction", "NO TRADE")
@@ -4574,7 +4662,7 @@ if st.session_state.analysis_executed:
     if price and direction:
         # Mostrar targets múltiples si están calculados
         if tp1 and tp2 and tp3 and smart_sl:
-            st.caption(f"SL estructural · ATR base: {atr_val:.1f} pips" if atr_val else "")
+            st.caption(f"SL estructural · ATR base: {atr_val:.1f} pips" if atr_val is not None else "SL estructural")
             col_t0, col_t1, col_t2, col_t3, col_sl = st.columns(5)
             col_t0.metric("💰 Precio",  f"{price:.5f}")
             col_t1.metric("🎯 TP1 (1:1)", f"{tp1:.5f}",
@@ -4820,19 +4908,24 @@ if cmp_result:
     best_name = cmp_result["best"]["strategy"]
 
     # Tabla comparativa
+    _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟",
+                   "⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
     rows = []
     for i, r in enumerate(cmp_result["results"]):
-        rentable = r["profit_factor"] >= 1.0 and r["winrate"] >= r["be_winrate"]
+        rentable = r.get("profit_factor", 0) >= 1.0 and r.get("winrate", 0) >= r.get("be_winrate", 0)
+        be_n = r.get("be_count", 0)
         rows.append({
-            "Pos": f"{'🥇' if i==0 else '🥈' if i==1 else '🥉' if i==2 else '4️⃣'}",
-            "Estrategia": r["label"],
-            "Operaciones": r["total"],
-            "Win Rate": f"{r['winrate']}%",
-            "Profit Factor": f"{r['profit_factor']}x",
-            "Net Pips": f"{r['net_pips']:+.1f}",
-            "Max DD": f"{r['max_dd']}%",
-            "P&L $": f"${r['net_pnl']:+.2f}",
-            "Estado": "✅ Rentable" if rentable else "⚠️ Marginal",
+            "Pos":          _RANK_EMOJI[i] if i < len(_RANK_EMOJI) else f"#{i+1}",
+            "Estrategia":   r.get("label", r.get("strategy", "?")),
+            "Operaciones":  r.get("total", 0),
+            "Win Rate":     f"{r.get('winrate', 0)}%",
+            "BE (scratch)": be_n,
+            "WR sin BE":    f"{r.get('be_winrate', 0)}%",
+            "Profit Factor":f"{r.get('profit_factor', 0)}x",
+            "Net Pips":     f"{r.get('net_pips', 0):+.1f}",
+            "Max DD":       f"{r.get('max_dd', 0)}%",
+            "P&L $":        f"${r.get('net_pnl', 0):+.2f}",
+            "Estado":       "✅ Rentable" if rentable else "⚠️ Marginal",
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
@@ -4868,7 +4961,7 @@ if cmp_result:
         if raw:
             td = pd.DataFrame(raw)
             if "outcome" in td.columns:
-                td["Resultado"] = td["outcome"].map({"TP":"✅ TP","SL":"❌ SL","OPEN":"🔄 Abierta"})
+                td["Resultado"] = td["outcome"].map({"TP":"✅ TP","SL":"❌ SL","BE":"🔄 BE 0p","OPEN":"🔄 Abierta"})
             cols_s = [c for c in ["time","dir","Resultado","pips","pnl"] if c in td.columns]
             st.dataframe(
                 td[cols_s].rename(columns={"time":"Entrada","dir":"Dirección","pips":"Pips","pnl":"P&L $"}),
@@ -4917,6 +5010,129 @@ if cmp_result:
                     st.markdown(f"  - {_rc}")
 else:
     st.info("Pulsa **'Comparar 17 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
+
+# ════════════════════════════════════════════════════════════════════════════════
+# BACKTEST HISTÓRICO LARGO PLAZO — DESDE 2008 (DATOS DIARIOS)
+# ════════════════════════════════════════════════════════════════════════════════
+st.markdown("---")
+st.subheader("🌍 Backtest Histórico — Desde 2008 hasta Hoy (Datos Diarios)")
+st.caption(
+    "Descarga datos diarios EUR/USD desde 2008 (~4,000 velas) y ejecuta las 17 estrategias. "
+    "Los umbrales ATR se escalan automáticamente para barras diarias. "
+    "Resultado: cuál estrategia habría sido más rentable en 16+ años de mercado real."
+)
+
+if "lt_comparison" not in st.session_state:
+    st.session_state.lt_comparison = None
+
+_lt_cols = st.columns([1, 2])
+with _lt_cols[0]:
+    _run_lt = st.button("🚀 Backtest 2008–Hoy (17 estrategias · datos diarios)",
+                        type="primary", key="run_lt")
+    if _run_lt:
+        with st.spinner("Descargando datos diarios EUR/USD desde 2008..."):
+            _lt_df = get_longterm_data_2008()
+        if _lt_df.empty:
+            st.error("No se pudieron descargar datos históricos. Verifica conexión a internet.")
+        else:
+            _lt_n = len(_lt_df)
+            _lt_years = round(_lt_n / 252)
+            with st.spinner(f"Ejecutando 17 estrategias sobre {_lt_n} días (~{_lt_years} años) — paralelo, ~15-30s..."):
+                _lt_cmp = run_longterm_comparison(_lt_df)
+            if not _lt_cmp:
+                st.warning("Sin operaciones válidas en datos históricos.")
+            else:
+                st.session_state.lt_comparison = _lt_cmp
+                st.session_state.lt_n_bars = _lt_n
+                st.success(
+                    f"✅ Completado — {_lt_n} barras diarias · Mejor estrategia: "
+                    f"**{_lt_cmp['best']['label']}** "
+                    f"(PF={_lt_cmp['best']['profit_factor']} · "
+                    f"WR={_lt_cmp['best']['winrate']}% · "
+                    f"{_lt_cmp['best']['net_pips']:+.0f} pips)"
+                )
+
+with _lt_cols[1]:
+    st.markdown(
+        "**Diferencias vs backtest de 1 año:**\n"
+        "- Datos diarios — cada barra = 1 día de trading\n"
+        "- ATR umbral escalado a ≥40 pips (vs 4p en 1h)\n"
+        "- Cooldown de 3 días entre entradas\n"
+        "- Sin filtro de horario (ventana London/NY)\n"
+        "- 16+ años incluyen: crisis 2008, COVID 2020, subidas Fed 2022-23"
+    )
+
+_lt_cmp_result = st.session_state.get("lt_comparison")
+if _lt_cmp_result:
+    _lt_n_bars = st.session_state.get("lt_n_bars", 0)
+    _lt_years  = round(_lt_n_bars / 252) if _lt_n_bars else "?"
+    st.markdown(f"### 📊 Ranking Histórico 2008–Hoy ({_lt_n_bars} barras · ~{_lt_years} años)")
+
+    _lt_rows = []
+    for _i, _r in enumerate(_lt_cmp_result["results"]):
+        _rentable = _r.get("profit_factor", 0) >= 1.0
+        _be_n = _r.get("be_count", 0)
+        _lt_rows.append({
+            "Pos":           _RANK_EMOJI[_i] if _i < len(_RANK_EMOJI) else f"#{_i+1}",
+            "Estrategia":    _r.get("label", _r.get("strategy", "?")),
+            "Operaciones":   _r.get("total", 0),
+            "Win Rate":      f"{_r.get('winrate', 0)}%",
+            "BE (scratch)":  _be_n,
+            "Profit Factor": f"{_r.get('profit_factor', 0)}x",
+            "Net Pips":      f"{_r.get('net_pips', 0):+.0f}",
+            "Max DD":        f"{_r.get('max_dd', 0)}%",
+            "P&L $":         f"${_r.get('net_pnl', 0):+.2f}",
+            "Estado":        "✅ Rentable" if _rentable else "⚠️ Marginal",
+        })
+    st.dataframe(pd.DataFrame(_lt_rows), use_container_width=True, hide_index=True)
+
+    _lt_best = _lt_cmp_result["best"]
+    st.markdown(f"### 🏆 Mejor Estrategia Histórica (2008–Hoy): {_lt_best['label']}")
+    _ltc1, _ltc2, _ltc3, _ltc4, _ltc5 = st.columns(5)
+    _ltc1.metric("Operaciones", _lt_best.get("total", 0))
+    _ltc2.metric("Win Rate", f"{_lt_best.get('winrate', 0)}%")
+    _ltc3.metric("Profit Factor", f"{_lt_best.get('profit_factor', 0)}x")
+    _ltc4.metric("Net Pips", f"{_lt_best.get('net_pips', 0):+.0f}p")
+    _ltc5.metric("Max Drawdown", f"{_lt_best.get('max_dd', 0)}%")
+
+    st.info(
+        f"**Por qué funciona a largo plazo:** {_lt_best.get('why', '')}\n\n"
+        f"✅ **Ventajas:** {_lt_best.get('pros', '')}\n\n"
+        f"⚠️ **Limitaciones:** {_lt_best.get('cons', '')}"
+    )
+
+    # Curva de capital de la ganadora histórica
+    _lt_eq = _lt_best.get("equity", [])
+    if len(_lt_eq) > 2:
+        st.write(f"**Curva de capital 2008–Hoy — {_lt_best['label']} ($10,000 inicial · 0.01 lot):**")
+        st.line_chart(pd.DataFrame({"Capital ($)": _lt_eq}), height=260)
+
+    with st.expander("Ver curvas de todas las estrategias — largo plazo", expanded=False):
+        _lt_max_len = max(len(_r["equity"]) for _r in _lt_cmp_result["results"])
+        _lt_eq_all  = {}
+        for _r in _lt_cmp_result["results"]:
+            _eq_pad = _r["equity"] + [_r["equity"][-1]] * (_lt_max_len - len(_r["equity"]))
+            _lt_eq_all[_r["label"][:20]] = _eq_pad
+        st.line_chart(pd.DataFrame(_lt_eq_all), height=260)
+
+    with st.expander(
+        f"Ver operaciones de '{_lt_best['label']}' ({len(_lt_best.get('trades', []))} trades)",
+        expanded=False
+    ):
+        _lt_raw = _lt_best.get("trades", [])
+        if _lt_raw:
+            _lt_td = pd.DataFrame(_lt_raw)
+            if "outcome" in _lt_td.columns:
+                _lt_td["Resultado"] = _lt_td["outcome"].map(
+                    {"TP": "✅ TP", "SL": "❌ SL", "BE": "🔄 BE 0p", "OPEN": "🔄 Abierta"}
+                )
+            _lt_cols_s = [c for c in ["time", "dir", "Resultado", "pips", "pnl"] if c in _lt_td.columns]
+            st.dataframe(
+                _lt_td[_lt_cols_s].rename(
+                    columns={"time": "Fecha", "dir": "Dirección", "pips": "Pips (día)", "pnl": "P&L $"}
+                ),
+                use_container_width=True, hide_index=True,
+            )
 
 # ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
 st.markdown("---")
