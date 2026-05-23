@@ -276,7 +276,7 @@ Responde SOLO con JSON (sin markdown):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _FREE_APIS = [
-    {"name": "Groq",      "env": "GROQ_API_KEY",      "fallback": "",                                                          "url": "https://console.groq.com",                   "type": "ai"},
+    {"name": "Groq",      "env": "GROQ_API_KEY",      "fallback": "gsk_0r0JRGjnYIAsgkfey3UWwWGdyb3FYjGb4Q5RKJICkoPGHM4pdQRlY", "url": "https://console.groq.com",                   "type": "ai"},
     {"name": "Cerebras",  "env": "CEREBRAS_API_KEY",  "fallback": "csk-tvmnhtvpwkytpxp2njpt6v23kd8t43mwn532cdfm6pt36k3j",     "url": "https://www.cerebras.ai",                    "type": "ai"},
     {"name": "Zhipu GLM", "env": "ZHIPU_API_KEY",     "fallback": "bcf45451bda84c4990cdab697602880d.XGkFUFoqEMZbJOBu",        "url": "https://open.bigmodel.cn",                   "type": "ai"},
     {"name": "FRED",      "env": "FRED_API_KEY",      "fallback": "8f68a4232ff18468959baa71aaa124de",                          "url": "https://fredaccount.stlouisfed.org/apikeys", "type": "data"},

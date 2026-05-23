@@ -26,7 +26,7 @@ def _get_providers() -> list[tuple]:
     """Return all available AI providers in priority order as (name, key, model) tuples."""
     providers = []
 
-    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
+    groq_key = os.environ.get("GROQ_API_KEY", "gsk_0r0JRGjnYIAsgkfey3UWwWGdyb3FYjGb4Q5RKJICkoPGHM4pdQRlY").strip()
     if groq_key:
         providers.append(("groq", groq_key, "llama-3.3-70b-versatile"))
 

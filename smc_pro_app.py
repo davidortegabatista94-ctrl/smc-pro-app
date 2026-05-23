@@ -7052,24 +7052,7 @@ st.caption(f"Hola {current_user_name}, cuéntame tu tesis. Analizo tu visión co
 import os as _os
 
 # API key: env var (Railway) o input de sesión
-_ant_key = _os.environ.get("GROQ_API_KEY", "").strip()
-if not _ant_key:
-    _ant_key = st.session_state.get("_advisor_key", "")
-if not _ant_key:
-    with st.expander("⚙️ Configurar API Key de Groq (solo la primera vez)", expanded=True):
-        _k_input = st.text_input(
-            "GROQ_API_KEY:",
-            type="password",
-            placeholder="gsk_...",
-            help="Gratuito en console.groq.com · O añádela como variable de entorno en Railway",
-            key="_advisor_key_field",
-        )
-        if _k_input:
-            st.session_state["_advisor_key"] = _k_input
-            _ant_key = _k_input
-            st.success("✅ Key guardada para esta sesión")
-        else:
-            st.info("📌 También puedes añadirla permanentemente en Railway → Settings → Variables → GROQ_API_KEY")
+_ant_key = _os.environ.get("GROQ_API_KEY", "gsk_0r0JRGjnYIAsgkfey3UWwWGdyb3FYjGb4Q5RKJICkoPGHM4pdQRlY").strip()
 
 # Session_id estable por usuario (aislado entre David y Javi)
 _adv_sess_key = f"advisor_session_{current_user}"
