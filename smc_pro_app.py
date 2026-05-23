@@ -4793,8 +4793,46 @@ else:
         f"TP variable · SL {SCALP_SL_PIPS}p máx · R:R 1:2-3"
     )
 
-    # ── Barra de navegación fija derecha (inyectada en el DOM padre) ──────────
+    # ── Preservar posición de scroll en cada rerun ────────────────────────────
+    # Guarda scrollY en sessionStorage justo cuando Streamlit empieza a procesar
+    # (aparece el indicador de estado). Lo restaura en el siguiente render.
     import streamlit.components.v1 as _stc
+    _stc.html("""<script>
+(function(){
+  var p = window.parent;
+  var KEY = 'smc_sy';
+
+  // Restaurar posición después del rerun
+  var sy = parseInt(p.sessionStorage.getItem(KEY) || '0');
+  if (sy > 80) {
+    p.requestAnimationFrame(function(){
+      p.requestAnimationFrame(function(){
+        p.scrollTo(0, sy);
+        setTimeout(function(){ p.sessionStorage.removeItem(KEY); }, 600);
+      });
+    });
+  }
+
+  // Guardar posición cuando Streamlit empieza a procesar
+  new MutationObserver(function(mutations){
+    for (var i=0; i<mutations.length; i++){
+      var nodes = mutations[i].addedNodes;
+      for (var j=0; j<nodes.length; j++){
+        var n = nodes[j];
+        if (!n || n.nodeType !== 1) continue;
+        var isStatus = (n.dataset && n.dataset.testid === 'stStatusWidget')
+                    || (n.querySelector && n.querySelector('[data-testid="stStatusWidget"]'));
+        if (isStatus){
+          p.sessionStorage.setItem(KEY, String(p.scrollY || p.pageYOffset || 0));
+          return;
+        }
+      }
+    }
+  }).observe(p.document.body, {childList:true, subtree:true});
+})();
+</script>""", height=0, scrolling=False)
+
+    # ── Barra de navegación fija derecha (inyectada en el DOM padre) ──────────
     _stc.html("""<script>
 (function(){
   var p = window.parent.document;
