@@ -32,7 +32,7 @@ def _get_providers() -> list[tuple]:
     if groq_key:
         providers.append(("groq", groq_key, "llama-3.3-70b-versatile"))
 
-    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "").strip()
+    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "csk-tvmnhtvpwkytpxp2njpt6v23kd8t43mwn532cdfm6pt36k3j").strip()
     if cerebras_key:
         providers.append(("cerebras", cerebras_key, "llama-3.3-70b"))
 
