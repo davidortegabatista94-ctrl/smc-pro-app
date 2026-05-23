@@ -4609,6 +4609,14 @@ except Exception as _bgw_err:
     logging.warning("Background worker no disponible: %s", _bgw_err)
 
 # ============================================
+# DETECCIÓN DE ENTORNO: LOCAL vs RAILWAY
+# ============================================
+import os as _os_env
+_IS_LOCAL  = not _os_env.environ.get("RAILWAY_ENVIRONMENT", "").strip()
+_railway_domain = _os_env.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
+_RAILWAY_URL = f"https://{_railway_domain}" if _railway_domain else "https://smc-pro-app-production.up.railway.app"
+
+# ============================================
 # INTERFAZ STREAMLIT
 # ============================================
 _APP_RERUN_START = time.time()
@@ -4666,6 +4674,7 @@ else:
                 _auth_ok = (_USERS_OFFLINE.get(_lu) == _lp)
             if _auth_ok:
                 st.session_state.current_user = _lu
+                st.session_state._scroll_reset = True
                 if _DB_OK:
                     try:
                         _tok2 = _db.create_session(_lu)
@@ -4952,43 +4961,68 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
   </div>
 </div>""", unsafe_allow_html=True)
 
+    # ── Banner modo local (extensión MT5) ────────────────────────────────────
+    if _IS_LOCAL:
+        st.markdown(f"""<div style="background:linear-gradient(90deg,#1a2a4a,#0b1525);
+            border:1px solid #3d7eff44;border-radius:10px;padding:12px 18px;
+            margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px">
+          <div>
+            <span style="color:#3d7eff;font-weight:700;font-size:13px">⚡ MODO EXTENSIÓN MT5</span>
+            <span style="color:#8899aa;font-size:12px;margin-left:10px">
+              Los datos se sincronizan con Railway · Usa la app web para el panel completo
+            </span>
+          </div>
+          <a href="{_RAILWAY_URL}" target="_blank"
+             style="background:#3d7eff;color:#fff;padding:5px 14px;border-radius:6px;
+                    font-size:12px;font-weight:600;text-decoration:none;white-space:nowrap">
+            🌐 Abrir app web →
+          </a>
+        </div>""", unsafe_allow_html=True)
+
     # ── Preservar posición de scroll en cada rerun ────────────────────────────
     # Guarda scrollY en sessionStorage justo cuando Streamlit empieza a procesar
     # (aparece el indicador de estado). Lo restaura en el siguiente render.
     import streamlit.components.v1 as _stc
-    _stc.html("""<script>
-(function(){
+    _scroll_reset = st.session_state.pop("_scroll_reset", False)
+    _stc.html(f"""<script>
+(function(){{
   var p = window.parent;
   var KEY = 'smc_sy';
 
-  // Restaurar posición después del rerun
-  var sy = parseInt(p.sessionStorage.getItem(KEY) || '0');
-  if (sy > 80) {
-    p.requestAnimationFrame(function(){
-      p.requestAnimationFrame(function(){
-        p.scrollTo(0, sy);
-        setTimeout(function(){ p.sessionStorage.removeItem(KEY); }, 600);
-      });
-    });
-  }
+  // Si acaba de hacer login, ir siempre al tope
+  if ({'true' if _scroll_reset else 'false'}) {{
+    p.sessionStorage.removeItem(KEY);
+    p.scrollTo(0, 0);
+  }} else {{
+    // Restaurar posición después del rerun normal
+    var sy = parseInt(p.sessionStorage.getItem(KEY) || '0');
+    if (sy > 80) {{
+      p.requestAnimationFrame(function(){{
+        p.requestAnimationFrame(function(){{
+          p.scrollTo(0, sy);
+          setTimeout(function(){{ p.sessionStorage.removeItem(KEY); }}, 600);
+        }});
+      }});
+    }}
+  }}
 
   // Guardar posición cuando Streamlit empieza a procesar
-  new MutationObserver(function(mutations){
-    for (var i=0; i<mutations.length; i++){
+  new MutationObserver(function(mutations){{
+    for (var i=0; i<mutations.length; i++){{
       var nodes = mutations[i].addedNodes;
-      for (var j=0; j<nodes.length; j++){
+      for (var j=0; j<nodes.length; j++){{
         var n = nodes[j];
         if (!n || n.nodeType !== 1) continue;
         var isStatus = (n.dataset && n.dataset.testid === 'stStatusWidget')
                     || (n.querySelector && n.querySelector('[data-testid="stStatusWidget"]'));
-        if (isStatus){
+        if (isStatus){{
           p.sessionStorage.setItem(KEY, String(p.scrollY || p.pageYOffset || 0));
           return;
-        }
-      }
-    }
-  }).observe(p.document.body, {childList:true, subtree:true});
-})();
+        }}
+      }}
+    }}
+  }}).observe(p.document.body, {{childList:true, subtree:true}});
+}})();
 </script>""", height=0, scrolling=False)
 
     # ── Barra de navegación fija derecha (inyectada en el DOM padre) ──────────
@@ -6959,21 +6993,24 @@ st.caption("El sistema monitoriza su propio rendimiento, detecta errores, y se c
 _sim_col1, _sim_col2 = st.columns([1, 1])
 
 with _sim_col1:
-    # ── APIs activas / pendientes ─────────────────────────────────────────────
-    st.markdown("**🌐 APIs Gratuitas — Estado**")
-    if _SELF_IMPROVE_OK:
-        _api_status = _self_improve.get_configured_apis()
-        _api_missing = _self_improve.get_missing_apis()
-        for _api in _api_status:
-            _t = "🤖" if _api["type"] == "ai" else "📊"
-            st.success(f"{_t} **{_api['name']}** activo")
-        if _api_missing:
-            st.markdown("**➕ APIs gratuitas disponibles (sin configurar):**")
-            for _api in _api_missing:
+    # ── APIs activas / pendientes (solo en Railway) ───────────────────────────
+    if not _IS_LOCAL:
+        st.markdown("**🌐 APIs Gratuitas — Estado**")
+        if _SELF_IMPROVE_OK:
+            _api_status = _self_improve.get_configured_apis()
+            _api_missing = _self_improve.get_missing_apis()
+            for _api in _api_status:
                 _t = "🤖" if _api["type"] == "ai" else "📊"
-                st.info(f"{_t} {_api['name']} — Obtén key gratis: {_api['url']}\n`Railway → Variables → {_api['env']}`")
+                st.success(f"{_t} **{_api['name']}** activo")
+            if _api_missing:
+                st.markdown("**➕ APIs gratuitas disponibles (sin configurar):**")
+                for _api in _api_missing:
+                    _t = "🤖" if _api["type"] == "ai" else "📊"
+                    st.info(f"{_t} {_api['name']} — Obtén key gratis: {_api['url']}\n`Railway → Variables → {_api['env']}`")
+        else:
+            st.warning("Módulo self_improve no disponible")
     else:
-        st.warning("Módulo self_improve no disponible")
+        st.info(f"🌐 APIs configuradas en Railway · [Abrir panel completo →]({_RAILWAY_URL})")
 
     # ── Datos macro FRED ─────────────────────────────────────────────────────
     _macro_ctx = st.session_state.get("macro_context") or {}
