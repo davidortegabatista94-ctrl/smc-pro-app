@@ -276,16 +276,10 @@ Responde SOLO con JSON (sin markdown):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _FREE_APIS = [
-    {"name": "Groq",       "env": "GROQ_API_KEY",       "url": "https://console.groq.com",       "type": "ai"},
-    {"name": "Cerebras",   "env": "CEREBRAS_API_KEY",   "url": "https://www.cerebras.ai",         "type": "ai"},
-    {"name": "Gemini",     "env": "GEMINI_API_KEY",     "url": "https://ai.google.dev",           "type": "ai"},
-    {"name": "Mistral",    "env": "MISTRAL_API_KEY",    "url": "https://console.mistral.ai",      "type": "ai"},
-    {"name": "Zhipu GLM",  "env": "ZHIPU_API_KEY",      "url": "https://open.bigmodel.cn",        "type": "ai"},
-    {"name": "OpenRouter", "env": "OPENROUTER_API_KEY", "url": "https://openrouter.ai",           "type": "ai"},
-    {"name": "Finnhub",    "env": "FINNHUB_API_KEY",    "url": "https://finnhub.io",              "type": "data"},
-    {"name": "FRED",       "env": "FRED_API_KEY",       "url": "https://fredaccount.stlouisfed.org/apikeys", "type": "data"},
-    {"name": "Alpha Vantage", "env": "ALPHAVANTAGE_API_KEY", "url": "https://www.alphavantage.co", "type": "data"},
-    {"name": "TwelveData", "env": "TWELVEDATA_API_KEY", "url": "https://twelvedata.com",          "type": "data"},
+    {"name": "Groq",      "env": "GROQ_API_KEY",      "url": "https://console.groq.com",               "type": "ai"},
+    {"name": "Cerebras",  "env": "CEREBRAS_API_KEY",  "url": "https://www.cerebras.ai",                "type": "ai"},
+    {"name": "Zhipu GLM", "env": "ZHIPU_API_KEY",     "url": "https://open.bigmodel.cn",               "type": "ai"},
+    {"name": "FRED",      "env": "FRED_API_KEY",       "url": "https://fredaccount.stlouisfed.org/apikeys", "type": "data"},
 ]
 
 

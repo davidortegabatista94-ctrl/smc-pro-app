@@ -1,15 +1,12 @@
 """
 ai_engine.py — Multi-provider AI engine + Self-learning Strategy DNA
 
-Free providers (priority order):
+Active providers (priority order):
   1. Groq          — llama-3.3-70b-versatile          (30 RPM, 1000 RPD)
   2. Cerebras      — llama-3.3-70b                    (1M tok/day, 30 RPM)
-  3. Gemini Flash  — gemini-2.0-flash-lite             (15 RPM, 1000 RPD)
-  4. Mistral       — mistral-small-latest              (1B tok/month)
-  5. Zhipu GLM     — glm-4-flash / glm-z1-flash        (free, OpenAI-compatible)
-  6. OpenRouter    — deepseek/deepseek-r1:free         (reasoning, free)
-  7. Anthropic     — claude-haiku-4-5-20251001         (if key present)
-  8. OpenAI        — gpt-4o-mini                       (if key present)
+  3. Zhipu GLM     — glm-4-flash / glm-z1-flash        (free, OpenAI-compatible)
+  4. Anthropic     — claude-haiku-4-5-20251001         (if key present)
+  5. OpenAI        — gpt-4o-mini                       (if key present)
 
 Strategy DNA lifecycle:
   new_trade → save_market_snapshot → [N trades] → evolve_strategy →
@@ -37,21 +34,9 @@ def _get_providers() -> list[tuple]:
     if cerebras_key:
         providers.append(("cerebras", cerebras_key, "llama-3.3-70b"))
 
-    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
-    if gemini_key:
-        providers.append(("gemini", gemini_key, "gemini-2.0-flash-lite"))
-
-    mistral_key = os.environ.get("MISTRAL_API_KEY", "").strip()
-    if mistral_key:
-        providers.append(("mistral", mistral_key, "mistral-small-latest"))
-
     zhipu_key = os.environ.get("ZHIPU_API_KEY", "bcf45451bda84c4990cdab697602880d.XGkFUFoqEMZbJOBu").strip()
     if zhipu_key:
         providers.append(("zhipu", zhipu_key, "glm-4-flash"))
-
-    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if openrouter_key:
-        providers.append(("openrouter", openrouter_key, "deepseek/deepseek-r1:free"))
 
     ant_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if ant_key:
@@ -72,14 +57,11 @@ def get_active_providers() -> list[str]:
 def get_providers_status() -> list[dict]:
     """Return detailed status of all possible providers."""
     checks = [
-        ("groq",        "GROQ_API_KEY",        "llama-3.3-70b-versatile",    "30 RPM · 1000 RPD · gratuito"),
-        ("cerebras",    "CEREBRAS_API_KEY",     "llama-3.3-70b",              "1M tok/día · 30 RPM · gratuito"),
-        ("gemini",      "GEMINI_API_KEY",       "gemini-2.0-flash-lite",      "15 RPM · 1000 RPD · gratuito"),
-        ("mistral",     "MISTRAL_API_KEY",      "mistral-small-latest",       "1B tok/mes · gratuito"),
-        ("zhipu",       "ZHIPU_API_KEY",        "glm-4-flash / glm-z1-flash", "gratuito · Zhipu AI China"),
-        ("openrouter",  "OPENROUTER_API_KEY",   "deepseek-r1:free",           "reasoning · gratuito"),
-        ("anthropic",   "ANTHROPIC_API_KEY",    "claude-haiku-4-5-20251001",  "pago"),
-        ("openai",      "OPENAI_API_KEY",       "gpt-4o-mini",                "pago"),
+        ("groq",      "GROQ_API_KEY",      "llama-3.3-70b-versatile",    "30 RPM · 1000 RPD · gratuito"),
+        ("cerebras",  "CEREBRAS_API_KEY",  "llama-3.3-70b",              "1M tok/día · 30 RPM · gratuito"),
+        ("zhipu",     "ZHIPU_API_KEY",     "glm-4-flash / glm-z1-flash", "gratuito · Zhipu AI"),
+        ("anthropic", "ANTHROPIC_API_KEY", "claude-haiku-4-5-20251001",  "pago"),
+        ("openai",    "OPENAI_API_KEY",    "gpt-4o-mini",                "pago"),
     ]
     result = []
     for name, env_var, model, limits in checks:
@@ -100,15 +82,14 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
     """
     providers = _get_providers()
     if not providers:
-        return ("⚠️ Sin API key. Añade GROQ_API_KEY (gratis) en Railway → Variables. "
-                "También puedes añadir: CEREBRAS_API_KEY, GEMINI_API_KEY, MISTRAL_API_KEY, "
-                "ZHIPU_API_KEY (open.bigmodel.cn), OPENROUTER_API_KEY — todos gratuitos.")
+        return ("⚠️ Sin API key activa. Proveedores configurados: GROQ_API_KEY, "
+                "CEREBRAS_API_KEY, ZHIPU_API_KEY — revisa Railway → Variables.")
 
     if prefer_reasoning:
-        order = ["openrouter", "zhipu", "groq", "gemini", "cerebras", "mistral", "anthropic", "openai"]
+        order = ["zhipu", "groq", "cerebras", "anthropic", "openai"]
         providers = sorted(providers, key=lambda p: order.index(p[0]) if p[0] in order else 99)
     elif prefer_quality:
-        order = ["anthropic", "openai", "groq", "zhipu", "gemini", "cerebras", "mistral", "openrouter"]
+        order = ["anthropic", "openai", "groq", "zhipu", "cerebras"]
         providers = sorted(providers, key=lambda p: order.index(p[0]) if p[0] in order else 99)
 
     system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
@@ -140,29 +121,6 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
                 )
                 return resp.choices[0].message.content
 
-            elif provider == "gemini":
-                import google.generativeai as genai
-                genai.configure(api_key=key)
-                mdl = genai.GenerativeModel(model)
-                full_prompt = (f"[SYSTEM]\n{system_msg}\n\n" if system_msg else "") + \
-                              "\n".join(f"[{m['role'].upper()}]\n{m['content']}" for m in chat_msgs)
-                resp = mdl.generate_content(
-                    full_prompt,
-                    generation_config={"max_output_tokens": max_tokens,
-                                       "temperature": temperature}
-                )
-                return resp.text
-
-            elif provider == "mistral":
-                from mistralai import Mistral
-                all_msgs = ([{"role": "system", "content": system_msg}]
-                            if system_msg else []) + chat_msgs
-                resp = Mistral(api_key=key).chat.complete(
-                    model=model, messages=all_msgs,
-                    max_tokens=max_tokens, temperature=temperature,
-                )
-                return resp.choices[0].message.content
-
             elif provider == "zhipu":
                 from openai import OpenAI
                 all_msgs = ([{"role": "system", "content": system_msg}]
@@ -174,21 +132,6 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
                     base_url="https://open.bigmodel.cn/api/paas/v4/",
                 ).chat.completions.create(
                     model=zhipu_model, messages=all_msgs,
-                    max_tokens=max_tokens, temperature=temperature,
-                )
-                return resp.choices[0].message.content
-
-            elif provider == "openrouter":
-                from openai import OpenAI
-                all_msgs = ([{"role": "system", "content": system_msg}]
-                            if system_msg else []) + chat_msgs
-                resp = OpenAI(
-                    api_key=key,
-                    base_url="https://openrouter.ai/api/v1",
-                    default_headers={"HTTP-Referer": "https://smc-pro-app.up.railway.app",
-                                     "X-Title": "SMC Pro Trading Bot"}
-                ).chat.completions.create(
-                    model=model, messages=all_msgs,
                     max_tokens=max_tokens, temperature=temperature,
                 )
                 return resp.choices[0].message.content
