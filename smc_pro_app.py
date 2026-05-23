@@ -4784,53 +4784,75 @@ else:
         f"TP variable · SL {SCALP_SL_PIPS}p máx · R:R 1:2-3"
     )
 
-    # ── Índice de navegación rápida ───────────────────────────────────────────
+    # ── Barra de navegación fija derecha (inyectada en el DOM padre) ──────────
     import streamlit.components.v1 as _stc
-    _stc.html("""
-<style>
-* { margin:0; padding:0; box-sizing:border-box; }
-body { background:transparent; overflow:hidden; }
-.nav { display:flex; flex-wrap:wrap; gap:5px; padding:8px 0 10px 0;
-       border-bottom:1px solid #1e2530; font-family:-apple-system,sans-serif; }
-.nav a { color:#c9d1d9; background:#161b22; border:1px solid #30363d;
-         border-radius:20px; padding:4px 11px; font-size:0.76rem;
-         text-decoration:none; white-space:nowrap; cursor:pointer; }
-.nav a:hover { background:#1f6feb; color:#fff; border-color:#1f6feb; }
-.sep { color:#444; font-size:0.7rem; padding:4px 3px; display:flex; align-items:center; }
-</style>
-<div class="nav">
-  <a onclick="go('sec-precio')">📡 Precio</a>
-  <a onclick="go('sec-senal')">🧠 Señal</a>
-  <a onclick="go('sec-score')">🎯 Score</a>
-  <a onclick="go('sec-chart')">📈 Gráfico</a>
-  <a onclick="go('sec-dna')">🧬 DNA</a>
-  <a onclick="go('sec-vol')">📊 Volumen</a>
-  <a onclick="go('sec-scalping')">🎯 Scalping</a>
-  <a onclick="go('sec-estructura')">🏗️ Estructura</a>
-  <a onclick="go('sec-manipulacion')">🕵️ Liquidez</a>
-  <a onclick="go('sec-cot')">🏦 COT</a>
-  <a onclick="go('sec-ia')">🤖 Motor IA</a>
-  <span class="sep">|</span>
-  <a onclick="go('sec-backtest')">📊 Backtest</a>
-  <a onclick="go('sec-backtest2008')">🌍 2008</a>
-  <span class="sep">|</span>
-  <a onclick="go('sec-porq')">🔍 Por qué</a>
-  <a onclick="go('sec-bot')">🤖 Bot</a>
-  <a onclick="go('sec-dashboard')">📋 Dashboard</a>
-  <a onclick="go('sec-dxy')">💱 DXY</a>
-  <a onclick="go('sec-accion')">🎯 Acción</a>
-  <a onclick="go('sec-autoimprove')">🔬 Auto-Mejora</a>
-  <a onclick="go('sec-advisor')">💬 Advisor</a>
-</div>
-<script>
-function go(id) {
-    try {
-        var el = window.parent.document.getElementById(id);
-        if (el) { el.scrollIntoView({behavior:'smooth', block:'start'}); }
-    } catch(e) {}
-}
-</script>
-""", height=65, scrolling=False)
+    _stc.html("""<script>
+(function(){
+  var p = window.parent.document;
+
+  // Eliminar instancia previa para evitar duplicados en re-renders
+  ['smc-nav','smc-nav-css'].forEach(function(id){
+    var el = p.getElementById(id); if(el) el.remove();
+  });
+
+  // CSS inyectado en <head> del documento Streamlit
+  var css = p.createElement('style');
+  css.id = 'smc-nav-css';
+  css.textContent = [
+    '#smc-nav{position:fixed;right:0;top:50%;transform:translateY(-50%);',
+    'z-index:99999;background:#0d1117;border:1px solid #30363d;',
+    'border-left:3px solid #1f6feb;border-radius:8px 0 0 8px;',
+    'padding:10px 6px;width:148px;max-height:90vh;overflow-y:auto;',
+    'font-family:-apple-system,sans-serif;box-shadow:-4px 0 20px #0006;}',
+    '#smc-nav::-webkit-scrollbar{width:3px;}',
+    '#smc-nav::-webkit-scrollbar-thumb{background:#30363d;border-radius:2px;}',
+    '#smc-nav .n-title{color:#1f6feb;font-size:0.65rem;font-weight:700;',
+    'letter-spacing:.08em;text-transform:uppercase;padding:0 6px 6px;',
+    'border-bottom:1px solid #21262d;margin-bottom:4px;display:block;}',
+    '#smc-nav a{display:block;color:#c9d1d9;font-size:0.72rem;',
+    'padding:4px 8px;border-radius:5px;text-decoration:none;',
+    'cursor:pointer;white-space:nowrap;margin:1px 0;transition:all .15s;}',
+    '#smc-nav a:hover{background:#1f6feb;color:#fff;padding-left:12px;}',
+    '#smc-nav .n-sep{border-top:1px solid #21262d;margin:5px 4px;}'
+  ].join('');
+  p.head.appendChild(css);
+
+  // Función de scroll definida en el contexto del padre
+  window.parent.smcGo = function(id){
+    var el = p.getElementById(id);
+    if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+  };
+
+  // HTML del panel de navegación
+  var nav = p.createElement('div');
+  nav.id = 'smc-nav';
+  nav.innerHTML =
+    '<span class="n-title">⚡ SMC Nav</span>' +
+    '<a onclick="smcGo(\'sec-precio\')">📡 Precio</a>' +
+    '<a onclick="smcGo(\'sec-senal\')">🧠 Señal</a>' +
+    '<a onclick="smcGo(\'sec-score\')">🎯 Score</a>' +
+    '<a onclick="smcGo(\'sec-chart\')">📈 Gráfico</a>' +
+    '<a onclick="smcGo(\'sec-dna\')">🧬 DNA</a>' +
+    '<a onclick="smcGo(\'sec-vol\')">📊 Volumen</a>' +
+    '<a onclick="smcGo(\'sec-scalping\')">🎯 Scalping</a>' +
+    '<a onclick="smcGo(\'sec-estructura\')">🏗️ Estructura</a>' +
+    '<a onclick="smcGo(\'sec-manipulacion\')">🕵️ Liquidez</a>' +
+    '<a onclick="smcGo(\'sec-cot\')">🏦 COT</a>' +
+    '<a onclick="smcGo(\'sec-ia\')">🤖 Motor IA</a>' +
+    '<div class="n-sep"></div>' +
+    '<a onclick="smcGo(\'sec-backtest\')">📊 Backtest</a>' +
+    '<a onclick="smcGo(\'sec-backtest2008\')">🌍 2008</a>' +
+    '<div class="n-sep"></div>' +
+    '<a onclick="smcGo(\'sec-porq\')">🔍 Por qué</a>' +
+    '<a onclick="smcGo(\'sec-bot\')">🤖 Bot</a>' +
+    '<a onclick="smcGo(\'sec-dashboard\')">📋 Dashboard</a>' +
+    '<a onclick="smcGo(\'sec-dxy\')">💱 DXY</a>' +
+    '<a onclick="smcGo(\'sec-accion\')">🎯 Acción</a>' +
+    '<a onclick="smcGo(\'sec-autoimprove\')">🔬 Auto-Mejora</a>' +
+    '<a onclick="smcGo(\'sec-advisor\')">💬 Advisor</a>';
+  p.body.appendChild(nav);
+})();
+</script>""", height=0, scrolling=False)
 
     # ── Ventana horaria de trading ─────────────────────────────────────────
     _win_in, _win_label, _win_eta = get_trading_window_info()
