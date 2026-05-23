@@ -4802,6 +4802,48 @@ else:
 
     # ── Sidebar ───────────────────────────────────────────────────────────────────
     with st.sidebar:
+        # ── Índice de navegación ──────────────────────────────────────────────
+        st.markdown("""
+<style>
+.nav-index a {
+    display:block; padding:4px 8px; margin:1px 0;
+    color:#c9d1d9; text-decoration:none; border-radius:5px;
+    font-size:0.82rem; line-height:1.4;
+    transition: background 0.15s;
+}
+.nav-index a:hover { background:#1e2530; color:#58a6ff; }
+.nav-group {
+    font-size:0.7rem; font-weight:700; letter-spacing:.07em;
+    color:#58a6ff; padding:6px 8px 2px 8px; text-transform:uppercase;
+}
+</style>
+<div class="nav-index">
+  <div class="nav-group">📊 Análisis</div>
+  <a href="#sec-precio">📡 Precio MT5</a>
+  <a href="#sec-senal">🧠 Señal Inteligente</a>
+  <a href="#sec-score">🎯 Score Confluencia</a>
+  <a href="#sec-chart">📈 Gráfico TradingView</a>
+  <a href="#sec-dna">🧬 Strategy DNA</a>
+  <a href="#sec-vol">📊 Volumen</a>
+  <a href="#sec-scalping">🎯 Niveles Scalping</a>
+  <a href="#sec-estructura">🏗️ Estructura Mercado</a>
+  <a href="#sec-manipulacion">🕵️ Manipulación & Liquidez</a>
+  <a href="#sec-cot">🏦 COT Institucional</a>
+  <a href="#sec-ia">🤖 Motor IA</a>
+  <div class="nav-group">📈 Backtesting</div>
+  <a href="#sec-backtest">📊 Backtest 4 Estrategias</a>
+  <a href="#sec-backtest2008">🌍 Backtest 2008‑Hoy</a>
+  <div class="nav-group">🛠️ Herramientas</div>
+  <a href="#sec-porq">🔍 Por qué se mueve</a>
+  <a href="#sec-bot">🤖 Bot Automático</a>
+  <a href="#sec-dashboard">📋 Dashboard Final</a>
+  <a href="#sec-dxy">💱 Niveles DXY</a>
+  <a href="#sec-accion">🎯 Acción Recomendada</a>
+  <a href="#sec-advisor">💬 Advisor AI</a>
+</div>
+""", unsafe_allow_html=True)
+        st.markdown("---")
+
         st.header("⚙️ Configuración")
         st.markdown(f"👤 **{current_user_name}** — sesión activa")
         if st.button("🚪 Cerrar sesión", key="_logout_btn"):
@@ -5295,6 +5337,7 @@ if st.session_state.analysis_executed:
             logging.warning("Hourly telegram error: %s", _tg_err)
 
     # ── Panel MT5 ─────────────────────────────────────────────────────────────
+    st.markdown('<div id="sec-precio"></div>', unsafe_allow_html=True)
     if tick:
         st.markdown("---")
         st.subheader("📡 MT5 — Precio en Tiempo Real")
@@ -5309,6 +5352,7 @@ if st.session_state.analysis_executed:
             st.warning(f"⚠️ Spread de {sp} pips — espera que baje antes de entrar")
 
     # ── Señal principal ───────────────────────────────────────────────────────
+    st.markdown('<div id="sec-senal"></div>', unsafe_allow_html=True)
     st.markdown("---")
     final = signal.get("final_signal", "⚪ NO TRADE")
     css   = "sl" if "COMPRA" in final else ("ss" if "VENTA" in final else "sw")
@@ -5404,6 +5448,7 @@ if st.session_state.analysis_executed:
                 st.caption("Fuentes: EMA · RSI · MACD · COT CFTC · Calendario ForexFactory · RSS noticias")
 
     # ── Score de confluencia ──────────────────────────────────────────────────
+    st.markdown('<div id="sec-score"></div>', unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("🎯 Score de Confluencia")
     score, score_reasons = calculate_confluence_score(
@@ -5484,6 +5529,7 @@ if st.session_state.analysis_executed:
         for r in score_reasons: st.write(f"• {r}")
 
     # ── GRÁFICO TRADINGVIEW ───────────────────────────────────────────────────
+    st.markdown('<div id="sec-chart"></div>', unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("📈 Gráfico EUR/USD 1H")
     _chart_trades = []
@@ -5507,6 +5553,7 @@ if st.session_state.analysis_executed:
     )
 
     # ── Strategy DNA Panel ────────────────────────────────────────────────────
+    st.markdown('<div id="sec-dna"></div>', unsafe_allow_html=True)
     st.markdown("---")
     _dna_v  = _active_dna.get("_version") or _active_dna.get("version", 1)
     _dna_wr = _active_dna.get("_winrate") or _active_dna.get("winrate", 0)
@@ -5605,6 +5652,7 @@ if st.session_state.analysis_executed:
             pass
 
     # ── VOLUMEN — Panel principal ─────────────────────────────────────────────
+    st.markdown('<div id="sec-vol"></div>', unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("📊 Análisis de Volumen Completo (MT5 Tick Volume)")
 
@@ -5682,6 +5730,7 @@ if st.session_state.analysis_executed:
             st.info("Sin datos de Volume Profile.")
 
     # ── Niveles scalping inteligentes ─────────────────────────────────────────
+    st.markdown('<div id="sec-scalping"></div>', unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("🎯 Niveles de Scalping — TP1 / TP2 / TP3 + SL Estructural")
     price     = signal.get("price")
@@ -5727,6 +5776,7 @@ if st.session_state.analysis_executed:
         st.info("Realiza el análisis para calcular niveles.")
 
     # ── Estructura de Mercado ─────────────────────────────────────────────────
+    st.markdown('<div id="sec-estructura"></div>', unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("🏗️ Estructura de Mercado — Multi-Timeframe")
     if market_structures:
@@ -5765,6 +5815,7 @@ if st.session_state.analysis_executed:
         st.info("Sin datos de estructura disponibles.")
 
     # ── Detección de Manipulación ─────────────────────────────────────────────
+    st.markdown('<div id="sec-manipulacion"></div>', unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("🕵️ Detección de Manipulación y Liquidez Institucional")
     man_col1, man_col2 = st.columns(2)
@@ -5794,6 +5845,7 @@ if st.session_state.analysis_executed:
             st.info("⚪ Sin absorción institucional detectada")
 
     # ── COT — Datos Institucionales ───────────────────────────────────────────
+    st.markdown('<div id="sec-cot"></div>', unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("🏦 Datos Institucionales — COT Report (CFTC) + Grandes Inversores")
     cot_col1, cot_col2 = st.columns([2, 1])
@@ -5833,6 +5885,7 @@ if st.session_state.analysis_executed:
         st.write("**Refresco:** 12h de caché")
 
     # ── IA — Motor de Bias ────────────────────────────────────────────────────
+    st.markdown('<div id="sec-ia"></div>', unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("🤖 Motor de IA — Análisis de Confluencia Inteligente")
     if ai_bias:
@@ -5871,6 +5924,7 @@ else:
     st.info("📊 Presiona 'ANALIZAR MERCADO' para ver el análisis completo")
 
 # ── BACKTEST + COMPARACIÓN DE ESTRATEGIAS + CONTEXTO DE MERCADO ───────────────
+st.markdown('<div id="sec-backtest"></div>', unsafe_allow_html=True)
 st.markdown("---")
 st.subheader("🧠 Backtest Inteligente — 4 Estrategias + Contexto Fundamental")
 st.caption(
@@ -6062,6 +6116,7 @@ else:
 # ════════════════════════════════════════════════════════════════════════════════
 # BACKTEST HISTÓRICO LARGO PLAZO — DESDE 2008 (DATOS DIARIOS)
 # ════════════════════════════════════════════════════════════════════════════════
+st.markdown('<div id="sec-backtest2008"></div>', unsafe_allow_html=True)
 st.markdown("---")
 st.subheader("🌍 Backtest Histórico — Desde 2008 hasta Hoy (Datos Diarios)")
 st.caption(
@@ -6188,6 +6243,7 @@ if _lt_cmp_result:
             )
 
 # ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
+st.markdown('<div id="sec-porq"></div>', unsafe_allow_html=True)
 st.markdown("---")
 st.subheader("🔍 Por qué se mueve el EUR/USD — Análisis Técnico + Fundamental")
 ctx_reasons = st.session_state.get("market_context_reasons")
@@ -6202,6 +6258,7 @@ else:
     )
 
 # ── BOT AUTOMÁTICO (SIEMPRE VISIBLE) ───────────────────────────────────────────
+st.markdown('<div id="sec-bot"></div>', unsafe_allow_html=True)
 st.markdown("---")
 st.subheader("🤖 Modo Bot Automático")
 
@@ -6438,6 +6495,7 @@ else:
     st.info("Sin noticias disponibles.")
 
 # ── Dashboard final ───────────────────────────────────────────────────────
+st.markdown('<div id="sec-dashboard"></div>', unsafe_allow_html=True)
 st.markdown("---")
 st.subheader("📋 Dashboard Final — Resumen de Decisión")
 tech_sig = ("COMPRA" if signal.get("buy_signals", 0) > signal.get("sell_signals", 0)
@@ -6467,6 +6525,7 @@ spread_result = (f"{tick['spread_pips']}p {'✅' if tick['spread_pips']<1.5 else
 poc_result    = f"`{poc['precio']:.5f}`" if poc else "N/A"
 
 # ── Niveles de DXY ────────────────────────────────────────────────────────
+st.markdown('<div id="sec-dxy"></div>', unsafe_allow_html=True)
 st.markdown("---")
 st.subheader("💱 Niveles de DXY (Índice del Dólar)")
 dxy_levels = {
@@ -6518,6 +6577,7 @@ matrix = [
 ]
 st.dataframe(pd.DataFrame(matrix), use_container_width=True, hide_index=True)
 
+st.markdown('<div id="sec-accion"></div>', unsafe_allow_html=True)
 st.markdown("---")
 st.subheader("🎯 Resumen de Acción Recomendada")
 recomendacion = {
@@ -6544,6 +6604,7 @@ st.info(
 
 
 # ── Trading Advisor AI ────────────────────────────────────────────────────────
+st.markdown('<div id="sec-advisor"></div>', unsafe_allow_html=True)
 st.markdown("---")
 st.subheader(f"🧠 Trading Advisor AI — Asesor Personal de {current_user_name}")
 st.caption(f"Hola {current_user_name}, cuéntame tu tesis. Analizo tu visión contra tus operaciones reales, los backtests históricos (2008–hoy), posicionamiento institucional, técnico y fundamental. Aprendo de cada conversación.")
