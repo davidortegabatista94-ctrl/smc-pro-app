@@ -5483,6 +5483,29 @@ if st.session_state.analysis_executed:
         st.write("**Desglose del score:**")
         for r in score_reasons: st.write(f"• {r}")
 
+    # ── GRÁFICO TRADINGVIEW ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📈 Gráfico EUR/USD 1H")
+    _chart_trades = []
+    if _DB_OK:
+        try:
+            _chart_trades = _db.load_trades(user_id=current_user, limit=30)
+        except Exception:
+            pass
+    _render_trading_chart(
+        df=df_1h,
+        signal=signal or {},
+        score=score,
+        session=session,
+        liq_levels=liq_levels or [],
+        poc=poc,
+        vol_spikes=vol_spikes or [],
+        market_structures=market_structures or {},
+        stop_hunts=stop_hunts or [],
+        news_items=(signal or {}).get("news", []),
+        trades_history=_chart_trades,
+    )
+
     # ── Strategy DNA Panel ────────────────────────────────────────────────────
     st.markdown("---")
     _dna_v  = _active_dna.get("_version") or _active_dna.get("version", 1)
@@ -5580,32 +5603,6 @@ if st.session_state.analysis_executed:
                         st.session_state.active_dna = _new_dna2
         except Exception:
             pass
-
-    # ── GRÁFICO TRADINGVIEW ───────────────────────────────────────────────────
-    st.markdown("---")
-    st.subheader("📈 Gráfico TradingView — EUR/USD 1H")
-    if df_1h is not None and not df_1h.empty:
-        _chart_trades = []
-        if _DB_OK:
-            try:
-                _chart_trades = _db.load_trades(user_id=current_user, limit=30)
-            except Exception:
-                _chart_trades = []
-        _render_trading_chart(
-            df=df_1h,
-            signal=signal or {},
-            score=score,
-            session=session,
-            liq_levels=liq_levels or [],
-            poc=poc,
-            vol_spikes=vol_spikes or [],
-            market_structures=market_structures or {},
-            stop_hunts=stop_hunts or [],
-            news_items=(signal or {}).get("news", []),
-            trades_history=_chart_trades,
-        )
-    else:
-        st.info("Ejecuta el análisis para ver el gráfico.")
 
     # ── VOLUMEN — Panel principal ─────────────────────────────────────────────
     st.markdown("---")
