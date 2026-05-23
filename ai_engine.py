@@ -45,7 +45,7 @@ def _get_providers() -> list[tuple]:
     if mistral_key:
         providers.append(("mistral", mistral_key, "mistral-small-latest"))
 
-    zhipu_key = os.environ.get("ZHIPU_API_KEY", "").strip()
+    zhipu_key = os.environ.get("ZHIPU_API_KEY", "bcf45451bda84c4990cdab697602880d.XGkFUFoqEMZbJOBu").strip()
     if zhipu_key:
         providers.append(("zhipu", zhipu_key, "glm-4-flash"))
 
