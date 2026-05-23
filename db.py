@@ -512,3 +512,192 @@ def is_connected() -> bool:
         return True
     except Exception:
         return False
+
+
+# ── Strategy DNA ───────────────────────────────────────────────────────────────
+
+def save_strategy_dna(version: int, rules: dict, fitness: float,
+                      trades_evaluated: int, winrate: float, net_pips: float,
+                      key_insight: str = "") -> int | None:
+    """Save a new DNA version and mark it active; deactivate all previous."""
+    if not _DB_URL:
+        return None
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        # Deactivate previous
+        cur.execute("UPDATE strategy_dna SET is_active = FALSE")
+        # Insert new active version
+        cur.execute(
+            """
+            INSERT INTO strategy_dna
+                (version, rules, fitness, trades_evaluated, winrate, net_pips, key_insight, is_active)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+            RETURNING id
+            """,
+            (version, json.dumps(rules), fitness, trades_evaluated, winrate, net_pips, key_insight),
+        )
+        row = cur.fetchone()
+        conn.commit()
+        conn.close()
+        return row["id"] if row else None
+    except Exception as e:
+        _log.warning("save_strategy_dna error: %s", e)
+        return None
+
+
+def load_active_strategy() -> dict | None:
+    """Load the currently active Strategy DNA rules. Returns rules dict or None."""
+    if not _DB_URL:
+        return None
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT version, rules, fitness, trades_evaluated, winrate, net_pips,
+                   key_insight, evolved_at
+            FROM strategy_dna WHERE is_active = TRUE
+            ORDER BY version DESC LIMIT 1
+            """,
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        dna = dict(row["rules"])
+        dna["_version"]   = row["version"]
+        dna["_fitness"]   = row["fitness"]
+        dna["_trades"]    = row["trades_evaluated"]
+        dna["_winrate"]   = row["winrate"]
+        dna["_net_pips"]  = row["net_pips"]
+        dna["_insight"]   = row["key_insight"]
+        dna["_evolved_at"] = str(row["evolved_at"]) if row["evolved_at"] else None
+        return dna
+    except Exception as e:
+        _log.warning("load_active_strategy error: %s", e)
+        return None
+
+
+def get_evolution_history(limit: int = 8) -> list[dict]:
+    """Return list of past DNA versions (newest first)."""
+    if not _DB_URL:
+        return []
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT version, fitness, winrate, net_pips, trades_evaluated,
+                   key_insight, is_active, evolved_at
+            FROM strategy_dna ORDER BY version DESC LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        _log.warning("get_evolution_history error: %s", e)
+        return []
+
+
+def get_trades_for_evolution(limit: int = 60) -> list[dict]:
+    """Return recent closed trades with market_snapshot for evolution analysis."""
+    if not _DB_URL:
+        return []
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT direction, outcome, pips, strategy, score,
+                   market_snapshot, dna_version, created_at
+            FROM trades_history
+            WHERE outcome IN ('TP','SL','BE')
+            ORDER BY created_at DESC LIMIT %s
+            """,
+            (limit,),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+    except Exception as e:
+        _log.warning("get_trades_for_evolution error: %s", e)
+        return []
+
+
+def count_trades_since_last_evolution() -> int:
+    """Count closed trades that happened after the last evolution."""
+    if not _DB_URL:
+        return 0
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT evolved_at FROM strategy_dna WHERE is_active = TRUE LIMIT 1")
+        row = cur.fetchone()
+        last_dt = row["evolved_at"] if row else None
+        if last_dt:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM trades_history WHERE outcome IN ('TP','SL','BE') AND created_at > %s",
+                (last_dt,),
+            )
+        else:
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM trades_history WHERE outcome IN ('TP','SL','BE')"
+            )
+        n = cur.fetchone()["n"]
+        conn.close()
+        return int(n)
+    except Exception as e:
+        _log.warning("count_trades_since_last_evolution error: %s", e)
+        return 0
+
+
+def save_trade_analysis(direction: str, outcome: str, pips: float,
+                        strategy: str, score: int, market_snapshot: dict,
+                        ai_analysis: str, dna_version: int = 1,
+                        user_id: str = "david"):
+    """Save post-mortem analysis for a completed trade."""
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute(
+            """
+            INSERT INTO trade_analysis
+                (direction, outcome, pips, strategy, score, market_snapshot,
+                 ai_analysis, dna_version, user_id)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (direction, outcome, pips, strategy, score,
+             json.dumps(market_snapshot), ai_analysis, dna_version, user_id),
+        )
+
+
+def save_trade_with_snapshot(
+    direction: str, entry_price: float, sl_price: float, tp_price: float,
+    outcome: str, pips: float, pnl: float, strategy: str = "", score: int = 0,
+    exit_price: float | None = None, market_snapshot: dict | None = None,
+    dna_version: int = 1, user_id: str = "david",
+):
+    """save_trade wrapper that also stores market_snapshot and dna_version."""
+    from datetime import timezone
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute(
+            """
+            INSERT INTO trades_history
+                (direction, entry_price, sl_price, tp_price, exit_price,
+                 pips, pnl, outcome, strategy, score,
+                 market_snapshot, dna_version, user_id,
+                 opened_at, closed_at)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                direction, entry_price, sl_price, tp_price, exit_price,
+                pips, pnl, outcome, strategy, score,
+                json.dumps(market_snapshot or {}), dna_version, user_id,
+                datetime.now(timezone.utc), datetime.now(timezone.utc),
+            ),
+        )

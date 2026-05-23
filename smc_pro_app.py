@@ -204,7 +204,7 @@ MIN_DEFINITIVE_SCORE = 70  # Score mínimo para considerar señal definitiva
 
 # Configuración del Bot Automático
 BOT_ENABLED = False
-BOT_VOLUME = 0.01
+BOT_VOLUME = 0.1
 BOT_LAST_SIGNAL = None
 
 def load_position_state():
@@ -4145,7 +4145,27 @@ else:
     current_user      = st.session_state.current_user
     current_user_name = _USER_NAMES.get(current_user, current_user.capitalize())
 
-    # Inicializar session state para análisis y credenciales
+    # ── Importar motores AI ───────────────────────────────────────────────────
+    try:
+        import ai_engine as _ai_engine
+        _AI_ENGINE_OK = True
+    except ImportError:
+        _ai_engine = None
+        _AI_ENGINE_OK = False
+
+    # ── Cargar Strategy DNA activo (o usar default) ──────────────────────────
+    if "active_dna" not in st.session_state:
+        _dna_loaded = None
+        if _DB_OK:
+            try:
+                _dna_loaded = _db.load_active_strategy()
+            except Exception:
+                pass
+        if _dna_loaded is None and _AI_ENGINE_OK:
+            _dna_loaded = _ai_engine.DEFAULT_DNA.copy()
+        st.session_state.active_dna = _dna_loaded or {}
+
+    # ── Inicializar session state para análisis y credenciales ───────────────
     if "last_analysis_time" not in st.session_state:
         st.session_state.last_analysis_time = None
     if "analysis_executed" not in st.session_state:
@@ -4438,6 +4458,17 @@ else:
             st.warning("⚠️ DB no disponible")
     else:
         st.info("DB no configurada")
+    st.markdown("---")
+    st.subheader("🤖 Proveedores IA")
+    if _AI_ENGINE_OK:
+        _ap = _ai_engine.get_active_providers()
+        if _ap:
+            for _p in _ap:
+                _icons = {"groq": "⚡ Groq (free)", "anthropic": "🟣 Claude Haiku", "openai": "🟢 OpenAI"}
+                st.caption(f"✅ {_icons.get(_p, _p)}")
+        else:
+            st.warning("Sin API keys — añade GROQ_API_KEY en Variables")
+        st.caption("Añadir más: ANTHROPIC_API_KEY, OPENAI_API_KEY en Railway → Variables")
     st.markdown("---")
     st.subheader(f"🧠 Memoria IA — {current_user_name}")
     if _DB_OK:
@@ -4764,6 +4795,21 @@ if st.session_state.analysis_executed:
         signal, consensus, dxy_dir, session, vol_spikes, liq_levels, delta,
         cot=st.session_state.get("cot_data"),
         trend_strength=trend_strength_1h)
+
+    # ── Aplicar Strategy DNA al score ─────────────────────────────────────
+    _active_dna = st.session_state.get("active_dna") or {}
+    _dna_adj_score = score
+    _dna_reasons   = []
+    if _AI_ENGINE_OK and _active_dna:
+        try:
+            _dna_adj_score, _dna_reasons = _ai_engine.apply_dna_to_signal(
+                signal, score, _active_dna, session, dxy_dir)
+            if _dna_reasons:
+                score_reasons = list(score_reasons) + _dna_reasons
+                score = _dna_adj_score
+        except Exception:
+            pass
+
     label, color = score_label(score)
     col_sc1, col_sc2 = st.columns([1, 2])
     with col_sc1:
@@ -4821,6 +4867,104 @@ if st.session_state.analysis_executed:
     with col_sc2:
         st.write("**Desglose del score:**")
         for r in score_reasons: st.write(f"• {r}")
+
+    # ── Strategy DNA Panel ────────────────────────────────────────────────────
+    st.markdown("---")
+    _dna_v  = _active_dna.get("_version") or _active_dna.get("version", 1)
+    _dna_wr = _active_dna.get("_winrate") or _active_dna.get("winrate", 0)
+    _dna_np = _active_dna.get("_net_pips") or _active_dna.get("net_pips", 0)
+    _dna_te = _active_dna.get("_trades") or _active_dna.get("trades_evaluated", 0)
+    _dna_ki = _active_dna.get("_insight") or _active_dna.get("key_insight", "")
+    _dna_ex = _active_dna.get("explanation", "")
+    with st.expander(f"🧬 Strategy DNA v{_dna_v} — Win Rate: {float(_dna_wr or 0):.1f}%  |  Pips: {float(_dna_np or 0):+.1f}  |  Trades evaluados: {_dna_te}", expanded=False):
+        _dc1, _dc2, _dc3 = st.columns(3)
+        _dc1.metric("Versión DNA", f"v{_dna_v}")
+        _dc2.metric("Win Rate Aprendido", f"{float(_dna_wr or 0):.1f}%")
+        _dc3.metric("Pips Netos DNA", f"{float(_dna_np or 0):+.1f}")
+        if _dna_ki:
+            st.info(f"💡 **Insight clave:** {_dna_ki}")
+        if _dna_ex:
+            st.caption(f"📝 {_dna_ex}")
+        if _dna_reasons:
+            st.write("**Ajustes DNA en este análisis:**")
+            for _dr in _dna_reasons:
+                st.write(f"  {_dr}")
+        if _AI_ENGINE_OK:
+            _active_providers = _ai_engine.get_active_providers()
+            st.caption(f"🤖 Proveedores IA activos: {', '.join(_active_providers) if _active_providers else 'ninguno — añade GROQ_API_KEY'}")
+        _ev_hist = []
+        if _DB_OK:
+            try:
+                _ev_hist = _db.get_evolution_history(limit=6)
+            except Exception:
+                pass
+        if _ev_hist:
+            st.write("**Historial de evolución:**")
+            for _ev in _ev_hist:
+                _active_mark = "⚡ ACTIVO" if _ev.get("is_active") else ""
+                st.caption(
+                    f"v{_ev['version']} {_active_mark}  —  "
+                    f"WR: {float(_ev.get('winrate') or 0):.1f}%  |  "
+                    f"Pips: {float(_ev.get('net_pips') or 0):+.1f}  |  "
+                    f"{_ev.get('key_insight','')[:60]}"
+                )
+        # Manual evolution button
+        _trades_since = 0
+        if _DB_OK:
+            try:
+                _trades_since = _db.count_trades_since_last_evolution()
+            except Exception:
+                pass
+        st.caption(f"Trades desde última evolución: {_trades_since} / 8 mínimo")
+        if st.button("🧬 Evolucionar Estrategia Ahora", key="_evolve_btn"):
+            if not _AI_ENGINE_OK:
+                st.error("ai_engine no disponible")
+            else:
+                with st.spinner("Analizando trades y evolucionando estrategia..."):
+                    try:
+                        _evo_trades = _db.get_trades_for_evolution() if _DB_OK else []
+                        _new_dna = _ai_engine.evolve_strategy(_evo_trades, _active_dna)
+                        if _new_dna:
+                            _nv = _new_dna.get("version", _dna_v + 1)
+                            if _DB_OK:
+                                _db.save_strategy_dna(
+                                    version=_nv,
+                                    rules=_new_dna,
+                                    fitness=float(_new_dna.get("fitness") or 0),
+                                    trades_evaluated=int(_new_dna.get("trades_evaluated") or 0),
+                                    winrate=float(_new_dna.get("winrate") or 0),
+                                    net_pips=float(_new_dna.get("net_pips") or 0),
+                                    key_insight=str(_new_dna.get("key_insight") or "")[:200],
+                                )
+                            st.session_state.active_dna = _new_dna
+                            st.success(f"✅ DNA v{_nv} generado — WR aprendido: {float(_new_dna.get('winrate') or 0):.1f}%")
+                            st.info(f"💡 {_new_dna.get('key_insight','')}")
+                            st.rerun()
+                        else:
+                            st.warning("⚠️ Necesitas al menos 5 trades cerrados para evolucionar")
+                    except Exception as _ee:
+                        st.error(f"Error en evolución: {_ee}")
+
+    # ── Auto-evolución: cada 8 trades cerrados ────────────────────────────────
+    if _AI_ENGINE_OK and _DB_OK and run_fresh_analysis:
+        try:
+            if _db.count_trades_since_last_evolution() >= 8:
+                _evo_trades2 = _db.get_trades_for_evolution()
+                if len(_evo_trades2) >= 5:
+                    _new_dna2 = _ai_engine.evolve_strategy(_evo_trades2, _active_dna)
+                    if _new_dna2:
+                        _nv2 = _new_dna2.get("version", (_active_dna.get("version") or 1) + 1)
+                        _db.save_strategy_dna(
+                            version=_nv2, rules=_new_dna2,
+                            fitness=float(_new_dna2.get("fitness") or 0),
+                            trades_evaluated=int(_new_dna2.get("trades_evaluated") or 0),
+                            winrate=float(_new_dna2.get("winrate") or 0),
+                            net_pips=float(_new_dna2.get("net_pips") or 0),
+                            key_insight=str(_new_dna2.get("key_insight") or "")[:200],
+                        )
+                        st.session_state.active_dna = _new_dna2
+        except Exception:
+            pass
 
     # ── VOLUMEN — Panel principal ─────────────────────────────────────────────
     st.markdown("---")
@@ -5568,10 +5712,18 @@ if is_mt5_available() and mt5_connect():
                 if _ok:
                     st.success(f"🚀 Bot ejecutó trade: {_msg}")
                     st.session_state.bot_last_signal = _bot_signal.get("direction")
-                    # Persistir trade en DB
+                    # Persistir trade en DB con snapshot de mercado
                     if _DB_OK:
                         try:
-                            _db.save_trade(
+                            _mkt_snap = {}
+                            if _AI_ENGINE_OK:
+                                _mkt_snap = _ai_engine.build_market_snapshot(
+                                    _bot_signal, _bot_score, session, dxy_dir,
+                                    vol_spikes, delta,
+                                    st.session_state.get("market_context_reasons"),
+                                    dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
+                                )
+                            _db.save_trade_with_snapshot(
                                 direction=_bot_signal.get("direction", ""),
                                 entry_price=float(_bot_signal.get("entry", price or 0)),
                                 sl_price=float(_bot_signal.get("stop_loss", 0) or 0),
@@ -5581,6 +5733,9 @@ if is_mt5_available() and mt5_connect():
                                 pnl=0.0,
                                 strategy=_bot_signal.get("strategy", ""),
                                 score=_bot_score,
+                                market_snapshot=_mkt_snap,
+                                dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
+                                user_id=current_user,
                             )
                         except Exception:
                             pass
