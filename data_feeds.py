@@ -19,7 +19,7 @@ import db as _db
 
 _log = logging.getLogger(__name__)
 
-_FRED_KEY         = os.environ.get("FRED_API_KEY", "").strip()
+_FRED_KEY         = os.environ.get("FRED_API_KEY", "8f68a4232ff18468959baa71aaa124de").strip()
 _FINNHUB_KEY      = os.environ.get("FINNHUB_API_KEY", "").strip()
 _AV_KEY           = os.environ.get("ALPHAVANTAGE_API_KEY", "").strip()
 _TWELVEDATA_KEY   = os.environ.get("TWELVEDATA_API_KEY", "").strip()
