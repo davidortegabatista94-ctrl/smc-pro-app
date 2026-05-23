@@ -4761,20 +4761,168 @@ else:
     if "symbol" not in st.session_state:
         st.session_state.symbol = SYMBOL
 
-    st.markdown("""
-    <style>
-    .big-signal{font-size:2.2rem;font-weight:800;text-align:center;
-                padding:1rem;border-radius:10px;margin-bottom:1rem}
-    .sl{background:#0f5132;color:#d1e7dd}
-    .ss{background:#842029;color:#f8d7da}
-    .sw{background:#332701;color:#fff3cd}
-    .scalp-box{border:1px solid #555;border-radius:8px;padding:0.8rem;
-               background:#1a1a2e;margin-top:0.5rem}
-    .score-box{border-radius:12px;padding:1rem;text-align:center;
-               font-size:1.8rem;font-weight:800;margin:0.5rem 0}
-    .vol-bar{height:18px;border-radius:4px;background:#00ff88;margin:2px 0}
-    </style>
-    """, unsafe_allow_html=True)
+    st.markdown("""<style>
+/* ══════════════════════════════════════════════════════
+   SMC Pro — Design System v2
+   Dark trading terminal aesthetic
+══════════════════════════════════════════════════════ */
+
+/* ── Layout ── */
+.main .block-container{padding-top:.6rem!important;padding-bottom:2rem!important;max-width:100%!important}
+#MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important}
+.stApp{background:#060a10!important}
+
+/* ── Sidebar ── */
+[data-testid="stSidebar"]{background:#07090f!important;border-right:1px solid #151d2e!important}
+[data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3{
+  color:#3d7eff!important;font-size:.72rem!important;font-weight:700!important;
+  letter-spacing:.1em!important;text-transform:uppercase!important;margin-bottom:6px!important}
+[data-testid="stSidebar"] .stMarkdown p{font-size:.8rem!important;color:#6e7a8a!important}
+[data-testid="stSidebarNavItems"]{padding-top:0!important}
+
+/* ── Metrics ── */
+[data-testid="metric-container"]{
+  background:#0b0f18!important;border:1px solid #151d2e!important;
+  border-radius:10px!important;padding:12px 14px!important}
+[data-testid="metric-container"]:hover{border-color:#3d7eff!important}
+[data-testid="stMetricValue"]{
+  font-size:1.2rem!important;font-weight:800!important;
+  font-family:'JetBrains Mono','Courier New',monospace!important;color:#e6edf3!important}
+[data-testid="stMetricLabel"]{
+  font-size:.68rem!important;font-weight:700!important;
+  color:#4d5966!important;text-transform:uppercase!important;letter-spacing:.07em!important}
+[data-testid="stMetricDelta"] svg{display:none!important}
+[data-testid="stMetricDelta"]{font-size:.75rem!important}
+
+/* ── Buttons ── */
+button[kind="primary"]{
+  background:linear-gradient(135deg,#1a56db,#1643b0)!important;
+  border:none!important;border-radius:8px!important;
+  font-weight:800!important;letter-spacing:.04em!important;
+  font-size:.85rem!important;padding:10px 20px!important;
+  box-shadow:0 2px 12px rgba(26,86,219,.35)!important;transition:all .2s!important}
+button[kind="primary"]:hover{
+  background:linear-gradient(135deg,#2563eb,#1a56db)!important;
+  box-shadow:0 4px 20px rgba(26,86,219,.55)!important;transform:translateY(-1px)!important}
+button[kind="secondary"]{
+  background:#0d1117!important;border:1px solid #1e2d3d!important;
+  border-radius:8px!important;color:#8b9ab0!important;font-size:.8rem!important}
+
+/* ── Expanders ── */
+[data-testid="stExpander"]{
+  background:#0b0f18!important;border:1px solid #151d2e!important;border-radius:10px!important}
+details summary{
+  font-weight:600!important;font-size:.82rem!important;
+  color:#8b9ab0!important;padding:10px 14px!important}
+details summary:hover{color:#e6edf3!important}
+
+/* ── Alerts ── */
+[data-testid="stAlert"]{border-radius:8px!important;padding:10px 14px!important;font-size:.82rem!important}
+.stSuccess{background:rgba(5,150,105,.08)!important;border-color:rgba(5,150,105,.3)!important}
+.stWarning{background:rgba(217,119,6,.08)!important;border-color:rgba(217,119,6,.3)!important}
+.stInfo{background:rgba(26,86,219,.08)!important;border-color:rgba(26,86,219,.3)!important}
+.stError{background:rgba(185,28,28,.08)!important;border-color:rgba(185,28,28,.3)!important}
+
+/* ── DataFrames ── */
+[data-testid="stDataFrame"]{border:1px solid #151d2e!important;border-radius:8px!important;overflow:hidden!important}
+
+/* ── Dividers ── */
+hr{border-color:#151d2e!important;margin:14px 0!important}
+
+/* ── Inputs ── */
+[data-testid="stWidgetLabel"] label{
+  font-size:.72rem!important;font-weight:700!important;
+  color:#4d5966!important;text-transform:uppercase!important;letter-spacing:.06em!important}
+.stTextInput input,.stSelectbox select{
+  background:#0b0f18!important;border-color:#1e2d3d!important;
+  border-radius:6px!important;color:#c9d1d9!important}
+
+/* ── Plotly chart ── */
+.js-plotly-plot{border:1px solid #151d2e!important;border-radius:10px!important;overflow:hidden!important}
+
+/* ══════ Custom component classes ══════ */
+
+/* Header */
+.smc-header{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:10px 0 12px;border-bottom:1px solid #151d2e;margin-bottom:10px}
+.smc-logo{font-size:1.25rem;font-weight:900;color:#e6edf3;letter-spacing:-.03em}
+.smc-pair{font-size:.85rem;font-weight:700;color:#3d7eff;font-family:monospace}
+.smc-time{font-size:.75rem;color:#4d5966;font-family:monospace}
+.smc-version{font-size:.62rem;font-weight:700;color:#4d5966;background:#0d1117;
+  border:1px solid #1e2d3d;padding:1px 6px;border-radius:3px;margin-left:6px;vertical-align:middle}
+.smc-hbrand{display:flex;align-items:center;gap:8px}
+.smc-hinfo{display:flex;align-items:center;gap:10px}
+
+/* Badges */
+.bdg{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;
+     font-size:.68rem;font-weight:800;letter-spacing:.04em;vertical-align:middle}
+.bdg-g{background:rgba(5,150,105,.12);color:#10b981;border:1px solid rgba(5,150,105,.25)}
+.bdg-r{background:rgba(220,38,38,.12);color:#f87171;border:1px solid rgba(220,38,38,.25)}
+.bdg-y{background:rgba(217,119,6,.12);color:#f59e0b;border:1px solid rgba(217,119,6,.25)}
+.bdg-b{background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.25)}
+.bdg-x{background:rgba(107,114,128,.12);color:#9ca3af;border:1px solid rgba(107,114,128,.25)}
+
+/* Section headers */
+.smc-sec{display:flex;align-items:center;gap:8px;padding:16px 0 10px;
+  border-bottom:1px solid #151d2e;margin-bottom:12px}
+.smc-sec span:first-child{font-size:1rem}
+.smc-sec-title{font-size:.72rem;font-weight:800;color:#4d5966;
+  letter-spacing:.1em;text-transform:uppercase}
+
+/* Signal hero card */
+.smc-signal{border-radius:12px;padding:18px 22px;margin:6px 0;
+  display:flex;align-items:center;justify-content:space-between}
+.smc-sig-b{background:linear-gradient(135deg,#011a0a,#012d10);
+  border:1px solid rgba(5,150,105,.5);box-shadow:0 0 24px rgba(5,150,105,.08)}
+.smc-sig-s{background:linear-gradient(135deg,#1a0505,#2d0a0a);
+  border:1px solid rgba(220,38,38,.5);box-shadow:0 0 24px rgba(220,38,38,.08)}
+.smc-sig-n{background:linear-gradient(135deg,#151206,#221b08);
+  border:1px solid rgba(217,119,6,.3)}
+.sig-dir{font-size:1.7rem;font-weight:900;letter-spacing:-.02em;line-height:1}
+.sig-dir-b{color:#10b981}.sig-dir-s{color:#f87171}.sig-dir-n{color:#f59e0b}
+.sig-price{font-size:1.1rem;font-weight:700;font-family:'JetBrains Mono','Courier New',monospace;
+  color:#c9d1d9;margin-top:4px}
+.sig-right{display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+.sig-pill{font-size:.72rem;color:#6e7a8a;background:#0d1117;
+  border:1px solid #1e2d3d;border-radius:6px;padding:3px 9px}
+
+/* Score card */
+.smc-score{background:#0b0f18;border:1px solid #151d2e;
+  border-radius:12px;padding:16px 18px}
+.sc-num{font-size:2.6rem;font-weight:900;font-family:monospace;line-height:1}
+.sc-den{font-size:1rem;font-weight:400;color:#4d5966}
+.sc-lbl{font-size:.68rem;font-weight:800;letter-spacing:.1em;
+  text-transform:uppercase;margin:4px 0 10px}
+.sc-track{height:5px;background:#151d2e;border-radius:3px;overflow:hidden}
+.sc-fill{height:100%;border-radius:3px;transition:width .6s ease}
+
+/* Position banner */
+.smc-pos{display:flex;align-items:center;justify-content:space-between;
+  background:#0b0f18;border:1px solid #151d2e;border-radius:10px;
+  padding:11px 16px;margin:6px 0;font-size:.8rem}
+.smc-pos-open{border-left:3px solid #3d7eff!important;background:rgba(26,86,219,.04)!important}
+.smc-pos-b{border-left:3px solid #10b981!important}
+.smc-pos-s{border-left:3px solid #f87171!important}
+.pos-vals{display:flex;gap:18px;font-family:monospace;font-size:.78rem}
+.pos-val-tp{color:#10b981}.pos-val-sl{color:#f87171}.pos-val-x{color:#6e7a8a}
+
+/* Window status */
+.smc-win{display:flex;align-items:center;gap:8px;padding:8px 14px;
+  border-radius:8px;margin-bottom:8px;font-size:.8rem;font-weight:600}
+.smc-win-on{background:rgba(5,150,105,.06);border:1px solid rgba(5,150,105,.2);color:#10b981}
+.smc-win-off{background:rgba(217,119,6,.06);border:1px solid rgba(217,119,6,.2);color:#f59e0b}
+
+/* Legacy compat */
+.big-signal{font-size:1.8rem;font-weight:800;text-align:center;
+  padding:.8rem;border-radius:10px;margin-bottom:.5rem}
+.sl{background:#011a0a;color:#10b981;border:1px solid rgba(5,150,105,.4)}
+.ss{background:#1a0505;color:#f87171;border:1px solid rgba(220,38,38,.4)}
+.sw{background:#151206;color:#f59e0b;border:1px solid rgba(217,119,6,.3)}
+.scalp-box{border:1px solid #1e2d3d;border-radius:8px;padding:.8rem;background:#0b0f18;margin-top:.5rem}
+.score-box{border-radius:10px;padding:.8rem;text-align:center;font-size:1.6rem;font-weight:800;margin:.3rem 0}
+.vol-bar{height:14px;border-radius:3px;background:#10b981;margin:2px 0}
+</style>""", unsafe_allow_html=True)
 
     mt5_login = st.session_state.mt5_login or None
     mt5_password = st.session_state.mt5_password or None
@@ -4786,12 +4934,23 @@ else:
     )
     data_src  = "🟢 MT5 (tiempo real)" if connected else "🟡 yfinance (delay ~15min)"
 
-    st.title(f"⚡ SMC Pro v2 — EURUSD Scalper + MT5  ·  👤 {current_user_name}")
-    st.caption(
-        f"UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}  |  "
-        f"Datos: {data_src}  |  "
-        f"TP variable · SL {SCALP_SL_PIPS}p máx · R:R 1:2-3"
-    )
+    _hconn_cls = "bdg-g" if connected else "bdg-y"
+    _hconn_dot = "●" if connected else "◐"
+    _hconn_txt = "MT5 Live" if connected else "yfinance"
+    _htime     = datetime.utcnow().strftime("%H:%M UTC")
+    st.markdown(f"""
+<div class="smc-header">
+  <div class="smc-hbrand">
+    <span class="smc-logo">⚡ SMC Pro</span>
+    <span class="smc-version">v2.0</span>
+    <span class="bdg {_hconn_cls}">{_hconn_dot} {_hconn_txt}</span>
+  </div>
+  <div class="smc-hinfo">
+    <span class="smc-pair">EUR / USD</span>
+    <span class="bdg bdg-b">👤 {current_user_name}</span>
+    <span class="smc-time">{_htime}</span>
+  </div>
+</div>""", unsafe_allow_html=True)
 
     # ── Preservar posición de scroll en cada rerun ────────────────────────────
     # Guarda scrollY en sessionStorage justo cuando Streamlit empieza a procesar
@@ -4903,33 +5062,39 @@ else:
 
     # ── Ventana horaria de trading ─────────────────────────────────────────
     _win_in, _win_label, _win_eta = get_trading_window_info()
-    if _win_in:
-        st.success(f"✅ **HORARIO ACTIVO** — {_win_label} | {_win_eta}")
-    else:
-        st.warning(f"⏸️ **FUERA DE HORARIO** — {_win_label} | {_win_eta}")
+    _wcls = "smc-win-on" if _win_in else "smc-win-off"
+    _wdot = "●" if _win_in else "○"
+    _wtxt = "HORARIO ACTIVO" if _win_in else "FUERA DE HORARIO"
+    st.markdown(f"""<div class="smc-win {_wcls}">
+  {_wdot} <strong>{_wtxt}</strong> &nbsp;—&nbsp; {_win_label} &nbsp;|&nbsp; {_win_eta}
+</div>""", unsafe_allow_html=True)
 
     # ── Estado de Posición ──────────────────────────────────────────────────────
     position_state = load_position_state()
     if position_state["is_open"]:
-        direction_emoji = "📈" if position_state["direction"] == "LONG" else "📉"
         entry_time = position_state["entry_time"]
         if isinstance(entry_time, str):
             entry_time = datetime.fromisoformat(entry_time)
-
-        time_open = datetime.now() - entry_time
-        hours_open = int(time_open.total_seconds() // 3600)
+        time_open    = datetime.now() - entry_time
+        hours_open   = int(time_open.total_seconds() // 3600)
         minutes_open = int((time_open.total_seconds() % 3600) // 60)
-
-        st.info(
-            f"🔥 **POSICIÓN ACTIVA** {direction_emoji}  \n"
-            f"**Entrada:** {position_state['entry_price']:.5f}  |  "
-            f"**TP:** {position_state['tp']:.5f}  |  "
-            f"**SL:** {position_state['sl']:.5f}  |  "
-            f"**Score:** {position_state['score']}/100  |  "
-            f"**Tiempo:** {hours_open}h {minutes_open}m"
-        )
+        _pdir  = position_state["direction"]
+        _pcls  = "smc-pos-b" if _pdir == "LONG" else "smc-pos-s"
+        _pbdg  = f'<span class="bdg bdg-{"g" if _pdir=="LONG" else "r"}">{"COMPRA" if _pdir=="LONG" else "VENTA"}</span>'
+        st.markdown(f"""<div class="smc-pos smc-pos-open {_pcls}">
+  <div><strong>🔥 POSICIÓN ACTIVA</strong> {_pbdg}</div>
+  <div class="pos-vals">
+    <span class="pos-val-x">Entrada: {position_state['entry_price']:.5f}</span>
+    <span class="pos-val-tp">TP: {position_state['tp']:.5f}</span>
+    <span class="pos-val-sl">SL: {position_state['sl']:.5f}</span>
+    <span class="pos-val-x">Score: {position_state['score']}/100</span>
+    <span class="pos-val-x">⏱ {hours_open}h {minutes_open}m</span>
+  </div>
+</div>""", unsafe_allow_html=True)
     else:
-        st.success("🎯 **SIN POSICIÓN** — Esperando señal definitiva (>70%)")
+        st.markdown("""<div class="smc-pos">
+  <span class="pos-val-x">○ &nbsp;<strong>SIN POSICIÓN</strong> — Esperando señal ≥ 70</span>
+</div>""", unsafe_allow_html=True)
 
     # ── Sidebar ───────────────────────────────────────────────────────────────────
     with st.sidebar:
@@ -5512,16 +5677,29 @@ if st.session_state.analysis_executed:
     # ── Señal principal ───────────────────────────────────────────────────────
     st.markdown('<div id="sec-senal"></div>', unsafe_allow_html=True)
     st.markdown("---")
-    final = signal.get("final_signal", "⚪ NO TRADE")
-    css   = "sl" if "COMPRA" in final else ("ss" if "VENTA" in final else "sw")
-    st.markdown(f'<div class="big-signal {css}">{final}</div>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("✅ Señales COMPRA", signal.get("buy_signals", 0))
-    c2.metric("❌ Señales VENTA",  signal.get("sell_signals", 0))
-    _sess_icon = signal.get("sess_icon", "🕐")
-    _session   = signal.get("session", "Desconocida")
-    c3.metric(f"{_sess_icon} Sesión", _session.split(" ")[0] if _session else "—")
-    c4.metric("⚡ Volatilidad", signal.get("volatility", "—"))
+    final    = signal.get("final_signal", "⚪ NO TRADE")
+    _is_buy  = "COMPRA" in final
+    _is_sell = "VENTA"  in final
+    _scls    = "smc-sig-b" if _is_buy else ("smc-sig-s" if _is_sell else "smc-sig-n")
+    _dcls    = "sig-dir-b" if _is_buy else ("sig-dir-s" if _is_sell else "sig-dir-n")
+    _dtxt    = "COMPRA" if _is_buy else ("VENTA" if _is_sell else "SIN SETUP")
+    _dico    = "▲" if _is_buy else ("▼" if _is_sell else "–")
+    _px      = f"{signal.get('price', 0):.5f}" if signal.get("price") else "—"
+    _sess_str= (signal.get("session") or "—").split(" ")[0]
+    _vol_str = signal.get("volatility", "—")
+    _buy_n   = signal.get("buy_signals", 0)
+    _sell_n  = signal.get("sell_signals", 0)
+    st.markdown(f"""<div class="smc-signal {_scls}">
+  <div>
+    <div class="sig-dir {_dcls}">{_dico} {_dtxt}</div>
+    <div class="sig-price">{_px}</div>
+  </div>
+  <div class="sig-right">
+    <span class="sig-pill">📍 {_sess_str}</span>
+    <span class="sig-pill">⚡ {_vol_str}</span>
+    <span class="sig-pill">▲ {_buy_n} &nbsp;▼ {_sell_n}</span>
+  </div>
+</div>""", unsafe_allow_html=True)
 
     # ── Panel Inteligencia Adaptativa (KB + Señal Estrategia + Régimen) ─────────
     kb_dir          = signal.get("kb_direction", "NO TRADE")
@@ -5642,13 +5820,13 @@ if st.session_state.analysis_executed:
     label, color = score_label(score)
     col_sc1, col_sc2 = st.columns([1, 2])
     with col_sc1:
-        bg = {"green": "#0f5132", "lightgreen": "#1a3a1a",
-              "orange": "#4a2e00", "red": "#4a0000"}.get(color, "#333")
-        st.markdown(
-            f'<div class="score-box" style="background:{bg};color:white">'
-            f'{score}/100<br><small>{label}</small></div>',
-            unsafe_allow_html=True
-        )
+        _sc_colors = {"green": "#10b981", "lightgreen": "#4ade80", "orange": "#f59e0b", "red": "#f87171"}
+        _sc = _sc_colors.get(color, "#6b7280")
+        st.markdown(f"""<div class="smc-score">
+  <div class="sc-num" style="color:{_sc}">{score}<span class="sc-den">/100</span></div>
+  <div class="sc-lbl" style="color:{_sc}">{label}</div>
+  <div class="sc-track"><div class="sc-fill" style="width:{score}%;background:{_sc}"></div></div>
+</div>""", unsafe_allow_html=True)
         # Sistema de posiciones definitivas
         position_state = load_position_state()
         current_price = tick['bid'] if tick else None
