@@ -4686,13 +4686,27 @@ else:
             pass
         st.session_state[_mt5_load_key] = True
 
-    # ── Importar motores AI ───────────────────────────────────────────────────
+    # ── Importar motores AI + auto-mejora + data feeds ───────────────────────
     try:
         import ai_engine as _ai_engine
         _AI_ENGINE_OK = True
     except ImportError:
         _ai_engine = None
         _AI_ENGINE_OK = False
+
+    try:
+        import self_improve as _self_improve
+        _SELF_IMPROVE_OK = True
+    except ImportError:
+        _self_improve = None
+        _SELF_IMPROVE_OK = False
+
+    try:
+        import data_feeds as _data_feeds
+        _DATA_FEEDS_OK = True
+    except ImportError:
+        _data_feeds = None
+        _DATA_FEEDS_OK = False
 
     # ── Cargar Strategy DNA activo (o usar default) ──────────────────────────
     if "active_dna" not in st.session_state:
@@ -4808,6 +4822,7 @@ else:
   <a href="#sec-dashboard">📋 Dashboard</a>
   <a href="#sec-dxy">💱 DXY</a>
   <a href="#sec-accion">🎯 Acción</a>
+  <a href="#sec-autoimprove">🔬 Auto-Mejora</a>
   <a href="#sec-advisor">💬 Advisor</a>
 </div>
 """, unsafe_allow_html=True)
@@ -5336,6 +5351,46 @@ if st.session_state.analysis_executed:
         except Exception as _tg_err:
             logging.warning("Hourly telegram error: %s", _tg_err)
 
+    # ── Macro context enrichment (FRED + Finnhub) ────────────────────────────
+    if "macro_context" not in st.session_state:
+        st.session_state.macro_context = {}
+    if run_fresh_analysis and _DATA_FEEDS_OK:
+        try:
+            _macro = _data_feeds.get_full_macro_context()
+            if _macro:
+                st.session_state.macro_context = _macro
+        except Exception as _mce:
+            if _SELF_IMPROVE_OK:
+                _self_improve.log_error("data_feeds.macro_context", _mce)
+
+    # ── Market observation storage (for AI pattern mining) ───────────────────
+    if run_fresh_analysis and _SELF_IMPROVE_OK and signal:
+        try:
+            _sentiment_val = (st.session_state.macro_context.get("sentiment_score") or 0)
+            _self_improve.store_market_observation(
+                signal=signal, score=score if score else 0,
+                session=session, dxy_dir=dxy_dir,
+                economic_data=st.session_state.macro_context.get("fred"),
+                sentiment=_sentiment_val,
+            )
+        except Exception:
+            pass
+
+    # ── Self-heal cycle (runs at most once per hour) ──────────────────────────
+    if run_fresh_analysis and _SELF_IMPROVE_OK and _DB_OK:
+        try:
+            if _self_improve.should_run_heal():
+                _heal_result = _self_improve.run_heal_cycle(
+                    active_dna=st.session_state.get("active_dna") or {},
+                    current_user=current_user,
+                )
+                if _heal_result:
+                    st.session_state.last_heal_result = _heal_result
+                    if _heal_result.get("dna_updated") and _heal_result.get("new_dna"):
+                        st.session_state.active_dna = _heal_result["new_dna"]
+        except Exception as _he:
+            logging.warning("Self-heal error: %s", _he)
+
     # ── Panel MT5 ─────────────────────────────────────────────────────────────
     st.markdown('<div id="sec-precio"></div>', unsafe_allow_html=True)
     if tick:
@@ -5467,6 +5522,17 @@ if st.session_state.analysis_executed:
             if _dna_reasons:
                 score_reasons = list(score_reasons) + _dna_reasons
                 score = _dna_adj_score
+        except Exception:
+            pass
+
+    # ── Macro bonus from FRED + Finnhub ──────────────────────────────────────
+    if _DATA_FEEDS_OK and st.session_state.get("macro_context"):
+        try:
+            _macro_adj, _macro_reasons = _data_feeds.macro_context_to_score_bonus(
+                st.session_state.macro_context)
+            if _macro_adj != 0:
+                score = max(0, min(100, score + _macro_adj))
+                score_reasons = list(score_reasons) + _macro_reasons
         except Exception:
             pass
 
@@ -6602,6 +6668,99 @@ st.info(
     f"**Sesión:** {session}  |  **DXY:** {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)"
 )
 
+
+# ── AUTO-MEJORA — Sistema autónomo de aprendizaje y corrección ────────────────
+st.markdown('<div id="sec-autoimprove"></div>', unsafe_allow_html=True)
+st.markdown("---")
+st.subheader("🔬 Sistema de Auto-Mejora Autónoma")
+st.caption("El sistema monitoriza su propio rendimiento, detecta errores, y se corrige automáticamente cada hora usando IA.")
+
+_sim_col1, _sim_col2 = st.columns([1, 1])
+
+with _sim_col1:
+    # ── APIs activas / pendientes ─────────────────────────────────────────────
+    st.markdown("**🌐 APIs Gratuitas — Estado**")
+    if _SELF_IMPROVE_OK:
+        _api_status = _self_improve.get_configured_apis()
+        _api_missing = _self_improve.get_missing_apis()
+        for _api in _api_status:
+            _t = "🤖" if _api["type"] == "ai" else "📊"
+            st.success(f"{_t} **{_api['name']}** activo")
+        if _api_missing:
+            st.markdown("**➕ APIs gratuitas disponibles (sin configurar):**")
+            for _api in _api_missing:
+                _t = "🤖" if _api["type"] == "ai" else "📊"
+                st.info(f"{_t} {_api['name']} — Obtén key gratis: {_api['url']}\n`Railway → Variables → {_api['env']}`")
+    else:
+        st.warning("Módulo self_improve no disponible")
+
+    # ── Datos macro FRED ─────────────────────────────────────────────────────
+    _macro_ctx = st.session_state.get("macro_context") or {}
+    if _macro_ctx.get("fred"):
+        st.markdown("**🏦 Macro FRED (tiempo real)**")
+        _fred = _macro_ctx["fred"]
+        _fc1, _fc2 = st.columns(2)
+        if _fred.get("fed_rate"):
+            _fc1.metric("Tasa Fed", f"{_fred['fed_rate']['value']:.2f}%")
+        if _fred.get("unemployment"):
+            _fc2.metric("Desempleo", f"{_fred['unemployment']['value']:.1f}%")
+        if _fred.get("10y_yield"):
+            _fc1.metric("Bono 10Y", f"{_fred['10y_yield']['value']:.2f}%")
+        if _fred.get("2y_yield"):
+            _fc2.metric("Bono 2Y", f"{_fred['2y_yield']['value']:.2f}%")
+        _bias = _macro_ctx.get("macro_bias", "NEUTRAL")
+        _yc   = _macro_ctx.get("yield_curve", "?")
+        _bias_col = "🟢" if _bias == "BEARISH_USD" else "🔴" if _bias == "BULLISH_USD" else "⚪"
+        st.caption(f"{_bias_col} Sesgo USD: **{_bias}** | Yield curve: **{_yc}**")
+    elif _DATA_FEEDS_OK:
+        st.info("🏦 FRED: añade `FRED_API_KEY` en Railway (gratis en fredaccount.stlouisfed.org/apikeys)")
+
+with _sim_col2:
+    # ── Último ciclo de auto-sanación ─────────────────────────────────────────
+    st.markdown("**🩺 Último Ciclo de Auto-Corrección**")
+    _heal = st.session_state.get("last_heal_result")
+    if _heal:
+        _hs = _heal.get("health_status", "?")
+        _hs_icon = "🟢" if _hs == "ok" else "🟡" if _hs == "warning" else "🔴"
+        st.markdown(f"{_hs_icon} Estado: **{_hs.upper()}**")
+        if _heal.get("summary"):
+            st.write(_heal["summary"])
+        if _heal.get("top_finding"):
+            st.info(f"💡 **Hallazgo:** {_heal['top_finding']}")
+        if _heal.get("applied_changes"):
+            st.success(f"✅ Parámetros ajustados: {list(_heal['applied_changes'].keys())}")
+        if _heal.get("dna_updated"):
+            _new_v = (_heal.get("new_dna") or {}).get("version", "?")
+            st.success(f"🧬 DNA auto-evolucionado a v{_new_v}")
+        st.caption(f"Ejecutado: {(_heal.get('ts') or '')[:16]}")
+    else:
+        st.info("Esperando primer ciclo de auto-corrección (se ejecuta automáticamente cada hora al analizar)")
+
+    # ── Historial de mejoras ──────────────────────────────────────────────────
+    if _DB_OK:
+        try:
+            _improvements = _db.get_self_improvements(limit=5)
+            if _improvements:
+                st.markdown("**📋 Últimas auto-mejoras aplicadas**")
+                for _imp in _improvements:
+                    _ic = "✅" if _imp.get("applied") else "📝"
+                    _ts = str(_imp.get("created_at", ""))[:16]
+                    st.caption(f"{_ic} {_ts} — {str(_imp.get('reason',''))[:80]}")
+        except Exception:
+            pass
+
+# ── Patrones de mercado detectados ────────────────────────────────────────────
+if _SELF_IMPROVE_OK:
+    with st.expander("🔎 Patrones detectados por IA en observaciones históricas", expanded=False):
+        if st.button("🧠 Analizar patrones ahora", key="_pattern_btn"):
+            with st.spinner("Analizando observaciones..."):
+                try:
+                    _pattern_rep = _self_improve.get_pattern_report(limit=100)
+                    st.write(_pattern_rep)
+                except Exception as _pe:
+                    st.error(f"Error: {_pe}")
+        else:
+            st.caption("Haz clic para analizar los últimos patrones detectados en el mercado.")
 
 # ── Trading Advisor AI ────────────────────────────────────────────────────────
 st.markdown('<div id="sec-advisor"></div>', unsafe_allow_html=True)

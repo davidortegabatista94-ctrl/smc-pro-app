@@ -1,10 +1,14 @@
 """
 ai_engine.py — Multi-provider AI engine + Self-learning Strategy DNA
 
-Providers (priority order):
-  1. Groq (free) — llama-3.3-70b-versatile
-  2. Anthropic Claude Haiku (ANTHROPIC_API_KEY) — claude-haiku-4-5-20251001
-  3. OpenAI-compatible (OPENAI_API_KEY, optional)
+Free providers (priority order):
+  1. Groq          — llama-3.3-70b-versatile          (30 RPM, 1000 RPD)
+  2. Cerebras      — llama-3.3-70b                    (1M tok/day, 30 RPM)
+  3. Gemini Flash  — gemini-2.0-flash-lite             (15 RPM, 1000 RPD)
+  4. Mistral       — mistral-small-latest              (1B tok/month)
+  5. OpenRouter    — deepseek/deepseek-r1:free         (reasoning, free)
+  6. Anthropic     — claude-haiku-4-5-20251001         (if key present)
+  7. OpenAI        — gpt-4o-mini                       (if key present)
 
 Strategy DNA lifecycle:
   new_trade → save_market_snapshot → [N trades] → evolve_strategy →
@@ -21,17 +25,37 @@ _log = logging.getLogger(__name__)
 # ── Provider detection ────────────────────────────────────────────────────────
 
 def _get_providers() -> list[tuple]:
-    """Return available AI providers in priority order as (name, key, model) tuples."""
+    """Return all available AI providers in priority order as (name, key, model) tuples."""
     providers = []
+
     groq_key = os.environ.get("GROQ_API_KEY", "").strip()
     if groq_key:
         providers.append(("groq", groq_key, "llama-3.3-70b-versatile"))
+
+    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "").strip()
+    if cerebras_key:
+        providers.append(("cerebras", cerebras_key, "llama-3.3-70b"))
+
+    gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if gemini_key:
+        providers.append(("gemini", gemini_key, "gemini-2.0-flash-lite"))
+
+    mistral_key = os.environ.get("MISTRAL_API_KEY", "").strip()
+    if mistral_key:
+        providers.append(("mistral", mistral_key, "mistral-small-latest"))
+
+    openrouter_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
+    if openrouter_key:
+        providers.append(("openrouter", openrouter_key, "deepseek/deepseek-r1:free"))
+
     ant_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if ant_key:
         providers.append(("anthropic", ant_key, "claude-haiku-4-5-20251001"))
+
     oai_key = os.environ.get("OPENAI_API_KEY", "").strip()
     if oai_key:
         providers.append(("openai", oai_key, "gpt-4o-mini"))
+
     return providers
 
 
@@ -40,22 +64,46 @@ def get_active_providers() -> list[str]:
     return [p[0] for p in _get_providers()]
 
 
+def get_providers_status() -> list[dict]:
+    """Return detailed status of all possible providers."""
+    checks = [
+        ("groq",        "GROQ_API_KEY",        "llama-3.3-70b-versatile",    "30 RPM · 1000 RPD · gratuito"),
+        ("cerebras",    "CEREBRAS_API_KEY",     "llama-3.3-70b",              "1M tok/día · 30 RPM · gratuito"),
+        ("gemini",      "GEMINI_API_KEY",       "gemini-2.0-flash-lite",      "15 RPM · 1000 RPD · gratuito"),
+        ("mistral",     "MISTRAL_API_KEY",      "mistral-small-latest",       "1B tok/mes · gratuito"),
+        ("openrouter",  "OPENROUTER_API_KEY",   "deepseek-r1:free",           "reasoning · gratuito"),
+        ("anthropic",   "ANTHROPIC_API_KEY",    "claude-haiku-4-5-20251001",  "pago"),
+        ("openai",      "OPENAI_API_KEY",       "gpt-4o-mini",                "pago"),
+    ]
+    result = []
+    for name, env_var, model, limits in checks:
+        active = bool(os.environ.get(env_var, "").strip())
+        result.append({"name": name, "model": model, "limits": limits,
+                        "active": active, "env_var": env_var})
+    return result
+
+
+# ── Core call_ai ──────────────────────────────────────────────────────────────
+
 def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
-            prefer_quality: bool = False) -> str:
+            prefer_quality: bool = False, prefer_reasoning: bool = False) -> str:
     """
-    Send messages to the best available AI provider with automatic fallback.
-    messages: list of {role: system|user|assistant, content: str}.
-    prefer_quality: if True, try Anthropic/OpenAI before Groq for complex tasks.
-    Returns response text or error string.
+    Send messages to the best available free AI provider with automatic fallback.
+    prefer_quality: try Anthropic/OpenAI before speed-optimised providers.
+    prefer_reasoning: use OpenRouter DeepSeek-R1 (reasoning model) first.
     """
     providers = _get_providers()
     if not providers:
-        return "⚠️ Sin API key. Añade GROQ_API_KEY (gratis) o ANTHROPIC_API_KEY en Railway → Variables."
+        return ("⚠️ Sin API key. Añade GROQ_API_KEY (gratis) en Railway → Variables. "
+                "También puedes añadir CEREBRAS_API_KEY, GEMINI_API_KEY, MISTRAL_API_KEY, "
+                "OPENROUTER_API_KEY — todos gratuitos.")
 
-    if prefer_quality:
-        quality_order = ["anthropic", "openai", "groq"]
-        providers = sorted(providers, key=lambda p: quality_order.index(p[0])
-                           if p[0] in quality_order else 99)
+    if prefer_reasoning:
+        order = ["openrouter", "groq", "gemini", "cerebras", "mistral", "anthropic", "openai"]
+        providers = sorted(providers, key=lambda p: order.index(p[0]) if p[0] in order else 99)
+    elif prefer_quality:
+        order = ["anthropic", "openai", "groq", "gemini", "cerebras", "mistral", "openrouter"]
+        providers = sorted(providers, key=lambda p: order.index(p[0]) if p[0] in order else 99)
 
     system_msg = next((m["content"] for m in messages if m["role"] == "system"), "")
     chat_msgs  = [m for m in messages if m["role"] != "system"]
@@ -67,6 +115,58 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
                 all_msgs = ([{"role": "system", "content": system_msg}]
                             if system_msg else []) + chat_msgs
                 resp = Groq(api_key=key).chat.completions.create(
+                    model=model, messages=all_msgs,
+                    max_tokens=max_tokens, temperature=temperature,
+                )
+                return resp.choices[0].message.content
+
+            elif provider == "cerebras":
+                from openai import OpenAI
+                all_msgs = ([{"role": "system", "content": system_msg}]
+                            if system_msg else []) + chat_msgs
+                resp = OpenAI(
+                    api_key=key,
+                    base_url="https://api.cerebras.ai/v1"
+                ).chat.completions.create(
+                    model=model, messages=all_msgs,
+                    max_tokens=min(max_tokens, 8192),  # Cerebras free cap
+                    temperature=temperature,
+                )
+                return resp.choices[0].message.content
+
+            elif provider == "gemini":
+                import google.generativeai as genai
+                genai.configure(api_key=key)
+                mdl = genai.GenerativeModel(model)
+                full_prompt = (f"[SYSTEM]\n{system_msg}\n\n" if system_msg else "") + \
+                              "\n".join(f"[{m['role'].upper()}]\n{m['content']}" for m in chat_msgs)
+                resp = mdl.generate_content(
+                    full_prompt,
+                    generation_config={"max_output_tokens": max_tokens,
+                                       "temperature": temperature}
+                )
+                return resp.text
+
+            elif provider == "mistral":
+                from mistralai import Mistral
+                all_msgs = ([{"role": "system", "content": system_msg}]
+                            if system_msg else []) + chat_msgs
+                resp = Mistral(api_key=key).chat.complete(
+                    model=model, messages=all_msgs,
+                    max_tokens=max_tokens, temperature=temperature,
+                )
+                return resp.choices[0].message.content
+
+            elif provider == "openrouter":
+                from openai import OpenAI
+                all_msgs = ([{"role": "system", "content": system_msg}]
+                            if system_msg else []) + chat_msgs
+                resp = OpenAI(
+                    api_key=key,
+                    base_url="https://openrouter.ai/api/v1",
+                    default_headers={"HTTP-Referer": "https://smc-pro-app.up.railway.app",
+                                     "X-Title": "SMC Pro Trading Bot"}
+                ).chat.completions.create(
                     model=model, messages=all_msgs,
                     max_tokens=max_tokens, temperature=temperature,
                 )
@@ -143,11 +243,7 @@ DEFAULT_DNA: dict = {
 
 def apply_dna_to_signal(signal: dict, score: int, dna: dict,
                         session: str, dxy_dir: str) -> tuple[int, list[str]]:
-    """
-    Apply strategy DNA rules to adjust a confluence score.
-    Returns (adjusted_score, list_of_reason_strings).
-    The reasons are appended to the score breakdown display.
-    """
+    """Apply strategy DNA rules to adjust a confluence score."""
     if not dna or not isinstance(dna, dict):
         return score, []
 
@@ -155,17 +251,13 @@ def apply_dna_to_signal(signal: dict, score: int, dna: dict,
     reasons = []
     final_sig = signal.get("final_signal", "NEUTRAL")
 
-    # Session filter
     preferred = dna.get("preferred_sessions") or []
     if preferred and session:
         if session in preferred:
-            adj += 5
-            reasons.append(f"🧬 DNA sesión {session} óptima (+5)")
+            adj += 5; reasons.append(f"🧬 DNA sesión {session} óptima (+5)")
         else:
-            adj -= 12
-            reasons.append(f"🧬 DNA sesión {session} fuera de ventana óptima (-12)")
+            adj -= 12; reasons.append(f"🧬 DNA sesión {session} fuera de ventana óptima (-12)")
 
-    # Regime weight
     regime_raw = (signal.get("regime") or signal.get("kb_regime_label") or "").lower()
     regime_weights = dna.get("regime_weights") or {}
     _matched = next((k for k in regime_weights if k.lower() in regime_raw), None)
@@ -173,89 +265,62 @@ def apply_dna_to_signal(signal: dict, score: int, dna: dict,
         w = regime_weights[_matched]
         regime_adj = int((w - 1.0) * 16)
         if regime_adj != 0:
-            adj += regime_adj
-            reasons.append(f"🧬 DNA régimen {_matched} × {w} ({regime_adj:+d})")
+            adj += regime_adj; reasons.append(f"🧬 DNA régimen {_matched} × {w} ({regime_adj:+d})")
 
-    # DXY filter
     dxy_strength = float(dna.get("dxy_filter_strength") or 1.0)
     if dxy_strength > 0:
-        confirms = (
-            (final_sig == "COMPRA" and dxy_dir == "DOWN") or
-            (final_sig == "VENTA" and dxy_dir == "UP")
-        )
-        contradicts = (
-            (final_sig == "COMPRA" and dxy_dir == "UP") or
-            (final_sig == "VENTA" and dxy_dir == "DOWN")
-        )
+        confirms = ((final_sig == "COMPRA" and dxy_dir == "DOWN") or
+                    (final_sig == "VENTA" and dxy_dir == "UP"))
+        contradicts = ((final_sig == "COMPRA" and dxy_dir == "UP") or
+                       (final_sig == "VENTA" and dxy_dir == "DOWN"))
         dxy_val = int(dxy_strength * 8)
-        if confirms:
-            adj += dxy_val
-            reasons.append(f"🧬 DNA DXY confirma dirección (+{dxy_val})")
-        elif contradicts:
-            adj -= dxy_val
-            reasons.append(f"🧬 DNA DXY contradice dirección (-{dxy_val})")
+        if confirms:   adj += dxy_val; reasons.append(f"🧬 DNA DXY confirma (+{dxy_val})")
+        elif contradicts: adj -= dxy_val; reasons.append(f"🧬 DNA DXY contradice (-{dxy_val})")
 
-    # Volume spike bonus
     spike_bonus = int(dna.get("volume_spike_bonus") or 0)
     if spike_bonus and signal.get("volume_spike"):
-        adj += spike_bonus
-        reasons.append(f"🧬 DNA spike volumen confirmado (+{spike_bonus})")
+        adj += spike_bonus; reasons.append(f"🧬 DNA spike volumen (+{spike_bonus})")
 
-    # Strong regime boost
     strong_boost = int(dna.get("score_boost_strong_regime") or 0)
     if strong_boost and ("strong" in regime_raw or "fuerte" in regime_raw):
-        adj += strong_boost
-        reasons.append(f"🧬 DNA régimen fuerte (+{strong_boost})")
+        adj += strong_boost; reasons.append(f"🧬 DNA régimen fuerte (+{strong_boost})")
 
-    # Hour blacklist
     blacklist = dna.get("blacklist_hours_utc") or []
     _utc_hour = datetime.utcnow().hour
     if blacklist and _utc_hour in blacklist:
-        adj -= 20
-        reasons.append(f"🧬 DNA hora {_utc_hour}h UTC en lista negra (-20)")
+        adj -= 20; reasons.append(f"🧬 DNA hora {_utc_hour}h UTC en lista negra (-20)")
 
-    final_score = max(0, min(100, score + adj))
-    return final_score, reasons
+    return max(0, min(100, score + adj)), reasons
 
 
 # ── Evolution cycle ───────────────────────────────────────────────────────────
 
 def evolve_strategy(recent_trades: list, current_dna: dict) -> dict | None:
-    """
-    Analyze recent trades using AI and generate an improved Strategy DNA.
-    Returns updated DNA dict, or None if evolution fails (< 5 trades or AI error).
-    """
+    """Analyze recent trades using AI and generate an improved Strategy DNA."""
     if len(recent_trades) < 5:
         return None
 
-    wins   = [t for t in recent_trades if (t.get("pips") or 0) > 0]
-    losses = [t for t in recent_trades if (t.get("pips") or 0) <= 0]
-    winrate  = round(len(wins) / len(recent_trades) * 100, 1)
+    wins    = [t for t in recent_trades if (t.get("pips") or 0) > 0]
+    losses  = [t for t in recent_trades if (t.get("pips") or 0) <= 0]
+    winrate = round(len(wins) / len(recent_trades) * 100, 1)
     net_pips = round(sum(t.get("pips") or 0 for t in recent_trades), 1)
 
-    # Summarise by strategy, session, regime
     strat_stats: dict = {}
     for t in recent_trades:
         s = t.get("strategy") or "unknown"
         strat_stats.setdefault(s, {"wins": 0, "losses": 0, "pips": 0.0})
-        if (t.get("pips") or 0) > 0:
-            strat_stats[s]["wins"] += 1
-        else:
-            strat_stats[s]["losses"] += 1
+        if (t.get("pips") or 0) > 0: strat_stats[s]["wins"] += 1
+        else: strat_stats[s]["losses"] += 1
         strat_stats[s]["pips"] = round(strat_stats[s]["pips"] + (t.get("pips") or 0), 1)
 
     trade_digest = []
     for t in recent_trades[-25:]:
         snap = t.get("market_snapshot") or {}
         trade_digest.append({
-            "direction": t.get("direction", "?"),
-            "outcome":   t.get("outcome", "?"),
-            "pips":      round(t.get("pips") or 0, 1),
-            "score":     t.get("score", 0),
-            "strategy":  t.get("strategy", "?"),
-            "session":   snap.get("session", "?"),
-            "regime":    snap.get("regime", "?"),
-            "dxy_dir":   snap.get("dxy_dir", "?"),
+            "direction": t.get("direction", "?"), "outcome": t.get("outcome", "?"),
+            "pips": round(t.get("pips") or 0, 1), "score": t.get("score", 0),
+            "strategy": t.get("strategy", "?"), "session": snap.get("session", "?"),
+            "regime": snap.get("regime", "?"), "dxy_dir": snap.get("dxy_dir", "?"),
             "vol_spike": snap.get("vol_spike", False),
         })
 
@@ -283,23 +348,18 @@ Genera un DNA mejorado. Reglas:
 - "explanation" (≤150 chars) explica los cambios en español
 - "key_insight" (≤80 chars) el hallazgo más valioso
 - Mantén JSON válido con EXACTAMENTE los mismos campos que el DNA actual
-- No inventes campos nuevos
 
 Responde SOLO con el JSON del nuevo DNA (sin markdown ni explicaciones extra):"""
 
     response = call_ai(
         [{"role": "user", "content": prompt}],
-        max_tokens=1100,
-        temperature=0.25,
-        prefer_quality=True,
+        max_tokens=1100, temperature=0.25, prefer_quality=True,
     )
 
     new_dna = _parse_json(response)
     if not new_dna or not isinstance(new_dna, dict):
-        _log.warning("Evolution: failed to parse AI response as JSON")
         return None
 
-    # Sanitize and enrich
     new_dna["fitness"]          = winrate
     new_dna["trades_evaluated"] = len(recent_trades)
     new_dna["winrate"]          = winrate
@@ -308,11 +368,8 @@ Responde SOLO con el JSON del nuevo DNA (sin markdown ni explicaciones extra):""
     new_dna.setdefault("version", (current_dna.get("version") or 1) + 1)
     new_dna.setdefault("key_insight", "")
     new_dna.setdefault("explanation", "")
-
-    # Clamp numeric values to sane ranges
-    new_dna["min_score"]    = max(50, min(90, int(new_dna.get("min_score") or 70)))
-    new_dna["dxy_filter_strength"] = max(0.0, min(2.0, float(new_dna.get("dxy_filter_strength") or 1.0)))
-
+    new_dna["min_score"]            = max(50, min(90, int(new_dna.get("min_score") or 70)))
+    new_dna["dxy_filter_strength"]  = max(0.0, min(2.0, float(new_dna.get("dxy_filter_strength") or 1.0)))
     return new_dna
 
 
@@ -323,10 +380,7 @@ def analyze_trade_postmortem(
     entry_price: float, exit_price: float | None,
     market_snapshot: dict,
 ) -> tuple[str, list[str]]:
-    """
-    Brief AI analysis of why a trade won or lost.
-    Returns (one_sentence_analysis, [lesson, avoid_if, seek_if]).
-    """
+    """Brief AI analysis of why a trade won or lost."""
     emoji = "✅" if pips > 0 else "❌"
     snap_summary = []
     if market_snapshot:
@@ -345,14 +399,11 @@ Responde SOLO con JSON (sin markdown):
   "avoid_if":"<cuándo evitar esta operación>",
   "seek_if":"<cuándo buscar esta operación>"}}"""
 
-    response = call_ai(
-        [{"role": "user", "content": prompt}],
-        max_tokens=250, temperature=0.2,
-    )
+    response = call_ai([{"role": "user", "content": prompt}],
+                       max_tokens=250, temperature=0.2)
     data = _parse_json(response)
     if not data:
         return f"{'Ganancia' if pips > 0 else 'Pérdida'} de {abs(pips):.1f}p en {direction}", []
-
     analysis = data.get("analysis", "")
     lessons  = [v for k, v in data.items() if k != "analysis" and isinstance(v, str) and v]
     return analysis, lessons

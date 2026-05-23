@@ -811,3 +811,112 @@ def save_trade_with_snapshot(
                 datetime.now(timezone.utc), datetime.now(timezone.utc),
             ),
         )
+
+
+# ── Error log ──────────────────────────────────────────────────────────────────
+
+def log_app_error(component: str, severity: str, message: str,
+                  traceback: str = "", context: dict | None = None) -> None:
+    """Store an application error to error_log table."""
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute(
+            """INSERT INTO error_log (component, severity, message, traceback, context)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (component[:100], severity[:20], message[:500], traceback[:1000],
+             json.dumps(context or {})),
+        )
+
+
+def get_error_log(hours: int = 6, limit: int = 50) -> list[dict]:
+    """Return recent error log entries."""
+    if not _DB_URL:
+        return []
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT component, severity, message, context, created_at
+               FROM error_log
+               WHERE created_at > NOW() - INTERVAL '%s hours'
+               ORDER BY created_at DESC LIMIT %s""",
+            (hours, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        _log.warning("get_error_log error: %s", e)
+        return []
+
+
+# ── Performance metrics ────────────────────────────────────────────────────────
+
+def save_metric(name: str, value: float, context: dict | None = None) -> None:
+    """Store a scalar metric."""
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute(
+            """INSERT INTO performance_metrics (metric_name, value, context)
+               VALUES (%s, %s, %s)""",
+            (name[:100], float(value), json.dumps(context or {})),
+        )
+
+
+def get_metrics(name: str, limit: int = 100) -> list[dict]:
+    """Return recent metrics for a given name."""
+    if not _DB_URL:
+        return []
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT value, context, created_at FROM performance_metrics
+               WHERE metric_name = %s ORDER BY created_at DESC LIMIT %s""",
+            (name, limit),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        _log.warning("get_metrics error: %s", e)
+        return []
+
+
+# ── Self-improvements log ──────────────────────────────────────────────────────
+
+def save_self_improvement(improvement_type: str, before: dict, after: dict,
+                          reason: str, applied: bool = False) -> None:
+    """Store a self-improvement record."""
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute(
+            """INSERT INTO self_improvements
+                   (improvement_type, before_state, after_state, reason, applied)
+               VALUES (%s, %s, %s, %s, %s)""",
+            (improvement_type[:50], json.dumps(before), json.dumps(after),
+             reason[:300], applied),
+        )
+
+
+def get_self_improvements(limit: int = 20) -> list[dict]:
+    """Return recent self-improvement records."""
+    if not _DB_URL:
+        return []
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT improvement_type, before_state, after_state, reason, applied, created_at
+               FROM self_improvements ORDER BY created_at DESC LIMIT %s""",
+            (limit,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return rows
+    except Exception as e:
+        _log.warning("get_self_improvements error: %s", e)
+        return []
