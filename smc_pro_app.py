@@ -4785,47 +4785,52 @@ else:
     )
 
     # ── Índice de navegación rápida ───────────────────────────────────────────
-    st.markdown("""
+    import streamlit.components.v1 as _stc
+    _stc.html("""
 <style>
-.nav-bar {
-    display: flex; flex-wrap: wrap; gap: 6px;
-    padding: 10px 0 14px 0; border-bottom: 1px solid #1e2530;
-    margin-bottom: 4px;
-}
-.nav-bar a {
-    color: #c9d1d9; background: #161b22; border: 1px solid #30363d;
-    border-radius: 20px; padding: 4px 12px; font-size: 0.78rem;
-    text-decoration: none; white-space: nowrap;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-.nav-bar a:hover { background: #1f6feb; color: #fff; border-color: #1f6feb; }
-.nav-sep { color: #444; font-size: 0.7rem; padding: 4px 2px; align-self: center; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:transparent; overflow:hidden; }
+.nav { display:flex; flex-wrap:wrap; gap:5px; padding:8px 0 10px 0;
+       border-bottom:1px solid #1e2530; font-family:-apple-system,sans-serif; }
+.nav a { color:#c9d1d9; background:#161b22; border:1px solid #30363d;
+         border-radius:20px; padding:4px 11px; font-size:0.76rem;
+         text-decoration:none; white-space:nowrap; cursor:pointer; }
+.nav a:hover { background:#1f6feb; color:#fff; border-color:#1f6feb; }
+.sep { color:#444; font-size:0.7rem; padding:4px 3px; display:flex; align-items:center; }
 </style>
-<div class="nav-bar">
-  <a href="#sec-precio">📡 Precio</a>
-  <a href="#sec-senal">🧠 Señal</a>
-  <a href="#sec-score">🎯 Score</a>
-  <a href="#sec-chart">📈 Gráfico</a>
-  <a href="#sec-dna">🧬 DNA</a>
-  <a href="#sec-vol">📊 Volumen</a>
-  <a href="#sec-scalping">🎯 Scalping</a>
-  <a href="#sec-estructura">🏗️ Estructura</a>
-  <a href="#sec-manipulacion">🕵️ Liquidez</a>
-  <a href="#sec-cot">🏦 COT</a>
-  <a href="#sec-ia">🤖 Motor IA</a>
-  <span class="nav-sep">|</span>
-  <a href="#sec-backtest">📊 Backtest</a>
-  <a href="#sec-backtest2008">🌍 2008</a>
-  <span class="nav-sep">|</span>
-  <a href="#sec-porq">🔍 Por qué</a>
-  <a href="#sec-bot">🤖 Bot</a>
-  <a href="#sec-dashboard">📋 Dashboard</a>
-  <a href="#sec-dxy">💱 DXY</a>
-  <a href="#sec-accion">🎯 Acción</a>
-  <a href="#sec-autoimprove">🔬 Auto-Mejora</a>
-  <a href="#sec-advisor">💬 Advisor</a>
+<div class="nav">
+  <a onclick="go('sec-precio')">📡 Precio</a>
+  <a onclick="go('sec-senal')">🧠 Señal</a>
+  <a onclick="go('sec-score')">🎯 Score</a>
+  <a onclick="go('sec-chart')">📈 Gráfico</a>
+  <a onclick="go('sec-dna')">🧬 DNA</a>
+  <a onclick="go('sec-vol')">📊 Volumen</a>
+  <a onclick="go('sec-scalping')">🎯 Scalping</a>
+  <a onclick="go('sec-estructura')">🏗️ Estructura</a>
+  <a onclick="go('sec-manipulacion')">🕵️ Liquidez</a>
+  <a onclick="go('sec-cot')">🏦 COT</a>
+  <a onclick="go('sec-ia')">🤖 Motor IA</a>
+  <span class="sep">|</span>
+  <a onclick="go('sec-backtest')">📊 Backtest</a>
+  <a onclick="go('sec-backtest2008')">🌍 2008</a>
+  <span class="sep">|</span>
+  <a onclick="go('sec-porq')">🔍 Por qué</a>
+  <a onclick="go('sec-bot')">🤖 Bot</a>
+  <a onclick="go('sec-dashboard')">📋 Dashboard</a>
+  <a onclick="go('sec-dxy')">💱 DXY</a>
+  <a onclick="go('sec-accion')">🎯 Acción</a>
+  <a onclick="go('sec-autoimprove')">🔬 Auto-Mejora</a>
+  <a onclick="go('sec-advisor')">💬 Advisor</a>
 </div>
-""", unsafe_allow_html=True)
+<script>
+function go(id) {
+    try {
+        var el = window.parent.document.getElementById(id);
+        if (el) { el.scrollIntoView({behavior:'smooth', block:'start'}); }
+    } catch(e) {}
+}
+</script>
+""", height=65, scrolling=False)
 
     # ── Ventana horaria de trading ─────────────────────────────────────────
     _win_in, _win_label, _win_eta = get_trading_window_info()
