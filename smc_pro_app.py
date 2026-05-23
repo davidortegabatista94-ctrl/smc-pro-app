@@ -4232,6 +4232,374 @@ def generate_signal():
     return sig
 
 # ============================================
+# TRADINGVIEW-STYLE CHART
+# ============================================
+
+def _render_trading_chart(
+    df,
+    signal: dict,
+    score: int,
+    session: str,
+    liq_levels: list,
+    poc,
+    vol_spikes: list,
+    market_structures: dict,
+    stop_hunts: list,
+    news_items: list,
+    trades_history: list,
+) -> None:
+    """Render a TradingView-style 4-panel chart: Price/Volume/RSI/MACD."""
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        st.warning("Instala plotly>=5.15.0 para ver el gráfico.")
+        return
+
+    if df is None or df.empty or len(df) < 20:
+        st.info("Datos insuficientes para el gráfico.")
+        return
+
+    df_plot = df.tail(120).copy()
+    close   = df_plot["Close"]
+    high    = df_plot["High"]
+    low     = df_plot["Low"]
+    vol     = df_plot["Volume"]
+    idx     = df_plot.index
+
+    # ── Indicators ───────────────────────────────────────────────────────────
+    ema21  = close.ewm(span=21,  adjust=False).mean()
+    ema50  = close.ewm(span=50,  adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
+
+    bb_ma  = close.rolling(20).mean()
+    bb_std = close.rolling(20).std()
+    bb_up  = bb_ma + 2 * bb_std
+    bb_dn  = bb_ma - 2 * bb_std
+
+    _delta  = close.diff()
+    _gain   = _delta.clip(lower=0)
+    _loss   = (-_delta).clip(lower=0)
+    _avg_g  = _gain.ewm(alpha=1/14, adjust=False).mean()
+    _avg_l  = _loss.ewm(alpha=1/14, adjust=False).mean()
+    _rs     = _avg_g / _avg_l.replace(0, float("inf"))
+    rsi     = (100 - (100 / (1 + _rs))).fillna(50)
+
+    ema12      = close.ewm(span=12, adjust=False).mean()
+    ema26      = close.ewm(span=26, adjust=False).mean()
+    macd_line  = ema12 - ema26
+    macd_sig   = macd_line.ewm(span=9, adjust=False).mean()
+    macd_hist  = (macd_line - macd_sig).fillna(0)
+
+    # ── Colour palette ────────────────────────────────────────────────────────
+    BG        = "#0d1117"
+    GRID      = "#1e2530"
+    TEXT      = "#c9d1d9"
+    BULL_C    = "#089981"
+    BEAR_C    = "#f23645"
+    EMA21_C   = "#f7a600"
+    EMA50_C   = "#2196f3"
+    EMA200_C  = "#e91e63"
+    BB_C      = "#607d8b"
+    POC_C     = "#ffeb3b"
+    BUY_C     = "#00e676"
+    SELL_C    = "#ff1744"
+    SL_C      = "#f44336"
+    TP_C      = "#4caf50"
+
+    # ── Subplots ──────────────────────────────────────────────────────────────
+    fig = make_subplots(
+        rows=4, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=[0.55, 0.15, 0.15, 0.15],
+        subplot_titles=("EUR/USD 1H", "Volumen", "RSI (14)", "MACD (12,26,9)"),
+    )
+
+    # ── Row 1: Candlesticks + overlays ────────────────────────────────────────
+    fig.add_trace(go.Candlestick(
+        x=idx,
+        open=df_plot["Open"], high=high, low=low, close=close,
+        name="EUR/USD",
+        increasing_fillcolor=BULL_C, decreasing_fillcolor=BEAR_C,
+        increasing_line_color=BULL_C, decreasing_line_color=BEAR_C,
+        line_width=1,
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(x=idx, y=ema21,  name="EMA21",  line=dict(color=EMA21_C,  width=1.4)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=idx, y=ema50,  name="EMA50",  line=dict(color=EMA50_C,  width=1.4)), row=1, col=1)
+    fig.add_trace(go.Scatter(x=idx, y=ema200, name="EMA200", line=dict(color=EMA200_C, width=1.4, dash="dot")), row=1, col=1)
+
+    # Bollinger fill
+    fig.add_trace(go.Scatter(
+        x=list(idx) + list(idx[::-1]),
+        y=list(bb_up) + list(bb_dn[::-1]),
+        fill="toself", fillcolor="rgba(96,125,139,0.08)",
+        line=dict(color="rgba(0,0,0,0)"),
+        name="Bollinger", showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Scatter(x=idx, y=bb_up, line=dict(color=BB_C, width=1, dash="dot"), name="BB+2σ", showlegend=False), row=1, col=1)
+    fig.add_trace(go.Scatter(x=idx, y=bb_dn, line=dict(color=BB_C, width=1, dash="dot"), name="BB-2σ", showlegend=False), row=1, col=1)
+
+    # Entry / SL / TP
+    _direction = signal.get("direction", "")
+    _entry     = signal.get("price")
+    _sl        = signal.get("sl")
+    _tp        = signal.get("tp") or signal.get("tp1")
+
+    if _entry:
+        fig.add_hline(y=_entry,
+                      line=dict(color="#ffffff", width=1.5, dash="dash"),
+                      annotation_text=f"Entrada {_entry:.5f}",
+                      annotation_font_color="#ffffff",
+                      annotation_position="right", row=1, col=1)
+    if _sl:
+        fig.add_hline(y=_sl,
+                      line=dict(color=SL_C, width=1.5, dash="dot"),
+                      annotation_text=f"SL {_sl:.5f}",
+                      annotation_font_color=SL_C,
+                      annotation_position="right", row=1, col=1)
+        if _entry:
+            fig.add_hrect(y0=min(_sl, _entry), y1=max(_sl, _entry),
+                          fillcolor="rgba(244,67,54,0.07)", line_width=0, row=1, col=1)
+    if _tp:
+        fig.add_hline(y=_tp,
+                      line=dict(color=TP_C, width=1.5, dash="dot"),
+                      annotation_text=f"TP {_tp:.5f}",
+                      annotation_font_color=TP_C,
+                      annotation_position="right", row=1, col=1)
+        if _entry:
+            fig.add_hrect(y0=min(_tp, _entry), y1=max(_tp, _entry),
+                          fillcolor="rgba(76,175,80,0.07)", line_width=0, row=1, col=1)
+
+    # Signal arrow at latest candle
+    if _direction in ("LONG", "SHORT") and _entry and len(df_plot) > 0:
+        _arrow_y  = float(low.iloc[-1]) * 0.9998 if _direction == "LONG" else float(high.iloc[-1]) * 1.0002
+        _arr_sym  = "triangle-up" if _direction == "LONG" else "triangle-down"
+        _arr_col  = BUY_C if _direction == "LONG" else SELL_C
+        _arr_txt  = f"{'▲ LONG' if _direction == 'LONG' else '▼ SHORT'} ({score})"
+        _txt_pos  = "bottom center" if _direction == "LONG" else "top center"
+        fig.add_trace(go.Scatter(
+            x=[idx[-1]], y=[_arrow_y],
+            mode="markers+text",
+            marker=dict(symbol=_arr_sym, size=18, color=_arr_col),
+            text=[_arr_txt],
+            textposition=_txt_pos,
+            textfont=dict(color=_arr_col, size=11),
+            name=f"Señal {_direction}", showlegend=False,
+        ), row=1, col=1)
+
+    # Liquidity levels
+    if liq_levels:
+        for _lv in liq_levels[:10]:
+            _lv_p = _lv.get("nivel") or _lv.get("price")
+            if not _lv_p:
+                continue
+            _t = str(_lv.get("tipo", "")).lower()
+            _lv_col = "#ff9800" if ("resist" in _t or "high" in _t or "supply" in _t) else "#00bcd4"
+            fig.add_hline(y=_lv_p, line=dict(color=_lv_col, width=0.8, dash="dot"), row=1, col=1)
+
+    # POC
+    if poc:
+        _poc_p = poc.get("precio") or poc.get("price")
+        if _poc_p:
+            fig.add_hline(y=_poc_p,
+                          line=dict(color=POC_C, width=1.5, dash="longdash"),
+                          annotation_text=f"POC {_poc_p:.5f}",
+                          annotation_font_color=POC_C,
+                          annotation_position="left", row=1, col=1)
+
+    # Order blocks from market structure
+    _ms1h = (market_structures or {}).get("1h", {}) if isinstance(market_structures, dict) else {}
+    for _ob_key, _ob_col, _ob_lbl in (
+        ("last_bos_level",   "rgba(0,230,118,0.12)",  "Demand OB"),
+        ("demand_zone",      "rgba(0,230,118,0.12)",  "Demand OB"),
+        ("last_choch_level", "rgba(255,23,68,0.12)",  "Supply OB"),
+        ("supply_zone",      "rgba(255,23,68,0.12)",  "Supply OB"),
+    ):
+        _ob_val = _ms1h.get(_ob_key)
+        if _ob_val and isinstance(_ob_val, (int, float)):
+            _sprd = float(close.std() or 0.0003)
+            _brd  = "rgba(0,230,118,0.4)" if "Demand" in _ob_lbl else "rgba(255,23,68,0.4)"
+            _fc   = BUY_C if "Demand" in _ob_lbl else SELL_C
+            fig.add_hrect(y0=_ob_val - _sprd, y1=_ob_val + _sprd,
+                          fillcolor=_ob_col,
+                          line=dict(color=_brd, width=1),
+                          annotation_text=_ob_lbl,
+                          annotation_font_color=_fc,
+                          row=1, col=1)
+            break  # one demand, one supply enough
+
+    # Stop hunt markers
+    if stop_hunts and isinstance(stop_hunts, list):
+        _sh_x, _sh_y = [], []
+        for _sh in stop_hunts[:12]:
+            if isinstance(_sh, dict):
+                _sh_t = _sh.get("time") or _sh.get("candle_time")
+                _sh_p = _sh.get("price") or _sh.get("nivel")
+                if _sh_t and _sh_p:
+                    _sh_x.append(_sh_t); _sh_y.append(_sh_p)
+        if _sh_x:
+            fig.add_trace(go.Scatter(
+                x=_sh_x, y=_sh_y, mode="markers",
+                marker=dict(symbol="x", size=12, color="#ff6d00",
+                            line=dict(width=2, color="#ff6d00")),
+                name="Stop Hunt",
+            ), row=1, col=1)
+
+    # News annotations (vertical line + flag)
+    if news_items:
+        _hi_news = sorted(
+            [n for n in news_items if n.get("impact_score", 0) >= 5],
+            key=lambda x: x.get("impact_score", 0), reverse=True
+        )[:6]
+        _y_top = float(high.max())
+        for _n in _hi_news:
+            _pub = _n.get("publishedAt") or _n.get("published", "")
+            try:
+                from datetime import datetime as _dtt
+                _pt = _dtt.fromisoformat(str(_pub).replace("Z", "+00:00")).replace(tzinfo=None)
+                if hasattr(idx[0], "to_pydatetime"):
+                    _closest = min(idx, key=lambda t: abs(t.to_pydatetime().replace(tzinfo=None) - _pt))
+                else:
+                    _closest = min(idx, key=lambda t: abs(t - _pt))
+                _imp = _n.get("impact_score", 5)
+                _nc  = "#ff1744" if _imp >= 8 else "#ff9800" if _imp >= 6 else "#ffd600"
+                fig.add_vline(x=_closest, line=dict(color=_nc, width=1, dash="dot"), row=1, col=1)
+                fig.add_annotation(
+                    x=_closest, y=_y_top,
+                    text="📰", showarrow=False,
+                    font=dict(size=13, color=_nc),
+                    xanchor="center", yanchor="bottom",
+                    hovertext=_n.get("title", "")[:60],
+                )
+            except Exception:
+                continue
+
+    # Historical trades overlay
+    if trades_history:
+        _bx, _by, _bt = [], [], []
+        _sx, _sy, _st = [], [], []
+        for _tr in trades_history[-25:]:
+            _ep  = _tr.get("entry_price")
+            _oa  = _tr.get("opened_at")
+            _dir = _tr.get("direction", "")
+            _pip = _tr.get("pips", 0) or 0
+            _out = _tr.get("outcome", "?")
+            if not _ep or not _oa:
+                continue
+            try:
+                if isinstance(_oa, str):
+                    from datetime import datetime as _dtt
+                    _oa = _dtt.fromisoformat(_oa.replace("Z", "+00:00"))
+                _lbl = f"{_dir} {_out} {_pip:+.1f}p"
+                if _dir == "LONG":
+                    _bx.append(_oa); _by.append(_ep); _bt.append(_lbl)
+                else:
+                    _sx.append(_oa); _sy.append(_ep); _st.append(_lbl)
+            except Exception:
+                continue
+        if _bx:
+            fig.add_trace(go.Scatter(
+                x=_bx, y=_by, mode="markers",
+                marker=dict(symbol="triangle-up", size=9, color=BUY_C, opacity=0.75),
+                text=_bt, hovertemplate="%{text}<extra></extra>",
+                name="LONG hist.",
+            ), row=1, col=1)
+        if _sx:
+            fig.add_trace(go.Scatter(
+                x=_sx, y=_sy, mode="markers",
+                marker=dict(symbol="triangle-down", size=9, color=SELL_C, opacity=0.75),
+                text=_st, hovertemplate="%{text}<extra></extra>",
+                name="SHORT hist.",
+            ), row=1, col=1)
+
+    # Score/direction badge
+    _fin_sig  = signal.get("final_signal", signal.get("direction", "NEUTRAL"))
+    _badge_c  = BUY_C if _fin_sig in ("COMPRA", "LONG") else SELL_C if _fin_sig in ("VENTA", "SHORT") else "#888"
+    fig.add_annotation(
+        x=0.01, y=0.97, xref="paper", yref="paper",
+        text=f"<b>Score: {score}/100  |  {session}  |  {_fin_sig}</b>",
+        showarrow=False,
+        font=dict(size=12, color=_badge_c),
+        bgcolor=BG, bordercolor=_badge_c, borderwidth=1,
+        xanchor="left", yanchor="top",
+    )
+
+    # ── Row 2: Volume bars ────────────────────────────────────────────────────
+    _vcol = [BULL_C if float(close.iloc[i]) >= float(df_plot["Open"].iloc[i]) else BEAR_C
+             for i in range(len(df_plot))]
+    fig.add_trace(go.Bar(x=idx, y=vol, name="Volumen",
+                         marker_color=_vcol, showlegend=False), row=2, col=1)
+
+    if vol_spikes and isinstance(vol_spikes, list):
+        _spx, _spy = [], []
+        for _sp in vol_spikes:
+            if isinstance(_sp, dict):
+                _sp_t = _sp.get("time") or _sp.get("candle_time")
+                if _sp_t:
+                    try:
+                        _iloc = df_plot.index.get_indexer([_sp_t], method="nearest")
+                        _spx.append(_sp_t)
+                        _spy.append(float(vol.iloc[_iloc[0]]) if len(_iloc) > 0 else float(vol.max()))
+                    except Exception:
+                        pass
+        if _spx:
+            fig.add_trace(go.Scatter(
+                x=_spx, y=_spy, mode="markers",
+                marker=dict(symbol="star", size=12, color="#ffd600"),
+                name="Vol Spike",
+            ), row=2, col=1)
+
+    # ── Row 3: RSI ────────────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(x=idx, y=rsi, name="RSI",
+                             line=dict(color="#9c27b0", width=1.5), showlegend=False), row=3, col=1)
+    fig.add_hrect(y0=70, y1=100, fillcolor="rgba(244,67,54,0.06)",  line_width=0, row=3, col=1)
+    fig.add_hrect(y0=0,  y1=30,  fillcolor="rgba(76,175,80,0.06)",  line_width=0, row=3, col=1)
+    fig.add_hline(y=70, line=dict(color="#f44336", width=1, dash="dot"), row=3, col=1)
+    fig.add_hline(y=30, line=dict(color="#4caf50", width=1, dash="dot"), row=3, col=1)
+    fig.add_hline(y=50, line=dict(color=GRID,      width=1),            row=3, col=1)
+
+    # ── Row 4: MACD ───────────────────────────────────────────────────────────
+    _hcol = [BULL_C if v >= 0 else BEAR_C for v in macd_hist]
+    fig.add_trace(go.Bar(x=idx, y=macd_hist, name="MACD Hist",
+                         marker_color=_hcol, showlegend=False), row=4, col=1)
+    fig.add_trace(go.Scatter(x=idx, y=macd_line, name="MACD",
+                             line=dict(color=EMA50_C, width=1.5)), row=4, col=1)
+    fig.add_trace(go.Scatter(x=idx, y=macd_sig, name="Signal",
+                             line=dict(color=EMA21_C, width=1.5, dash="dot")), row=4, col=1)
+    fig.add_hline(y=0, line=dict(color=GRID, width=1), row=4, col=1)
+
+    # ── Layout ────────────────────────────────────────────────────────────────
+    _axis_style = dict(gridcolor=GRID, zerolinecolor=GRID,
+                       tickfont=dict(color=TEXT, size=9), showgrid=True)
+    fig.update_layout(
+        paper_bgcolor=BG, plot_bgcolor=BG,
+        font=dict(color=TEXT, family="monospace"),
+        xaxis_rangeslider_visible=False,
+        legend=dict(bgcolor="rgba(13,17,23,0.85)", bordercolor=GRID, borderwidth=1,
+                    font=dict(size=10), x=0.01, y=0.94),
+        margin=dict(l=60, r=130, t=30, b=20),
+        height=820,
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor=BG, font_color=TEXT),
+    )
+    fig.update_xaxes(**_axis_style)
+    fig.update_yaxes(**_axis_style)
+    fig.update_yaxes(tickformat=".5f", row=1, col=1)
+    fig.update_yaxes(tickformat=".0f", row=2, col=1)
+    fig.update_yaxes(range=[0, 100],   row=3, col=1)
+    for _ann in (fig.layout.annotations or []):
+        if _ann.text in ("EUR/USD 1H", "Volumen", "RSI (14)", "MACD (12,26,9)"):
+            _ann.font.color = TEXT
+            _ann.font.size  = 10
+
+    st.plotly_chart(fig, use_container_width=True,
+                    config={"scrollZoom": True, "displayModeBar": True,
+                            "modeBarButtonsToRemove": ["lasso2d", "select2d"]})
+
+
+# ============================================
 # INTERFAZ STREAMLIT
 # ============================================
 _APP_RERUN_START = time.time()
@@ -5212,6 +5580,32 @@ if st.session_state.analysis_executed:
                         st.session_state.active_dna = _new_dna2
         except Exception:
             pass
+
+    # ── GRÁFICO TRADINGVIEW ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📈 Gráfico TradingView — EUR/USD 1H")
+    if df_1h is not None and not df_1h.empty:
+        _chart_trades = []
+        if _DB_OK:
+            try:
+                _chart_trades = _db.load_trades(user_id=current_user, limit=30)
+            except Exception:
+                _chart_trades = []
+        _render_trading_chart(
+            df=df_1h,
+            signal=signal or {},
+            score=score,
+            session=session,
+            liq_levels=liq_levels or [],
+            poc=poc,
+            vol_spikes=vol_spikes or [],
+            market_structures=market_structures or {},
+            stop_hunts=stop_hunts or [],
+            news_items=(signal or {}).get("news", []),
+            trades_history=_chart_trades,
+        )
+    else:
+        st.info("Ejecuta el análisis para ver el gráfico.")
 
     # ── VOLUMEN — Panel principal ─────────────────────────────────────────────
     st.markdown("---")
