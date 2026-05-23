@@ -276,29 +276,26 @@ Responde SOLO con JSON (sin markdown):
 # ─────────────────────────────────────────────────────────────────────────────
 
 _FREE_APIS = [
-    {"name": "Groq",      "env": "GROQ_API_KEY",      "url": "https://console.groq.com",               "type": "ai"},
-    {"name": "Cerebras",  "env": "CEREBRAS_API_KEY",  "url": "https://www.cerebras.ai",                "type": "ai"},
-    {"name": "Zhipu GLM", "env": "ZHIPU_API_KEY",     "url": "https://open.bigmodel.cn",               "type": "ai"},
-    {"name": "FRED",      "env": "FRED_API_KEY",       "url": "https://fredaccount.stlouisfed.org/apikeys", "type": "data"},
+    {"name": "Groq",      "env": "GROQ_API_KEY",      "fallback": "",                                                          "url": "https://console.groq.com",                   "type": "ai"},
+    {"name": "Cerebras",  "env": "CEREBRAS_API_KEY",  "fallback": "csk-tvmnhtvpwkytpxp2njpt6v23kd8t43mwn532cdfm6pt36k3j",     "url": "https://www.cerebras.ai",                    "type": "ai"},
+    {"name": "Zhipu GLM", "env": "ZHIPU_API_KEY",     "fallback": "bcf45451bda84c4990cdab697602880d.XGkFUFoqEMZbJOBu",        "url": "https://open.bigmodel.cn",                   "type": "ai"},
+    {"name": "FRED",      "env": "FRED_API_KEY",      "fallback": "8f68a4232ff18468959baa71aaa124de",                          "url": "https://fredaccount.stlouisfed.org/apikeys", "type": "data"},
 ]
 
 
+def _api_key(api: dict) -> str:
+    """Return effective key: env var if set, else hardcoded fallback."""
+    return os.environ.get(api["env"], api.get("fallback", "")).strip()
+
+
 def get_missing_apis() -> list[dict]:
-    """Return list of free APIs that have no key configured yet."""
-    missing = []
-    for api in _FREE_APIS:
-        if not os.environ.get(api["env"], "").strip():
-            missing.append(api)
-    return missing
+    """Return list of free APIs that have no key configured (env var or fallback)."""
+    return [api for api in _FREE_APIS if not _api_key(api)]
 
 
 def get_configured_apis() -> list[dict]:
-    """Return list of APIs that have keys configured."""
-    active = []
-    for api in _FREE_APIS:
-        if os.environ.get(api["env"], "").strip():
-            active.append(api)
-    return active
+    """Return list of APIs that have a working key (env var or fallback)."""
+    return [api for api in _FREE_APIS if _api_key(api)]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -6994,7 +6994,7 @@ with _sim_col1:
         _bias_col = "🟢" if _bias == "BEARISH_USD" else "🔴" if _bias == "BULLISH_USD" else "⚪"
         st.caption(f"{_bias_col} Sesgo USD: **{_bias}** | Yield curve: **{_yc}**")
     elif _DATA_FEEDS_OK:
-        st.info("🏦 FRED: añade `FRED_API_KEY` en Railway (gratis en fredaccount.stlouisfed.org/apikeys)")
+        st.caption("🏦 FRED cargando — ejecuta un análisis para ver datos macro.")
 
 with _sim_col2:
     # ── Último ciclo de auto-sanación ─────────────────────────────────────────
