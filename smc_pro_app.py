@@ -4600,6 +4600,15 @@ def _render_trading_chart(
 
 
 # ============================================
+# WORKER AUTÓNOMO (arranca 1 sola vez con el proceso, sin usuarios)
+# ============================================
+try:
+    import background_worker as _bgw
+    _bgw.start_if_needed()
+except Exception as _bgw_err:
+    logging.warning("Background worker no disponible: %s", _bgw_err)
+
+# ============================================
 # INTERFAZ STREAMLIT
 # ============================================
 _APP_RERUN_START = time.time()
@@ -5103,12 +5112,18 @@ else:
     if _AI_ENGINE_OK:
         _ap = _ai_engine.get_active_providers()
         if _ap:
+            _icons = {
+                "groq":      "⚡ Groq — llama-3.3-70b",
+                "cerebras":  "🧠 Cerebras — llama-3.3-70b",
+                "zhipu":     "🌏 Zhipu GLM — glm-4-flash",
+                "anthropic": "🟣 Claude Haiku",
+                "openai":    "🟢 OpenAI GPT-4o-mini",
+            }
             for _p in _ap:
-                _icons = {"groq": "⚡ Groq (free)", "anthropic": "🟣 Claude Haiku", "openai": "🟢 OpenAI"}
                 st.caption(f"✅ {_icons.get(_p, _p)}")
         else:
-            st.warning("Sin API keys — añade GROQ_API_KEY en Variables")
-        st.caption("Añadir más: ANTHROPIC_API_KEY, OPENAI_API_KEY en Railway → Variables")
+            st.warning("Sin API keys activas")
+        st.caption("Bot autónomo activo — analiza aunque no haya usuarios")
     st.markdown("---")
     st.subheader(f"🧠 Memoria IA — {current_user_name}")
     if _DB_OK:
@@ -5148,10 +5163,33 @@ if refresh_secs > 0:
             should_auto_refresh = True
 
 run_fresh_analysis = run_analysis or should_auto_refresh
-# True cuando es el timer automático (no botón manual) → análisis sin spinner visible
+# True cuando es timer automático → cero spinners, cero texto visible al usuario
 _is_auto_refresh = should_auto_refresh and not run_analysis
+
+# Si es la primera carga y el background worker ya tiene datos en caché, usarlos
+# directamente sin lanzar análisis completo (carga instantánea para el usuario)
+if not run_fresh_analysis and not st.session_state.analysis_executed:
+    if _DB_OK:
+        try:
+            _bg_snap = _db.get_last_snapshot()
+            if _bg_snap and _bg_snap.get("price"):
+                # Hay datos del worker autónomo: marcar como ejecutado con caché
+                _bg_sig = {
+                    "final_signal": _bg_snap.get("signal", "NEUTRAL"),
+                    "score":        _bg_snap.get("score", 0),
+                    "price":        _bg_snap.get("price", 0),
+                    "regime":       _bg_snap.get("regime", ""),
+                    "strategy":     _bg_snap.get("strategy", ""),
+                    "buy_signals":  0, "sell_signals": 0,
+                    "session": "", "dxy_dir": "", "dxy_trend": "N/A",
+                }
+                if not st.session_state.get("_analysis_cache"):
+                    st.session_state._analysis_cache = {"signal": _bg_sig}
+                st.session_state.analysis_executed = True
+        except Exception:
+            pass
+
 if run_fresh_analysis:
-    # Fijar timestamp ANTES del análisis para que el timer empiece desde aquí
     st.session_state.last_analysis_time = time.time()
     st.session_state.analysis_executed = True
 
@@ -7101,16 +7139,9 @@ if st.session_state.advisor_chat:
 st.markdown("---")
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
-# ── Auto-rerun: timer limpio sin time.sleep() ─────────────────────────────
-# SOLUCIÓN DEFINITIVA:
-#   time.sleep() bloquea el WebSocket de Streamlit → congelación / desconexión.
-#   @st.fragment(run_every="1s") usa un timer JavaScript puro:
-#     • re-renderiza SOLO este widget cada segundo
-#     • NO bloquea el hilo de Python
-#     • NO provoca parpadeo en el resto de la página
-#     • el contador baja exactamente 1s en cada tick
-#   Cuando llega a 0 dispara st.rerun() completo → el guard de análisis
-#   (elapsed >= refresh_secs * 0.95) lanza generate_signal() solo en ese momento.
+# ── Auto-rerun invisible (sin contador visible) ────────────────────────────
+# El fragment corre cada 1s en JS puro sin bloquear el hilo Python.
+# No renderiza nada visible — el usuario nunca sabe cuándo llega el refresh.
 if refresh_secs > 0:
     st.session_state["_refresh_secs_live"] = refresh_secs
 
@@ -7119,15 +7150,11 @@ if refresh_secs > 0:
         _rs   = st.session_state.get("_refresh_secs_live", 0)
         _last = st.session_state.get("last_analysis_time")
         _now  = time.time()
-        # Si no hay timestamp aún (primera carga sin análisis previo) forzar rerun
         if not _last or _rs <= 0:
             st.rerun()
             return
-        _rem = max(0.0, _rs - (_now - _last))
-        _m, _s = divmod(int(_rem), 60)
-        st.markdown(f"🔄 Próxima actualización en **{_m:02d}:{_s:02d}**")
-        if _rem <= 0:
-            st.rerun()   # full rerun → activa should_auto_refresh → análisis
+        if (_now - _last) >= _rs * 0.95:
+            st.rerun()
 
     _auto_refresh_fragment()
 else:

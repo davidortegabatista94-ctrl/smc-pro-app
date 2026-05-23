@@ -920,3 +920,32 @@ def get_self_improvements(limit: int = 20) -> list[dict]:
     except Exception as e:
         _log.warning("get_self_improvements error: %s", e)
         return []
+
+
+def get_last_snapshot() -> dict | None:
+    """Return the most recent market snapshot (from any source including bg worker)."""
+    if not _DB_URL:
+        return None
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT price, signal, score, dxy_trend, regime, strategy,
+                      snapshot_data, created_at
+               FROM market_snapshots
+               ORDER BY created_at DESC LIMIT 1"""
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        result = dict(row)
+        if isinstance(result.get("snapshot_data"), str):
+            try:
+                result["snapshot_data"] = json.loads(result["snapshot_data"])
+            except Exception:
+                pass
+        return result
+    except Exception as e:
+        _log.warning("get_last_snapshot error: %s", e)
+        return None
