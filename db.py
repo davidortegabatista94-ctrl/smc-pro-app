@@ -502,6 +502,116 @@ def save_snapshot(price: float, signal: str, score: int, dxy_trend: str,
         )
 
 
+# ── App settings key-value ─────────────────────────────────────────────────────
+
+def get_setting(key: str) -> str | None:
+    """Read a global app setting by key."""
+    if not _DB_URL:
+        return None
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM app_settings WHERE key = %s", (key,))
+        row = cur.fetchone()
+        conn.close()
+        return row["value"] if row else None
+    except Exception as e:
+        _log.warning("get_setting error: %s", e)
+        return None
+
+
+def set_setting(key: str, value: str):
+    """Write or update a global app setting."""
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+            """,
+            (key, value),
+        )
+
+
+# ── Per-user MT5 credentials ───────────────────────────────────────────────────
+
+def save_user_mt5(user_id: str, mt5_login: str, mt5_password: str, mt5_server: str):
+    """Persist MT5 credentials for a user."""
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute(
+            """
+            UPDATE users SET mt5_login = %s, mt5_password = %s, mt5_server = %s
+            WHERE id = %s
+            """,
+            (mt5_login or "", mt5_password or "", mt5_server or "", user_id),
+        )
+
+
+def load_user_mt5(user_id: str) -> dict | None:
+    """Load saved MT5 credentials for a user. Returns dict or None."""
+    if not _DB_URL:
+        return None
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT mt5_login, mt5_password, mt5_server FROM users WHERE id = %s",
+            (user_id,),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        if not row["mt5_login"]:
+            return None
+        return {"mt5_login": row["mt5_login"], "mt5_password": row["mt5_password"],
+                "mt5_server": row["mt5_server"]}
+    except Exception as e:
+        _log.warning("load_user_mt5 error: %s", e)
+        return None
+
+
+# ── Recent market snapshots (for hourly analysis) ─────────────────────────────
+
+def get_recent_snapshots(hours: int = 4, limit: int = 30) -> list[dict]:
+    """Return market snapshots from the last N hours, newest first."""
+    if not _DB_URL:
+        return []
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT price, signal, score, dxy_trend, regime, strategy,
+                   snapshot_data, created_at
+            FROM market_snapshots
+            WHERE created_at > NOW() - INTERVAL '%s hours'
+            ORDER BY created_at DESC LIMIT %s
+            """,
+            (hours, limit),
+        )
+        rows = cur.fetchall()
+        conn.close()
+        result = []
+        for r in rows:
+            d = dict(r)
+            if isinstance(d.get("snapshot_data"), str):
+                try:
+                    import json as _j
+                    d["snapshot_data"] = _j.loads(d["snapshot_data"])
+                except Exception:
+                    d["snapshot_data"] = {}
+            result.append(d)
+        return result
+    except Exception as e:
+        _log.warning("get_recent_snapshots error: %s", e)
+        return []
+
+
 def is_connected() -> bool:
     """Quick health check — True if DB is reachable."""
     if not _DB_URL:

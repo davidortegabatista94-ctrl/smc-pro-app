@@ -1604,6 +1604,166 @@ def send_telegram_alert(signal, score, tick=None, definitive=False, reason=None)
         logging.warning(f"Telegram: {e}")
         return False
 
+def send_telegram_raw(msg: str) -> bool:
+    """Send a plain Markdown message to the configured Telegram chat."""
+    try:
+        req = get_requests()
+        if not req:
+            return False
+        token   = TELEGRAM_TOKEN
+        chat_id = TELEGRAM_CHAT_ID
+        _st = globals().get("st")
+        if _st and hasattr(_st, "session_state"):
+            token   = _st.session_state.get("tg_token", token)
+            chat_id = _st.session_state.get("tg_chat", chat_id)
+        if not token or token == "TU_TELEGRAM_BOT_TOKEN" or not chat_id:
+            return False
+        req.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
+            timeout=10,
+        )
+        return True
+    except Exception as _e:
+        logging.warning("send_telegram_raw error: %s", _e)
+        return False
+
+
+def _build_hourly_telegram_message(
+    signal: dict, score: int, session: str,
+    dxy_dir: str, dxy_chg: float, dxy_trend: str,
+    vol_spikes: list, delta: dict | None,
+    consensus: dict, price: float | None,
+    label: str, context_reasons: list | None,
+    in_window: bool, win_label: str,
+) -> str:
+    """Build the hourly Telegram summary message."""
+    from datetime import timezone as _tz
+    _now_utc = datetime.now(_tz.utc)
+    _now_str = _now_utc.strftime("%H:%M UTC")
+    _price_str = f"`{price:.5f}`" if price else "N/A"
+
+    if in_window:
+        # ── In trading window: current market + possible entries ─────────────
+        _dir = signal.get("final_signal", "SIN SEÑAL")
+        _entry = signal.get("entry") or price
+        _sl    = signal.get("stop_loss")
+        _tp    = signal.get("take_profit")
+        _buy   = signal.get("buy_signals", 0)
+        _sell  = signal.get("sell_signals", 0)
+        _regime = signal.get("regime") or signal.get("kb_regime_label", "N/A")
+        _strat  = signal.get("strategy") or signal.get("kb_best_strategy", "")
+        _delta_txt = ""
+        if delta:
+            _d_pct = delta.get("delta_pct", 0)
+            _delta_txt = f"\n• Delta volumen: {'compradores' if _d_pct > 0 else 'vendedores'} dominan ({_d_pct:+.1f}%)"
+        _spike_txt = f"\n• ⚡ Spike de volumen detectado ({vol_spikes[0]['ratio']:.1f}x)" if vol_spikes else ""
+        _reasons_txt = ""
+        if context_reasons:
+            _top3 = context_reasons[:3]
+            _reasons_txt = "\n".join(f"  ✦ {r}" for r in _top3)
+        _entry_block = ""
+        if _entry and _sl and _tp and score >= 60:
+            _tp_pips  = abs(_tp - _entry) / PIP
+            _sl_pips  = abs(_entry - _sl) / PIP
+            _rr       = _tp_pips / _sl_pips if _sl_pips else 0
+            _entry_block = (
+                f"\n━━━━━━━━━━━━━━━━━\n"
+                f"🔑 *Posible Entrada:*\n"
+                f"  Precio: `{_entry:.5f}`\n"
+                f"  SL: `{_sl:.5f}` (-{_sl_pips:.1f}p)\n"
+                f"  TP: `{_tp:.5f}` (+{_tp_pips:.1f}p)\n"
+                f"  R:R 1:{_rr:.1f}"
+            )
+        elif score < 60:
+            _entry_block = "\n⏸️ *Score bajo — sin entrada recomendada ahora*"
+
+        msg = (
+            f"⚡ *SMC Pro — Resumen Horario*\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🕐 {_now_str} | {win_label}\n"
+            f"💱 EUR/USD: {_price_str}\n"
+            f"📊 Score: *{score}/100* — {label}\n"
+            f"🎯 Señal: *{_dir}*  (▲{_buy} ▼{_sell})\n"
+            f"📈 Régimen: {_regime}{(' | ' + _strat) if _strat else ''}\n"
+            f"💵 DXY: {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%){_delta_txt}{_spike_txt}"
+        )
+        if _reasons_txt:
+            msg += f"\n\n*Confluencias clave:*\n{_reasons_txt}"
+        msg += _entry_block
+        msg += "\n━━━━━━━━━━━━━━━━━━\n⚠️ _Solo informativo. Usa siempre SL._"
+
+    else:
+        # ── Out of window: analyse previous window with 3 indicators ─────────
+        _recent_snaps = []
+        if _DB_OK:
+            try:
+                _recent_snaps = _db.get_recent_snapshots(hours=4, limit=25)
+            except Exception:
+                pass
+
+        if _recent_snaps:
+            _scores  = [s.get("score", 0) for s in _recent_snaps if s.get("score")]
+            _avg_sc  = round(sum(_scores) / len(_scores), 1) if _scores else 0
+            _max_sc  = max(_scores) if _scores else 0
+            _signals = [s.get("signal", "") for s in _recent_snaps]
+            _buys    = sum(1 for s in _signals if "COMPRA" in str(s) or "BUY" in str(s))
+            _sells   = sum(1 for s in _signals if "VENTA" in str(s) or "SELL" in str(s))
+            _bias    = "alcista 📈" if _buys > _sells else ("bajista 📉" if _sells > _buys else "neutral ⚪")
+
+            # Technical indicator summary
+            _regimes = [s.get("regime", "") for s in _recent_snaps if s.get("regime")]
+            _dominant_regime = max(set(_regimes), key=_regimes.count) if _regimes else "N/A"
+            _tech = f"Régimen dominante: {_dominant_regime} | Señales: {_buys}↑ {_sells}↓ | Score medio: {_avg_sc}/100"
+
+            # Fundamental indicator summary
+            _dxy_trends = [s.get("dxy_trend", "") for s in _recent_snaps if s.get("dxy_trend")]
+            _dxy_dom = max(set(_dxy_trends), key=_dxy_trends.count) if _dxy_trends else "N/A"
+            _news_sent = consensus.get("weighted_sentiment", 0) if isinstance(consensus, dict) else 0
+            _fund = f"DXY: {_dxy_dom} ({dxy_chg:+.2f}%) | Sentimiento noticias: {'+' if _news_sent > 0 else ''}{_news_sent:.3f}"
+
+            # Sentiment/volume summary
+            _snap_data = [s.get("snapshot_data", {}) for s in _recent_snaps if s.get("snapshot_data")]
+            _spikes = sum(1 for d in _snap_data if isinstance(d, dict) and d.get("vol_spike"))
+            _delta_vals = [d.get("delta_pct", 0) for d in _snap_data if isinstance(d, dict) and "delta_pct" in d]
+            _avg_delta = round(sum(_delta_vals) / len(_delta_vals), 1) if _delta_vals else 0
+            _sent = f"Spikes volumen: {_spikes} | Delta medio: {_avg_delta:+.1f}% | Sesgo: {_bias}"
+
+            _conclusion = (
+                "✅ Sesión con confluencias sólidas"
+                if _max_sc >= 75 and _buys > _sells
+                else ("✅ Presión vendedora sostenida"
+                      if _max_sc >= 75 and _sells > _buys
+                      else "⚠️ Sesión sin señales claras — espera próxima ventana")
+            )
+
+            msg = (
+                f"⏸️ *SMC Pro — Fuera de Horario*\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🕐 {_now_str} | {win_label}\n"
+                f"📊 Resumen últimas 4h ({len(_recent_snaps)} análisis):\n"
+                f"  Score: {_avg_sc}/100 medio | Máx: {_max_sc}/100\n"
+                f"\n📈 *TÉCNICO:*\n  {_tech}\n"
+                f"\n📰 *FUNDAMENTAL:*\n  {_fund}\n"
+                f"\n💹 *VOLUMEN/SENTIMIENTO:*\n  {_sent}\n"
+                f"\n━━━━━━━━━━━━━━━━━━\n"
+                f"💡 *Conclusión:* {_conclusion}\n"
+                f"🎯 Próxima ventana: {win_label}"
+            )
+        else:
+            # No data yet — basic message
+            msg = (
+                f"⏸️ *SMC Pro — Fuera de Horario*\n"
+                f"🕐 {_now_str} | {win_label}\n"
+                f"💱 EUR/USD: {_price_str}\n"
+                f"💵 DXY: {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)\n"
+                f"📊 Sin suficientes datos de la sesión anterior.\n"
+                f"🎯 Próxima ventana: {win_label}"
+            )
+
+    return msg
+
+
 # ============================================
 # BACKTESTING
 # ============================================
@@ -4145,6 +4305,19 @@ else:
     current_user      = st.session_state.current_user
     current_user_name = _USER_NAMES.get(current_user, current_user.capitalize())
 
+    # ── Cargar credenciales MT5 del usuario desde DB (solo una vez) ──────────
+    _mt5_load_key = f"mt5_loaded_{current_user}"
+    if _mt5_load_key not in st.session_state and _DB_OK:
+        try:
+            _user_mt5 = _db.load_user_mt5(current_user)
+            if _user_mt5:
+                st.session_state.mt5_login    = _user_mt5.get("mt5_login", "")
+                st.session_state.mt5_password = _user_mt5.get("mt5_password", "")
+                st.session_state.mt5_server   = _user_mt5.get("mt5_server", "")
+        except Exception:
+            pass
+        st.session_state[_mt5_load_key] = True
+
     # ── Importar motores AI ───────────────────────────────────────────────────
     try:
         import ai_engine as _ai_engine
@@ -4310,12 +4483,23 @@ else:
                             password=st.session_state.mt5_password,
                             server=st.session_state.mt5_server or None
                         ):
-                            st.success("✅ Conectado a MT5")
+                            st.success(f"✅ Conectado a MT5 — cuenta de {current_user_name}")
                             save_user_config({
                                 "MT5_LOGIN": st.session_state.mt5_login,
                                 "MT5_PASSWORD": st.session_state.mt5_password,
                                 "MT5_SERVER": st.session_state.mt5_server,
                             })
+                            # Guardar credenciales MT5 en DB por usuario
+                            if _DB_OK:
+                                try:
+                                    _db.save_user_mt5(
+                                        current_user,
+                                        st.session_state.mt5_login,
+                                        st.session_state.mt5_password,
+                                        st.session_state.mt5_server,
+                                    )
+                                except Exception:
+                                    pass
                         else:
                             st.error(f"❌ Error de conexión: {get_mt5_error()}")
                 else:
@@ -4324,10 +4508,11 @@ else:
             st.markdown("---")
             
             if connected:
-                st.success("✅ MT5 conectado")
+                st.success(f"✅ MT5 conectado — {current_user_name}")
                 acct = get_mt5_account()
                 if acct:
                     st.markdown(
+                        f"**Titular:** {current_user_name}  \n"
                         f"**Servidor:** {acct['server']}  \n"
                         f"**Cuenta:** {acct['name']}  \n"
                         f"**Balance:** {acct['balance']:.2f} {acct['currency']}  \n"
@@ -4336,6 +4521,9 @@ else:
                         f"**Apalancamiento:** 1:{acct['leverage']}"
                     )
             else:
+                _saved_mt5 = st.session_state.get("mt5_login", "")
+                if _saved_mt5:
+                    st.caption(f"📋 Credenciales guardadas para {current_user_name}: {_saved_mt5}")
                 st.info("ℹ️ Ingresa credenciales arriba o abre MT5")
         else:
             if sys.platform != "win32":
@@ -4678,6 +4866,65 @@ if st.session_state.analysis_executed:
     dxy_chg      = signal.get("dxy_chg") or 0
     avg_impact   = consensus.get("avg_impact_score", 0)
     total_sources= consensus.get("total_sources", 0)
+
+    # ── Snapshot periódico en DB + chequeo Telegram horario ──────────────────
+    if run_fresh_analysis and _DB_OK and signal:
+        _sig_f = signal.get("final_signal", "NEUTRAL")
+        _sig_s = signal.get("score", 0) or 0
+        try:
+            _db.save_snapshot(
+                price=signal.get("price") or 0,
+                signal=_sig_f,
+                score=int(_sig_s),
+                dxy_trend=dxy_trend or "",
+                regime=signal.get("regime") or signal.get("kb_regime_label", ""),
+                strategy=signal.get("strategy") or signal.get("kb_best_strategy", ""),
+                extra={
+                    "session": session,
+                    "dxy_dir": dxy_dir,
+                    "dxy_chg": dxy_chg,
+                    "vol_spike": bool(vol_spikes),
+                    "delta_pct": delta.get("delta_pct", 0) if delta else 0,
+                },
+                user_id=current_user,
+            )
+        except Exception:
+            pass
+
+        # ── Telegram horario ──────────────────────────────────────────────
+        try:
+            from datetime import timezone as _tz2
+            _last_tg = _db.get_setting("last_hourly_telegram")
+            _should_tg = False
+            if not _last_tg:
+                _should_tg = True
+            else:
+                _last_tg_dt = datetime.fromisoformat(_last_tg)
+                if not _last_tg_dt.tzinfo:
+                    _last_tg_dt = _last_tg_dt.replace(tzinfo=_tz2.utc)
+                _should_tg = (datetime.now(_tz2.utc) - _last_tg_dt).total_seconds() >= 3600
+            if _should_tg:
+                _in_win, _win_lbl, _ = get_trading_window_info()
+                _tg_msg = _build_hourly_telegram_message(
+                    signal=signal,
+                    score=int(_sig_s),
+                    session=session,
+                    dxy_dir=dxy_dir,
+                    dxy_chg=float(dxy_chg),
+                    dxy_trend=dxy_trend or "N/A",
+                    vol_spikes=vol_spikes,
+                    delta=delta,
+                    consensus=consensus,
+                    price=signal.get("price"),
+                    label="",
+                    context_reasons=st.session_state.get("market_context_reasons") or [],
+                    in_window=_in_win,
+                    win_label=_win_lbl,
+                )
+                if send_telegram_raw(_tg_msg):
+                    _db.set_setting("last_hourly_telegram", datetime.now(_tz2.utc).isoformat())
+        except Exception as _tg_err:
+            logging.warning("Hourly telegram error: %s", _tg_err)
 
     # ── Panel MT5 ─────────────────────────────────────────────────────────────
     if tick:
