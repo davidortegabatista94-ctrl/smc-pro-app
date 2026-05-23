@@ -4770,6 +4770,48 @@ else:
         f"TP variable · SL {SCALP_SL_PIPS}p máx · R:R 1:2-3"
     )
 
+    # ── Índice de navegación rápida ───────────────────────────────────────────
+    st.markdown("""
+<style>
+.nav-bar {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding: 10px 0 14px 0; border-bottom: 1px solid #1e2530;
+    margin-bottom: 4px;
+}
+.nav-bar a {
+    color: #c9d1d9; background: #161b22; border: 1px solid #30363d;
+    border-radius: 20px; padding: 4px 12px; font-size: 0.78rem;
+    text-decoration: none; white-space: nowrap;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.nav-bar a:hover { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+.nav-sep { color: #444; font-size: 0.7rem; padding: 4px 2px; align-self: center; }
+</style>
+<div class="nav-bar">
+  <a href="#sec-precio">📡 Precio</a>
+  <a href="#sec-senal">🧠 Señal</a>
+  <a href="#sec-score">🎯 Score</a>
+  <a href="#sec-chart">📈 Gráfico</a>
+  <a href="#sec-dna">🧬 DNA</a>
+  <a href="#sec-vol">📊 Volumen</a>
+  <a href="#sec-scalping">🎯 Scalping</a>
+  <a href="#sec-estructura">🏗️ Estructura</a>
+  <a href="#sec-manipulacion">🕵️ Liquidez</a>
+  <a href="#sec-cot">🏦 COT</a>
+  <a href="#sec-ia">🤖 Motor IA</a>
+  <span class="nav-sep">|</span>
+  <a href="#sec-backtest">📊 Backtest</a>
+  <a href="#sec-backtest2008">🌍 2008</a>
+  <span class="nav-sep">|</span>
+  <a href="#sec-porq">🔍 Por qué</a>
+  <a href="#sec-bot">🤖 Bot</a>
+  <a href="#sec-dashboard">📋 Dashboard</a>
+  <a href="#sec-dxy">💱 DXY</a>
+  <a href="#sec-accion">🎯 Acción</a>
+  <a href="#sec-advisor">💬 Advisor</a>
+</div>
+""", unsafe_allow_html=True)
+
     # ── Ventana horaria de trading ─────────────────────────────────────────
     _win_in, _win_label, _win_eta = get_trading_window_info()
     if _win_in:
@@ -4802,48 +4844,6 @@ else:
 
     # ── Sidebar ───────────────────────────────────────────────────────────────────
     with st.sidebar:
-        # ── Índice de navegación ──────────────────────────────────────────────
-        st.markdown("""
-<style>
-.nav-index a {
-    display:block; padding:4px 8px; margin:1px 0;
-    color:#c9d1d9; text-decoration:none; border-radius:5px;
-    font-size:0.82rem; line-height:1.4;
-    transition: background 0.15s;
-}
-.nav-index a:hover { background:#1e2530; color:#58a6ff; }
-.nav-group {
-    font-size:0.7rem; font-weight:700; letter-spacing:.07em;
-    color:#58a6ff; padding:6px 8px 2px 8px; text-transform:uppercase;
-}
-</style>
-<div class="nav-index">
-  <div class="nav-group">📊 Análisis</div>
-  <a href="#sec-precio">📡 Precio MT5</a>
-  <a href="#sec-senal">🧠 Señal Inteligente</a>
-  <a href="#sec-score">🎯 Score Confluencia</a>
-  <a href="#sec-chart">📈 Gráfico TradingView</a>
-  <a href="#sec-dna">🧬 Strategy DNA</a>
-  <a href="#sec-vol">📊 Volumen</a>
-  <a href="#sec-scalping">🎯 Niveles Scalping</a>
-  <a href="#sec-estructura">🏗️ Estructura Mercado</a>
-  <a href="#sec-manipulacion">🕵️ Manipulación & Liquidez</a>
-  <a href="#sec-cot">🏦 COT Institucional</a>
-  <a href="#sec-ia">🤖 Motor IA</a>
-  <div class="nav-group">📈 Backtesting</div>
-  <a href="#sec-backtest">📊 Backtest 4 Estrategias</a>
-  <a href="#sec-backtest2008">🌍 Backtest 2008‑Hoy</a>
-  <div class="nav-group">🛠️ Herramientas</div>
-  <a href="#sec-porq">🔍 Por qué se mueve</a>
-  <a href="#sec-bot">🤖 Bot Automático</a>
-  <a href="#sec-dashboard">📋 Dashboard Final</a>
-  <a href="#sec-dxy">💱 Niveles DXY</a>
-  <a href="#sec-accion">🎯 Acción Recomendada</a>
-  <a href="#sec-advisor">💬 Advisor AI</a>
-</div>
-""", unsafe_allow_html=True)
-        st.markdown("---")
-
         st.header("⚙️ Configuración")
         st.markdown(f"👤 **{current_user_name}** — sesión activa")
         if st.button("🚪 Cerrar sesión", key="_logout_btn"):
