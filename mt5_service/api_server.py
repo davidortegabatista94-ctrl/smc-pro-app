@@ -187,6 +187,7 @@ def debug():
         "display":          os.getenv("DISPLAY", "NO SET"),
         "wineprefix":       os.getenv("WINEPREFIX", "NO SET"),
         "env_mt5_login":    "SET" if os.getenv("MT5_LOGIN") else "NO SET",
+        "bridge_log":       run("cat /tmp/bridge.log 2>/dev/null || echo '(sin log)'"),
     })
 
 

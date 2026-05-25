@@ -17,12 +17,14 @@ import sys
 import time
 import threading
 
+mt5 = None
 try:
     import MetaTrader5 as mt5
     MT5_AVAILABLE = True
-except ImportError:
+    print("MetaTrader5 importado OK", flush=True)
+except Exception as e:
     MT5_AVAILABLE = False
-    print("ERROR: MetaTrader5 no disponible", flush=True)
+    print(f"WARNING: MetaTrader5 no disponible ({type(e).__name__}: {e})", flush=True)
 
 HOST = "127.0.0.1"
 PORT = 9999
