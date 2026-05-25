@@ -1,7 +1,6 @@
 # ─────────────────────────────────────────────────────────────────
 #  MT5 Service — Railway Docker
-#  Arquitectura:
-#    [Flask API - Linux Python] --TCP 9999--> [mt5_win_bridge.py - Wine Python] --> MT5 terminal
+#  [Flask API - Linux Python] --TCP 9999--> [Wine Python] --> MT5
 # ─────────────────────────────────────────────────────────────────
 FROM ubuntu:22.04
 
@@ -19,7 +18,6 @@ RUN dpkg --add-architecture i386 && \
         xvfb cabextract \
         python3 python3-pip \
         software-properties-common \
-        netcat-openbsd iproute2 procps \
     && rm -rf /var/lib/apt/lists/*
 
 # ── 2. Wine desde WineHQ ──────────────────────────────────────────
@@ -40,8 +38,8 @@ RUN pip3 install --no-cache-dir -r /app/requirements.txt
 # ── 4. Inicializar prefijo Wine ───────────────────────────────────
 RUN Xvfb :1 -screen 0 1024x768x16 & \
     sleep 3 && \
-    wineboot --init && \
-    sleep 5 && \
+    WINEDLLOVERRIDES="mscoree,mshtml=" wineboot --init && \
+    sleep 10 && \
     kill %1 || true
 
 # ── 5. Windows Python 3.11 via Wine ──────────────────────────────
@@ -51,15 +49,28 @@ RUN wget -q "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe" \
     sleep 3 && \
     wine /tmp/python-win.exe /quiet InstallAllUsers=0 PrependPath=0 \
         TargetDir="C:\\Python311" && \
-    sleep 15 && \
+    sleep 30 && \
     kill %1 || true && \
     rm /tmp/python-win.exe
+
+# Verificar que Wine Python quedó instalado (build falla si no)
+RUN Xvfb :1 -screen 0 1024x768x16 & \
+    sleep 3 && \
+    wine "C:\\Python311\\python.exe" --version && \
+    echo "✅ Wine Python OK" && \
+    kill %1 || true
 
 # ── 6. MetaTrader5 via Wine Python ───────────────────────────────
 RUN Xvfb :1 -screen 0 1024x768x16 & \
     sleep 3 && \
     wine "C:\\Python311\\python.exe" -m pip install --no-cache-dir MetaTrader5 && \
-    sleep 10 && \
+    sleep 15 && \
+    kill %1 || true
+
+# Verificar que MetaTrader5 se importa (build falla si no)
+RUN Xvfb :1 -screen 0 1024x768x16 & \
+    sleep 3 && \
+    wine "C:\\Python311\\python.exe" -c "import MetaTrader5; print('✅ MetaTrader5 OK')" && \
     kill %1 || true
 
 # ── 7. Descargar instalador MT5 (se instala en start.sh) ─────────
@@ -77,7 +88,7 @@ RUN chmod +x /app/start.sh
 WORKDIR /app
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=90s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=5 \
     CMD curl -f http://localhost:8080/health || exit 1
 
 CMD ["/app/start.sh"]
