@@ -50,9 +50,12 @@ fi
 
 # ── 4. Arrancar Wine Python bridge (TCP 9999) ─────────────────────
 echo "[4/5] Arrancando Wine Python bridge en puerto 9999..."
-wine "$WIN_PYTHON" /app/mt5_win_bridge.py &
+# Copiar script al filesystem de Wine (Wine Python no puede leer paths Linux directamente)
+WINE_C="$WINEPREFIX/drive_c"
+cp /app/mt5_win_bridge.py "$WINE_C/mt5_win_bridge.py"
+wine "$WIN_PYTHON" "C:\\mt5_win_bridge.py" &
 BRIDGE_PID=$!
-sleep 5
+sleep 8
 echo "✅ Bridge PID=$BRIDGE_PID"
 
 # ── 5. Arrancar Flask API ─────────────────────────────────────────
