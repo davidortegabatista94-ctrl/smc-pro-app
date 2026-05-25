@@ -15,7 +15,7 @@ RUN dpkg --add-architecture i386 && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         wget curl ca-certificates gnupg2 \
-        xvfb cabextract \
+        xvfb cabextract unzip \
         python3 python3-pip \
         software-properties-common \
     && rm -rf /var/lib/apt/lists/*
@@ -42,43 +42,53 @@ RUN Xvfb :1 -screen 0 1024x768x16 & \
     sleep 10 && \
     kill %1 || true
 
-# ── 5. Windows Python 3.11 via Wine ──────────────────────────────
-RUN wget -q "https://www.python.org/ftp/python/3.11.9/python-3.11.9-amd64.exe" \
-        -O /tmp/python-win.exe && \
+# ── 5. Windows Python 3.11 — embeddable (sin instalador, 100% fiable) ──
+# El zip se extrae directamente al filesystem de Wine, sin ejecutar ningún .exe
+RUN wget -q "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip" \
+        -O /tmp/python-embed.zip && \
+    mkdir -p /root/.wine/drive_c/Python311 && \
+    unzip -q /tmp/python-embed.zip -d /root/.wine/drive_c/Python311/ && \
+    rm /tmp/python-embed.zip && \
+    # Activar site-packages (necesario para que pip instale paquetes accesibles)
+    sed -i 's/#import site/import site/' /root/.wine/drive_c/Python311/python311._pth && \
+    echo "Embeddable Python extraído OK" && \
+    ls /root/.wine/drive_c/Python311/python.exe
+
+# ── 6. Instalar pip en Wine Python ────────────────────────────────
+# Z:\ en Wine = / en Linux, así accedemos a /tmp sin copiar nada
+RUN wget -q "https://bootstrap.pypa.io/get-pip.py" -O /tmp/get-pip.py && \
     Xvfb :1 -screen 0 1024x768x16 & \
     sleep 3 && \
-    wine /tmp/python-win.exe /quiet InstallAllUsers=0 PrependPath=0 \
-        TargetDir="C:\\Python311" && \
-    sleep 30 && \
+    wine "C:\\Python311\\python.exe" "Z:\\tmp\\get-pip.py" --no-warn-script-location && \
+    sleep 10 && \
     kill %1 || true && \
-    rm /tmp/python-win.exe
+    rm /tmp/get-pip.py
 
-# Verificar que Wine Python quedó instalado (build falla si no)
+# Verificar que Wine Python funciona (build falla aquí si algo está mal)
 RUN Xvfb :1 -screen 0 1024x768x16 & \
     sleep 3 && \
     wine "C:\\Python311\\python.exe" --version && \
-    echo "✅ Wine Python OK" && \
     kill %1 || true
 
-# ── 6. MetaTrader5 via Wine Python ───────────────────────────────
+# ── 7. MetaTrader5 via Wine Python ───────────────────────────────
 RUN Xvfb :1 -screen 0 1024x768x16 & \
     sleep 3 && \
     wine "C:\\Python311\\python.exe" -m pip install --no-cache-dir MetaTrader5 && \
     sleep 15 && \
     kill %1 || true
 
-# Verificar que MetaTrader5 se importa (build falla si no)
+# Verificar que MetaTrader5 se importa (build falla aquí si algo está mal)
 RUN Xvfb :1 -screen 0 1024x768x16 & \
     sleep 3 && \
-    wine "C:\\Python311\\python.exe" -c "import MetaTrader5; print('✅ MetaTrader5 OK')" && \
+    wine "C:\\Python311\\python.exe" -c "import MetaTrader5; print('MetaTrader5 OK')" && \
     kill %1 || true
 
-# ── 7. Descargar instalador MT5 (se instala en start.sh) ─────────
+# ── 8. Descargar instalador MT5 (se instala en start.sh) ─────────
 RUN wget -q \
     "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe" \
     -O /tmp/mt5setup.exe
 
-# ── 8. Archivos de la aplicación ─────────────────────────────────
+# ── 9. Archivos de la aplicación ─────────────────────────────────
 COPY api_server.py     /app/api_server.py
 COPY mt5_bridge.py     /app/mt5_bridge.py
 COPY mt5_win_bridge.py /app/mt5_win_bridge.py
