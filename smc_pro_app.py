@@ -488,6 +488,122 @@ def flatten_columns(df):
 _mt5_connected = False
 _mt5_error_message = None
 
+# ── Integración con MT5 Service (Docker en Railway) ───────────────
+# Si MT5_SERVICE_URL está definida, todas las órdenes se envían al
+# servicio Docker remoto en lugar de usar MT5 local (solo Windows).
+_MT5_SERVICE_URL = os.getenv("MT5_SERVICE_URL", "").rstrip("/")
+_MT5_API_TOKEN   = os.getenv("MT5_API_TOKEN", "")
+
+def _mt5_service_headers():
+    h = {"Content-Type": "application/json"}
+    if _MT5_API_TOKEN:
+        h["Authorization"] = f"Bearer {_MT5_API_TOKEN}"
+    return h
+
+def _mt5_service_available() -> bool:
+    """True si MT5_SERVICE_URL está configurada."""
+    return bool(_MT5_SERVICE_URL)
+
+def mt5_service_health() -> dict:
+    """Consulta el estado del servicio MT5 remoto."""
+    if not _mt5_service_available():
+        return {"status": "no configurado"}
+    reqs = get_requests()
+    if not reqs:
+        return {"status": "error", "error": "requests no disponible"}
+    try:
+        r = reqs.get(f"{_MT5_SERVICE_URL}/health", timeout=5)
+        return r.json()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+def mt5_service_account() -> dict | None:
+    """Obtiene info de cuenta desde el servicio MT5 remoto."""
+    if not _mt5_service_available():
+        return None
+    reqs = get_requests()
+    if not reqs:
+        return None
+    try:
+        r = reqs.get(
+            f"{_MT5_SERVICE_URL}/account",
+            headers=_mt5_service_headers(),
+            timeout=5,
+        )
+        return r.json() if r.ok else None
+    except Exception as e:
+        logging.warning(f"mt5_service_account error: {e}")
+        return None
+
+def mt5_service_positions() -> list:
+    """Obtiene posiciones abiertas desde el servicio MT5 remoto."""
+    if not _mt5_service_available():
+        return []
+    reqs = get_requests()
+    if not reqs:
+        return []
+    try:
+        r = reqs.get(
+            f"{_MT5_SERVICE_URL}/positions",
+            headers=_mt5_service_headers(),
+            timeout=5,
+        )
+        return r.json() if r.ok else []
+    except Exception as e:
+        logging.warning(f"mt5_service_positions error: {e}")
+        return []
+
+def mt5_service_place_order(symbol, direction, volume, price, sl, tp,
+                             comment="SMC Pro Bot") -> dict:
+    """
+    Envía una orden al servicio MT5 remoto vía REST.
+    Retorna dict con {"success": bool, ...}.
+    """
+    if not _mt5_service_available():
+        return {"success": False, "error": "MT5_SERVICE_URL no configurada"}
+    reqs = get_requests()
+    if not reqs:
+        return {"success": False, "error": "requests no disponible"}
+    try:
+        payload = {
+            "symbol":    symbol,
+            "direction": "BUY" if direction in ("LONG", "BUY") else "SELL",
+            "volume":    volume,
+            "price":     price,
+            "sl":        sl,
+            "tp":        tp,
+            "comment":   comment,
+        }
+        r = reqs.post(
+            f"{_MT5_SERVICE_URL}/trade",
+            json=payload,
+            headers=_mt5_service_headers(),
+            timeout=10,
+        )
+        return r.json()
+    except Exception as e:
+        logging.warning(f"mt5_service_place_order error: {e}")
+        return {"success": False, "error": str(e)}
+
+def mt5_service_close_position(ticket: int) -> dict:
+    """Cierra una posición en el servicio MT5 remoto."""
+    if not _mt5_service_available():
+        return {"success": False, "error": "MT5_SERVICE_URL no configurada"}
+    reqs = get_requests()
+    if not reqs:
+        return {"success": False, "error": "requests no disponible"}
+    try:
+        r = reqs.delete(
+            f"{_MT5_SERVICE_URL}/position/{ticket}",
+            headers=_mt5_service_headers(),
+            timeout=10,
+        )
+        return r.json()
+    except Exception as e:
+        logging.warning(f"mt5_service_close_position error: {e}")
+        return {"success": False, "error": str(e)}
+# ─────────────────────────────────────────────────────────────────
+
 def mt5_connect(login=None, password=None, server=None):
     global _mt5_connected, _mt5_error_message
     _mt5_error_message = None
@@ -676,7 +792,29 @@ def get_mt5_orders(symbol=SYMBOL):
     return orders if orders else []
 
 def place_mt5_order(symbol, direction, volume, price, sl, tp, comment="SMC Pro Bot"):
-    """Coloca una orden de mercado en MT5"""
+    """
+    Coloca una orden de mercado en MT5.
+    Si MT5_SERVICE_URL está definida (Railway), usa el servicio Docker remoto.
+    Si no, usa el MT5 local (requiere Windows).
+    """
+    # ── Ruta remota (Docker MT5 en Railway) ───────────────────────
+    if _mt5_service_available():
+        result = mt5_service_place_order(symbol, direction, volume, price, sl, tp, comment)
+        if not result.get("success"):
+            logging.warning(f"place_mt5_order (remoto) falló: {result.get('error')}")
+            return None
+        # Devuelve un objeto compatible con el resto del código
+        class RemoteResult:
+            def __init__(self, r):
+                self.retcode = 10009  # TRADE_RETCODE_DONE
+                self.order   = r.get("ticket", 0)
+                self.deal    = r.get("ticket", 0)
+                self.volume  = r.get("volume", volume)
+                self.price   = r.get("price", price)
+                self.comment = f"REMOTE: {r.get('symbol','')}"
+        return RemoteResult(result)
+
+    # ── Ruta local (Windows) ──────────────────────────────────────
     if not mt5_connect():
         return None
     # Verificar si el terminal permite trading
@@ -720,7 +858,21 @@ def place_mt5_order(symbol, direction, volume, price, sl, tp, comment="SMC Pro B
     return result
 
 def close_mt5_position(position_ticket, volume=None, comment="SMC Pro Bot Close"):
-    """Cierra una posición abierta en MT5"""
+    """Cierra una posición abierta en MT5 (local o remota según MT5_SERVICE_URL)."""
+    if _mt5_service_available():
+        result = mt5_service_close_position(position_ticket)
+        if not result.get("success"):
+            logging.warning(f"close_mt5_position (remoto) falló: {result.get('error')}")
+            return None
+        class RemoteCloseResult:
+            def __init__(self, r):
+                self.retcode = 10009
+                self.order   = r.get("ticket", position_ticket)
+                self.deal    = r.get("ticket", position_ticket)
+                self.price   = r.get("closed_price", 0)
+                self.comment = "REMOTE CLOSE"
+        return RemoteCloseResult(result)
+
     if not mt5_connect():
         return None
 
@@ -7252,147 +7404,4 @@ def _advisor_call(user_msg: str, history: list, context: str, api_key: str) -> s
     except ImportError:
         return "⚠️ Paquete `groq` instalándose — espera 1 minuto y recarga la app."
 
-    _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamiento, y los aprendizajes acumulados de todas vuestras conversaciones anteriores.
-
-Tu objetivo no es solo analizar — es convertirte en el mejor consejero posible para {current_user_name} adaptándote a su estilo, sus errores pasados y sus puntos fuertes.
-
-{context}
-
-INSTRUCCIONES:
-{current_user_name} compartirá su visión/tesis. Analízala contra los datos de la app y su historial personal. Responde SIEMPRE con esta estructura:
-
-📊 **TU VISIÓN ENTENDIDA**
-Resumir lo que propone {current_user_name} en 1-2 frases.
-
-✅ **POR QUÉ SÍ** (confluencias a favor)
-Argumentos que respaldan la visión: backtest histórico (18+ años), señal actual de la app, técnico (EMA/RSI/MACD), fundamental (BCE/Fed/macro), patrones del usuario si aplican. Cita profit factors y win rates.
-
-❌ **POR QUÉ NO** (riesgos y contradicciones)
-Argumentos en contra: estrategias que fallen en este contexto, drawdowns históricos, alertas de la app, errores pasados de {current_user_name} si los hay en su historial.
-
-🎯 **VEREDICTO**
-Conclusión directa con nivel de convicción (ALTA/MEDIA/BAJA) y ajustes concretos (entrada, SL, TP, timing). Si detectas un patrón recurrente en {current_user_name}, menciónalo.
-
-🧠 **APRENDIZAJE** (solo si hay algo nuevo)
-En 1 frase: qué nuevo insight has extraído de esta conversación sobre el mercado o sobre {current_user_name}.
-
-REGLAS:
-- Responde en español, tutea a {current_user_name}
-- Sé cuantitativo — cita datos concretos del backtest como evidencia
-- Usa el historial real del usuario cuando sea relevante
-- Máximo 450 palabras en total
-- Si los datos de la app aún no están cargados (N/A), indícalo y razona con lo que tengas"""
-
-    _messages = [{"role": "system", "content": _system}]
-    for _h in history[-8:]:
-        _messages.append({"role": _h["role"], "content": _h["content"]})
-    _messages.append({"role": "user", "content": user_msg})
-
-    try:
-        _client = _Groq(api_key=api_key)
-        _resp = _client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=_messages,
-            max_tokens=1200,
-            temperature=0.4,
-        )
-        return _resp.choices[0].message.content
-    except Exception as _e:
-        return f"⚠️ Error al llamar a Groq: {_e}"
-
-
-# Mostrar historial de conversación
-for _msg in st.session_state.advisor_chat:
-    _av = "👤" if _msg["role"] == "user" else "🧠"
-    with st.chat_message(_msg["role"], avatar=_av):
-        st.markdown(_msg["content"])
-
-# Input del chat
-_chat_prompt = st.chat_input(
-    "Ej: Creo que el EUR/USD va a subir porque el BCE está hawkish y el DXY está cayendo..."
-)
-if _chat_prompt:
-    if not _ant_key:
-        st.error("⚠️ Configura la GROQ_API_KEY primero (ver configuración arriba).")
-    else:
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(_chat_prompt)
-        st.session_state.advisor_chat.append({"role": "user", "content": _chat_prompt})
-        if _DB_OK:
-            try:
-                _db.save_chat_message(
-                    st.session_state.advisor_session_id, "user",
-                    _chat_prompt, user_id=current_user
-                )
-            except Exception:
-                pass
-
-        with st.chat_message("assistant", avatar="🧠"):
-            with st.spinner(f"Analizando tu visión, {current_user_name}..."):
-                _ctx_snap  = _advisor_context()
-                _ai_answer = _advisor_call(
-                    _chat_prompt,
-                    st.session_state.advisor_chat[:-1],
-                    _ctx_snap,
-                    _ant_key,
-                )
-            st.markdown(_ai_answer)
-        st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})
-        if _DB_OK:
-            try:
-                _db.save_chat_message(
-                    st.session_state.advisor_session_id, "assistant",
-                    _ai_answer, user_id=current_user
-                )
-            except Exception:
-                pass
-        # Auto-aprendizaje: extraer insight y guardar en ai_memory
-        if _DB_OK and _ant_key:
-            try:
-                _lesson = _extract_lesson(_chat_prompt, _ai_answer, _ant_key)
-                if _lesson:
-                    _db.save_ai_memory(
-                        current_user, "insight",
-                        f"Chat {datetime.now().strftime('%Y-%m-%d')}",
-                        _lesson, 0.7, "chat",
-                    )
-            except Exception:
-                pass
-
-if st.session_state.advisor_chat:
-    if st.button("🗑️ Limpiar conversación", key="_advisor_clear"):
-        if _DB_OK:
-            try:
-                _db.clear_chat_history(
-                    st.session_state.advisor_session_id, user_id=current_user
-                )
-            except Exception:
-                pass
-        st.session_state.advisor_chat = []
-        st.session_state[f"advisor_chat_{current_user}"] = []
-        st.rerun()
-
-st.markdown("---")
-st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
-
-# ── Auto-rerun invisible (sin contador visible) ────────────────────────────
-# El fragment corre cada 1s en JS puro sin bloquear el hilo Python.
-# No renderiza nada visible — el usuario nunca sabe cuándo llega el refresh.
-if refresh_secs > 0:
-    st.session_state["_refresh_secs_live"] = refresh_secs
-
-    @st.fragment(run_every="1s")
-    def _auto_refresh_fragment():
-        _rs   = st.session_state.get("_refresh_secs_live", 0)
-        _last = st.session_state.get("last_analysis_time")
-        _now  = time.time()
-        if not _last or _rs <= 0:
-            st.rerun()
-            return
-        if (_now - _last) >= _rs * 0.95:
-            st.rerun()
-
-    _auto_refresh_fragment()
-else:
-    # Auto-refresh desactivado: limpiar el valor para que el fragment pare si quedó activo
-    st.session_state["_refresh_secs_live"] = 0
+    _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamient
