@@ -19,6 +19,7 @@ RUN dpkg --add-architecture i386 && \
         xvfb cabextract \
         python3 python3-pip \
         software-properties-common \
+        netcat-openbsd iproute2 procps \
     && rm -rf /var/lib/apt/lists/*
 
 # ── 2. Wine desde WineHQ ──────────────────────────────────────────

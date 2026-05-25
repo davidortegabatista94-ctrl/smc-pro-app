@@ -178,7 +178,7 @@ def debug():
 
     return jsonify({
         "processes":        run("ps aux | grep -E 'wine|python|gunicorn|Xvfb' | grep -v grep"),
-        "port_9999":        run("ss -tlnp | grep 9999 || echo 'NADA escuchando en 9999'"),
+        "port_9999":        run("nc -z 127.0.0.1 9999 && echo 'ABIERTO' || echo 'CERRADO'"),
         "win_python_exists": os.path.exists(f"{wine_c}/Python311/python.exe"),
         "bridge_in_wine_c": os.path.exists(f"{wine_c}/mt5_win_bridge.py"),
         "bridge_in_app":    os.path.exists("/app/mt5_win_bridge.py"),

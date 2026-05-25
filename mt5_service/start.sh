@@ -74,7 +74,7 @@ else
 
     # Esperar hasta 30s a que el bridge abra el puerto 9999
     WAIT=0
-    until ss -tlnp 2>/dev/null | grep -q 9999 || [ $WAIT -ge 30 ]; do
+    until nc -z 127.0.0.1 9999 2>/dev/null || [ $WAIT -ge 30 ]; do
         sleep 2; WAIT=$((WAIT+2))
         echo "  Esperando bridge... ${WAIT}s"
         if ! kill -0 $BRIDGE_PID 2>/dev/null; then
@@ -84,7 +84,7 @@ else
         fi
     done
 
-    if ss -tlnp 2>/dev/null | grep -q 9999; then
+    if nc -z 127.0.0.1 9999 2>/dev/null; then
         echo "✅ Bridge escuchando en puerto 9999"
     else
         echo "⚠️  Bridge no responde en 9999 tras 30s. Log:"
