@@ -161,6 +161,35 @@ def close_position(ticket: int):
     return jsonify(result), status
 
 
+@app.route("/debug", methods=["GET"])
+def debug():
+    """Diagnóstico del sistema — muestra procesos, archivos y estado Wine."""
+    import subprocess
+    import os
+
+    def run(cmd):
+        try:
+            r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=5)
+            return (r.stdout + r.stderr).strip()
+        except Exception as e:
+            return str(e)
+
+    wine_c = os.path.join(os.getenv("WINEPREFIX", "/root/.wine"), "drive_c")
+
+    return jsonify({
+        "processes":        run("ps aux | grep -E 'wine|python|gunicorn|Xvfb' | grep -v grep"),
+        "port_9999":        run("ss -tlnp | grep 9999 || echo 'NADA escuchando en 9999'"),
+        "win_python_exists": os.path.exists(f"{wine_c}/Python311/python.exe"),
+        "bridge_in_wine_c": os.path.exists(f"{wine_c}/mt5_win_bridge.py"),
+        "bridge_in_app":    os.path.exists("/app/mt5_win_bridge.py"),
+        "wine_c_contents":  run(f"ls {wine_c}/"),
+        "python311_dir":    run(f"ls {wine_c}/Python311/ 2>/dev/null || echo 'NO EXISTE'"),
+        "display":          os.getenv("DISPLAY", "NO SET"),
+        "wineprefix":       os.getenv("WINEPREFIX", "NO SET"),
+        "env_mt5_login":    "SET" if os.getenv("MT5_LOGIN") else "NO SET",
+    })
+
+
 # ─── Arranque ────────────────────────────────────────────────────
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
