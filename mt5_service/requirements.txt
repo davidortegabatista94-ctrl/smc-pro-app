@@ -1,5 +1,5 @@
 flask>=3.0.0
 flask-cors>=4.0.0
 gunicorn>=21.0.0
-MetaTrader5>=5.0.45
 requests>=2.31.0
+# MetaTrader5 es Windows-only — se instala via Wine Python en el Dockerfile
