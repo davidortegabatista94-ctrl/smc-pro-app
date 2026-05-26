@@ -18,9 +18,10 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)
 
-API_TOKEN   = os.getenv("MT5_API_TOKEN", "")
-META_TOKEN  = os.getenv("METAAPI_TOKEN", "")
-META_ACCT   = os.getenv("METAAPI_ACCOUNT_ID", "")
+API_TOKEN    = os.getenv("MT5_API_TOKEN", "")
+OANDA_TOKEN  = os.getenv("OANDA_API_TOKEN", "")
+OANDA_ACCT   = os.getenv("OANDA_ACCOUNT_ID", "")
+OANDA_ENV    = os.getenv("OANDA_ENVIRONMENT", "practice")
 
 
 def _check_auth():
@@ -34,13 +35,14 @@ def _check_auth():
 
 @app.route("/health", methods=["GET"])
 def health():
-    configured = bool(META_TOKEN and META_ACCT)
+    configured = bool(OANDA_TOKEN and OANDA_ACCT)
     connected  = mt5.is_connected() if configured else False
     return jsonify({
         "status":     "ok",
         "mt5":        "connected" if connected else "disconnected",
-        "service":    "mt5-service-metaapi",
+        "service":    "mt5-service-oanda",
         "configured": configured,
+        "environment": OANDA_ENV,
     })
 
 
@@ -112,10 +114,10 @@ def close_position(ticket):
 def status():
     """Diagnóstico de configuración."""
     return jsonify({
-        "METAAPI_TOKEN":      "SET" if META_TOKEN else "FALTA — ve a app.metaapi.cloud",
-        "METAAPI_ACCOUNT_ID": "SET" if META_ACCT  else "FALTA — copia el ID de tu cuenta MT5 en MetaAPI",
-        "MT5_API_TOKEN":      "SET" if API_TOKEN  else "no configurado (opcional)",
-        "region":             os.getenv("METAAPI_REGION", "new-york"),
+        "OANDA_API_TOKEN":   "SET" if OANDA_TOKEN else "FALTA — ve a https://www.oanda.com/register/",
+        "OANDA_ACCOUNT_ID":  "SET" if OANDA_ACCT  else "FALTA — busca tu Account ID en OANDA",
+        "OANDA_ENVIRONMENT": OANDA_ENV,
+        "MT5_API_TOKEN":     "SET" if API_TOKEN   else "no configurado (opcional)",
     })
 
 
