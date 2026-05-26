@@ -2814,6 +2814,7 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
     min_bars = 200 if daily_mode else 110
     if df.empty or len(df) < min_bars:
         return None
+    RR = 3.0  # default risk/reward; overridden per-strategy below
     # Escala de umbrales ATR según timeframe
     if daily_mode:
         use_windows  = False   # sin filtro de horario en datos diarios
