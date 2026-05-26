@@ -4,7 +4,7 @@ echo.
 echo  ================================
 echo   SMC Pro - MT5 Bridge Local
 echo  ================================
-echo  Servidor Railway: https://smc-pro-app-production.up.railway.app
+echo  Servidor Railway: https://web-production-c5a95d.up.railway.app
 echo  Visor local:      http://localhost:8501
 echo.
 echo  Abriendo navegador en 3 segundos...

@@ -4766,7 +4766,7 @@ except Exception as _bgw_err:
 import os as _os_env
 _IS_LOCAL  = not _os_env.environ.get("RAILWAY_ENVIRONMENT", "").strip()
 _railway_domain = _os_env.environ.get("RAILWAY_PUBLIC_DOMAIN", "")
-_RAILWAY_URL = f"https://{_railway_domain}" if _railway_domain else "https://smc-pro-app-production.up.railway.app"
+_RAILWAY_URL = f"https://{_railway_domain}" if _railway_domain else "https://web-production-c5a95d.up.railway.app"
 
 # ============================================
 # INTERFAZ STREAMLIT

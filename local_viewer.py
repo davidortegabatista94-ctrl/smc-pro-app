@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 
 logging.basicConfig(level=logging.WARNING)
 
-RAILWAY_URL  = os.environ.get("RAILWAY_URL", "https://smc-pro-app-production.up.railway.app")
+RAILWAY_URL  = os.environ.get("RAILWAY_URL", "https://web-production-c5a95d.up.railway.app")
 SYMBOL       = "EURUSD"
 PIP          = 0.0001
 REFRESH_SECS = 120   # 2 minutos
