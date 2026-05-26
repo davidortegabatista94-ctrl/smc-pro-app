@@ -2521,9 +2521,9 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
     _now_es    = _now_utc + __import__("datetime").timedelta(hours=UTC_OFFSET_SPAIN)
     _htime     = _now_utc.strftime("%H:%M UTC")
 
-    # Live price for the refresh indicator — solo MT5
+    # Live price — MT5 local o servicio remoto (OANDA)
     try:
-        _hdr_tick = get_mt5_tick(SYMBOL) if connected else None
+        _hdr_tick = get_mt5_tick(SYMBOL) if (connected or _mt5_service_available()) else None
         _live_px  = _hdr_tick["bid"] if _hdr_tick else None
     except Exception:
         _live_px  = None
@@ -3339,14 +3339,15 @@ if st.session_state.analysis_executed:
     st.markdown("---")
     st.subheader("💶 EUR/USD — Precio Actual")
 
-    _px_bid  = tick["bid"]         if tick else None
+    _sig_px  = signal.get("price")   # precio del análisis (yfinance) — siempre disponible
+    _px_bid  = tick["bid"]         if tick else _sig_px
     _px_ask  = tick["ask"]         if tick else None
     _px_spr  = tick["spread_pips"] if tick else None
     _rsi_v   = signal.get("rsi")
     _ema21_v = signal.get("ema21", 0)
     _ema50_v = signal.get("ema50", 0)
     _atr_v   = signal.get("atr_1h_pips")
-    _src_lbl = "MT5 Bid" if tick else "MT5 no conectado"
+    _src_lbl = "MT5 Bid" if tick else ("EUR/USD" if _sig_px else "Sin datos")
     if _ema21_v and _ema50_v:
         if _ema21_v > _ema50_v:
             _trend_lbl, _trend_col = "▲ Alcista", "#3fb950"
