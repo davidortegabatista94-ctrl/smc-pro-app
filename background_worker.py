@@ -18,9 +18,14 @@ from datetime import datetime, timezone
 
 _log = logging.getLogger("smc.bg")
 
-_CYCLE_SECS   = 180    # 3 minutos
-_STARTED      = False
-_LOCK         = threading.Lock()
+_CYCLE_SECS      = 180    # 3 minutos
+_STARTED         = False
+_LOCK            = threading.Lock()
+_BOT_MIN_SCORE   = 70     # score mínimo para ejecutar orden automática
+_MT5_SERVICE_URL = os.environ.get("MT5_SERVICE_URL", "").rstrip("/")
+_MT5_API_TOKEN   = os.environ.get("MT5_API_TOKEN", "")
+_SYMBOL          = "EURUSD"
+_BOT_VOLUME      = float(os.environ.get("BOT_DEFAULT_VOLUME", "0.01"))
 
 TELEGRAM_TOKEN   = os.environ.get(
     "TELEGRAM_BOT_TOKEN",
@@ -113,8 +118,113 @@ def _cycle() -> None:
     except Exception:
         pass
 
-    # 5 — Telegram
+    # 5 — Bot autónomo (ejecuta orden si está activado en DB y score ≥ umbral)
+    _bot_trade_if_due(signal, score)
+
+    # 6 — Telegram
     _telegram_if_due(signal, score)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Bot autónomo 24/7
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _bot_trade_if_due(signal: dict, score: int) -> None:
+    """Ejecuta una orden automática si el bot está activo en DB y hay señal suficiente."""
+    if not _MT5_SERVICE_URL:
+        return  # Sin servicio remoto no hay trading autónomo
+    if score < _BOT_MIN_SCORE:
+        return
+    direction = signal.get("direction")
+    if direction not in ("LONG", "SHORT"):
+        return
+
+    # Verificar si el bot está habilitado en la DB
+    try:
+        import db as _db
+        bot_on = _db.get_setting("bg_bot_enabled")
+        if str(bot_on).lower() not in ("1", "true", "yes"):
+            return
+        # Evitar doble entrada en la misma dirección
+        last_dir = _db.get_setting("bg_bot_last_direction") or ""
+        if last_dir == direction:
+            return
+        # Verificar que no hay posiciones abiertas ya
+        _pos = _service_get("/positions")
+        if _pos and isinstance(_pos, list) and len(_pos) > 0:
+            return
+    except Exception as e:
+        _log.debug("bot_check db error: %s", e)
+        return
+
+    # Obtener precio real del servicio
+    price = signal.get("price", 0)
+    try:
+        tick = _service_get(f"/tick/{_SYMBOL}")
+        if tick and "bid" in tick:
+            price = tick["bid"] if direction == "LONG" else tick["ask"]
+    except Exception:
+        pass
+    if not price:
+        return
+
+    # Calcular SL/TP sencillos (12 pips SL, 30 pips TP)
+    pip   = 0.0001
+    sl_p  = 12 * pip
+    tp_p  = 30 * pip
+    sl    = round(price - sl_p if direction == "LONG" else price + sl_p, 5)
+    tp    = round(price + tp_p if direction == "LONG" else price - tp_p, 5)
+
+    try:
+        result = _service_post("/trade", {
+            "symbol":    _SYMBOL,
+            "direction": "BUY" if direction == "LONG" else "SELL",
+            "volume":    _BOT_VOLUME,
+            "price":     price,
+            "sl":        sl,
+            "tp":        tp,
+            "comment":   f"SMC-BG score={score}",
+        })
+        if result and result.get("success"):
+            _log.info("BG bot orden ejecutada: %s score=%d ticket=%s",
+                      direction, score, result.get("ticket"))
+            import db as _db
+            _db.set_setting("bg_bot_last_direction", direction)
+            # Notificar por Telegram
+            _send_tg(
+                f"🤖 *Bot autónomo ejecutó orden*\n"
+                f"{'🟢 COMPRA' if direction=='LONG' else '🔴 VENTA'} | "
+                f"Score: *{score}/100* | Precio: `{price:.5f}`\n"
+                f"SL: `{sl:.5f}` · TP: `{tp:.5f}` · Vol: {_BOT_VOLUME}"
+            )
+        else:
+            _log.warning("BG bot orden fallida: %s", result)
+    except Exception as e:
+        _log.warning("BG bot trade error: %s", e)
+
+
+def _service_get(path: str) -> dict | list | None:
+    """GET al MT5 service remoto."""
+    try:
+        import requests
+        headers = {"Authorization": f"Bearer {_MT5_API_TOKEN}"} if _MT5_API_TOKEN else {}
+        r = requests.get(f"{_MT5_SERVICE_URL}{path}", headers=headers, timeout=8)
+        return r.json() if r.ok else None
+    except Exception:
+        return None
+
+
+def _service_post(path: str, body: dict) -> dict | None:
+    """POST al MT5 service remoto."""
+    try:
+        import requests
+        headers = {"Content-Type": "application/json"}
+        if _MT5_API_TOKEN:
+            headers["Authorization"] = f"Bearer {_MT5_API_TOKEN}"
+        r = requests.post(f"{_MT5_SERVICE_URL}{path}", json=body, headers=headers, timeout=10)
+        return r.json() if r.ok else None
+    except Exception:
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

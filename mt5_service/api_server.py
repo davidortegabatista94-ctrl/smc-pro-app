@@ -110,6 +110,15 @@ def close_position(ticket):
     return jsonify(result), (200 if result.get("success") else 400)
 
 
+@app.route("/tick/<symbol>", methods=["GET"])
+def tick(symbol):
+    """Precio bid/ask en tiempo real para el símbolo dado (ej. EURUSD)."""
+    result = mt5.get_current_price(symbol)
+    if "error" in result:
+        return jsonify(result), 503
+    return jsonify(result)
+
+
 @app.route("/status", methods=["GET"])
 def status():
     """Diagnóstico de configuración."""

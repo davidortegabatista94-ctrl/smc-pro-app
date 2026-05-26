@@ -200,3 +200,24 @@ def close_position(ticket) -> Dict[str, Any]:
         "ticket":       ticket,
         "closed_price": float(fill.get("price", 0)),
     }
+
+
+def get_current_price(symbol: str) -> Dict[str, Any]:
+    """Precio bid/ask en tiempo real desde OANDA (sin retardo)."""
+    oanda_sym = _to_oanda_symbol(symbol)
+    r = _get(f"/accounts/{_ACCOUNT}/pricing?instruments={oanda_sym}")
+    if not r.get("ok"):
+        return {"error": r.get("error")}
+    prices = r["data"].get("prices", [])
+    if not prices:
+        return {"error": "Sin datos de precio"}
+    p   = prices[0]
+    bid = float(p["bids"][0]["price"]) if p.get("bids") else 0.0
+    ask = float(p["asks"][0]["price"]) if p.get("asks") else 0.0
+    return {
+        "bid":         bid,
+        "ask":         ask,
+        "spread_pips": round((ask - bid) / 0.0001, 1),
+        "time":        p.get("time", ""),
+        "tradeable":   p.get("tradeable", False),
+    }

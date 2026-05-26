@@ -525,6 +525,37 @@ def mt5_service_positions() -> list:
         logging.warning(f"mt5_service_positions error: {e}")
         return []
 
+def _mt5_service_tick(symbol=None) -> dict | None:
+    """Precio bid/ask en tiempo real desde el servicio remoto (/tick/<symbol>)."""
+    if not _mt5_service_available():
+        return None
+    reqs = get_requests()
+    if not reqs:
+        return None
+    sym = symbol or SYMBOL
+    try:
+        r = reqs.get(
+            f"{_MT5_SERVICE_URL}/tick/{sym}",
+            headers=_mt5_service_headers(),
+            timeout=5,
+        )
+        if r.ok:
+            data = r.json()
+            if "bid" in data:
+                # Normaliza el campo time si viene como string ISO
+                if "time" in data and isinstance(data["time"], str):
+                    try:
+                        from datetime import datetime as _dt
+                        data["time"] = _dt.fromisoformat(data["time"].replace("Z", "+00:00"))
+                    except Exception:
+                        data["time"] = datetime.now()
+                else:
+                    data.setdefault("time", datetime.now())
+                return data
+    except Exception as e:
+        logging.debug(f"_mt5_service_tick error: {e}")
+    return None
+
 def mt5_service_place_order(symbol, direction, volume, price, sl, tp,
                              comment="SMC Pro Bot") -> dict:
     """
@@ -664,6 +695,10 @@ def get_mt5_candles(symbol=SYMBOL, tf="1h", count=200):
         return pd.DataFrame()
 
 def get_mt5_tick(symbol=SYMBOL):
+    # Servicio remoto primero (Railway/OANDA — sin retardo)
+    if _mt5_service_available():
+        return _mt5_service_tick(symbol)
+    # MT5 local (Windows)
     if not mt5_connect():
         return None
     try:
@@ -681,6 +716,12 @@ def get_mt5_tick(symbol=SYMBOL):
         return None
 
 def get_mt5_account():
+    # Servicio remoto primero
+    if _mt5_service_available():
+        remote = mt5_service_account()
+        if remote:
+            return remote
+    # MT5 local
     if not mt5_connect():
         return None
     try:
@@ -750,7 +791,11 @@ def get_mt5_ticks_volume(symbol=SYMBOL, minutes=60):
 # ============================================
 
 def get_mt5_positions(symbol=SYMBOL):
-    """Obtiene posiciones abiertas en MT5"""
+    """Obtiene posiciones abiertas — remoto primero, local como fallback."""
+    if _mt5_service_available():
+        remote = mt5_service_positions()
+        if remote is not None:
+            return remote
     if not mt5_connect():
         return []
     positions = mt5.positions_get(symbol=symbol)
@@ -4347,10 +4392,20 @@ BOT_ENABLED = st.session_state.bot_enabled
 BOT_VOLUME = st.session_state.bot_volume
 BOT_LAST_SIGNAL = st.session_state.bot_last_signal
 
-# Verificar conexión MT5
-if is_mt5_available() and mt5_connect():
-    st.success("✅ MT5 conectado - Bot disponible")
+# ── Detectar fuente de conexión disponible ────────────────────────────────
+_svc_ok    = _mt5_service_available() and mt5_service_health().get("mt5") == "connected"
+_local_ok  = is_mt5_available() and mt5_connect()
+_any_conn  = _svc_ok or _local_ok
 
+if _svc_ok:
+    st.success("✅ OANDA/MT5 Service conectado — trading remoto disponible")
+elif _local_ok:
+    st.success("✅ MT5 local conectado — trading disponible")
+else:
+    st.error("❌ Sin conexión MT5/OANDA — Bot no disponible")
+    st.info("Configura MT5_SERVICE_URL + OANDA_API_TOKEN en las variables de entorno de Railway, o abre MT5 localmente.")
+
+if _any_conn:
     # Estado actual del bot
     if st.session_state.bot_enabled:
         st.success("🚀 **BOT ACTIVO** - Ejecutando señales automáticamente")
@@ -4365,10 +4420,16 @@ if is_mt5_available() and mt5_connect():
             if st.button("⏸️ **DESACTIVAR BOT**", type="secondary"):
                 st.session_state.bot_enabled = False
                 st.session_state.bot_just_activated = False
+                if _DB_OK:
+                    try: _db.set_setting("bg_bot_enabled", "false")
+                    except Exception: pass
         else:
             if st.button("🚀 **ACTIVAR BOT**", type="primary"):
                 st.session_state.bot_enabled = True
                 st.session_state.bot_just_activated = True
+                if _DB_OK:
+                    try: _db.set_setting("bg_bot_enabled", "true")
+                    except Exception: pass
 
     with col_bot2:
         st.session_state.bot_volume = st.number_input(
@@ -4377,7 +4438,6 @@ if is_mt5_available() and mt5_connect():
         )
 
     with col_bot3:
-        # Estado del bot
         positions_mt5 = get_mt5_positions()
         if positions_mt5:
             st.warning(f"📊 {len(positions_mt5)} pos.")
@@ -4390,20 +4450,46 @@ if is_mt5_available() and mt5_connect():
         else:
             st.info("🎯 Sin pos.")
 
+    # ── Bot 24/7 (background worker) ──────────────────────────────────────────
+    if _DB_OK and _svc_ok:
+        st.markdown("---")
+        _bg_bot_on = _db.get_setting("bg_bot_enabled") if _DB_OK else "false"
+        _bg_active = str(_bg_bot_on).lower() in ("1", "true", "yes")
+        if _bg_active:
+            st.success("🤖 **Bot 24/7 ACTIVO** — opera aunque nadie tenga la app abierta")
+            if st.button("⏹ Detener Bot 24/7", key="bg_bot_off"):
+                _db.set_setting("bg_bot_enabled", "false")
+                st.rerun()
+        else:
+            st.info("🌙 Bot 24/7 **inactivo** — solo opera cuando la app está abierta")
+            if st.button("🌐 Activar Bot 24/7 (background)", key="bg_bot_on", type="primary"):
+                _db.set_setting("bg_bot_enabled", "true")
+                _db.set_setting("bg_bot_last_direction", "")
+                st.rerun()
+
     # ── Panel de posiciones abiertas ──────────────────────────────────────────
     _live_pos = get_mt5_positions()
     if _live_pos:
         st.markdown("#### 📊 Posiciones Abiertas")
         for _p in _live_pos:
-            _be_dist = abs(_p.price_open - _p.sl) if _p.sl != 0 else 0
-            _dir_lbl = "LONG" if _p.type == 0 else "SHORT"
-            _profit_pips = (_p.price_current - _p.price_open) / 0.0001 if _p.type == 0 else (_p.price_open - _p.price_current) / 0.0001
-            _be_active = (_p.sl >= _p.price_open if _p.type == 0 else _p.sl <= _p.price_open) and _p.sl != 0
-            _be_icon = "⚖️ BE" if _be_active else "🎯"
+            # Compatibilidad: dict (OANDA remoto) u objeto MT5 (local)
+            def _pv(attr, default=0):
+                return _p.get(attr, default) if isinstance(_p, dict) else getattr(_p, attr, default)
+            _ticket   = _pv("ticket", "—")
+            _open_p   = float(_pv("open_price") or _pv("price_open", 0))
+            _cur_p    = float(_pv("current_price") or _pv("price_current", _open_p))
+            _sl_p     = float(_pv("sl", 0))
+            _vol      = float(_pv("volume", 0))
+            _profit   = float(_pv("profit", 0))
+            _type_raw = _pv("type", "BUY")
+            _is_buy   = (_type_raw in (0, "BUY", "LONG")) if not isinstance(_type_raw, str) else _type_raw.upper() in ("BUY", "LONG")
+            _dir_lbl  = "LONG" if _is_buy else "SHORT"
+            _ppips    = (_cur_p - _open_p) / 0.0001 if _is_buy else (_open_p - _cur_p) / 0.0001
+            _be_icon  = "⚖️ BE" if (_sl_p >= _open_p if _is_buy else _sl_p <= _open_p) and _sl_p != 0 else "🎯"
             st.markdown(
-                f"**#{_p.ticket}** {_dir_lbl} {_p.volume}L @ {_p.price_open:.5f} "
-                f"| Actual: {_p.price_current:.5f} "
-                f"| {_be_icon} P&L: {_profit_pips:+.1f}p (${_p.profit:.2f})"
+                f"**#{_ticket}** {_dir_lbl} {_vol}L @ {_open_p:.5f} "
+                f"| Actual: {_cur_p:.5f} "
+                f"| {_be_icon} P&L: {_ppips:+.1f}p (${_profit:.2f})"
             )
     else:
         st.info("🎯 Sin posiciones abiertas")
@@ -4480,18 +4566,6 @@ if is_mt5_available() and mt5_connect():
             else:
                 st.info("⏳ Sin dirección clara — bot en espera")
 
-else:
-    st.error("❌ MT5 no conectado - Bot no disponible")
-    st.info("💡 **Para conectar MT5:**")
-    st.markdown("""
-    1. **Abre MetaTrader 5** (como administrador si es necesario)
-    2. **Inicia sesión** en tu cuenta demo/real
-    3. **Verifica** que puedas ver gráficos de EURUSD
-    4. **No cierres** MT5 mientras uses el bot
-    5. **Asegúrate** de que MT5 esté respondiendo (no congelado)
-    6. **Si usas VPN** - puede interferir con la conexión
-    """)
-    st.warning("🔄 **Después de conectar MT5, refresca esta página** (F5)")
 
 # Mostrar noticias si están disponibles
 news = signal.get("news", []) if 'signal' in dir() and signal else []
