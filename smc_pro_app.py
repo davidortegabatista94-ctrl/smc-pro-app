@@ -2086,7 +2086,7 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2):
         # Filtro ventana horaria
         if use_windows and hasattr(df.index[i], "hour"):
             hs = (df.index[i].hour + utc_offset) % 24
-            if not ((7 <= hs < 12) or (15 <= hs < 20)) and not in_trade:
+            if not (7 <= hs < 20) and not in_trade:
                 continue
 
         c      = float(close.iloc[i])
@@ -2914,7 +2914,7 @@ def _run_single_strategy(df, strategy="ema_trend", use_windows=True, utc_offset=
     for i in range(110, len(df) - 1):
         if use_windows and hasattr(df.index[i], "hour"):
             hs = (df.index[i].hour + utc_offset) % 24
-            if not ((7 <= hs < 12) or (15 <= hs < 20)) and not in_trade:
+            if not (7 <= hs < 20) and not in_trade:
                 continue
 
         c      = float(close.iloc[i]);   prev_c = float(close.iloc[i-1])
@@ -3663,22 +3663,18 @@ def get_spain_hour():
     return (datetime.utcnow().hour + UTC_OFFSET_SPAIN) % 24
 
 def is_trading_window():
-    """True si hora España está en 07:00-12:00 o 15:00-20:00"""
+    """True si hora España está en 07:00-20:00"""
     h = get_spain_hour()
-    return (7 <= h < 12) or (15 <= h < 20)
+    return 7 <= h < 20
 
 def get_trading_window_info():
     h = get_spain_hour()
-    if 7 <= h < 12:
-        return True, "VENTANA MAÑANA (07:00-12:00)", f"Cierra en ~{12 - h}h | España aprox. {h:02d}:xx"
-    elif 15 <= h < 20:
-        return True, "VENTANA TARDE (15:00-20:00)", f"Cierra en ~{20 - h}h | España aprox. {h:02d}:xx"
+    if 7 <= h < 20:
+        return True, "VENTANA TRADING (07:00-20:00)", f"Cierra en ~{20 - h}h | España aprox. {h:02d}:xx"
     elif h < 7:
-        return False, "CERRADO (noche)", f"Abre ventana mañana en ~{7 - h}h"
-    elif 12 <= h < 15:
-        return False, "DESCANSO MEDIODÍA", f"Reabre ventana tarde en ~{15 - h}h"
+        return False, "CERRADO (noche)", f"Abre en ~{7 - h}h"
     else:
-        return False, "CERRADO (noche)", f"Abre ventana mañana en ~{24 - h + 7}h"
+        return False, "CERRADO (noche)", f"Abre mañana en ~{24 - h + 7}h"
 
 # ============================================
 # NIVELES SCALPING
