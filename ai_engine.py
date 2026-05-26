@@ -14,11 +14,18 @@ Strategy DNA lifecycle:
 """
 
 import os
+import re
 import json
 import logging
 from datetime import datetime
 
 _log = logging.getLogger(__name__)
+
+
+def _strip_thinking(text: str) -> str:
+    """Strip <think>...</think> reasoning blocks emitted by models like glm-z1-flash."""
+    cleaned = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    return cleaned.strip()
 
 # ── Provider detection ────────────────────────────────────────────────────────
 
@@ -105,7 +112,7 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
                     model=model, messages=all_msgs,
                     max_tokens=max_tokens, temperature=temperature,
                 )
-                return resp.choices[0].message.content
+                return _strip_thinking(resp.choices[0].message.content)
 
             elif provider == "cerebras":
                 from openai import OpenAI
@@ -119,7 +126,7 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
                     max_tokens=min(max_tokens, 8192),  # Cerebras free cap
                     temperature=temperature,
                 )
-                return resp.choices[0].message.content
+                return _strip_thinking(resp.choices[0].message.content)
 
             elif provider == "zhipu":
                 from openai import OpenAI
@@ -134,7 +141,7 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
                     model=zhipu_model, messages=all_msgs,
                     max_tokens=max_tokens, temperature=temperature,
                 )
-                return resp.choices[0].message.content
+                return _strip_thinking(resp.choices[0].message.content)
 
             elif provider == "anthropic":
                 import anthropic
@@ -143,7 +150,7 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
                     system=system_msg or "You are a helpful assistant.",
                     messages=chat_msgs,
                 )
-                return resp.content[0].text
+                return _strip_thinking(resp.content[0].text)
 
             elif provider == "openai":
                 from openai import OpenAI
@@ -153,7 +160,7 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
                     model=model, messages=all_msgs,
                     max_tokens=max_tokens, temperature=temperature,
                 )
-                return resp.choices[0].message.content
+                return _strip_thinking(resp.choices[0].message.content)
 
         except Exception as e:
             _log.warning("AI provider %s failed: %s", provider, e)

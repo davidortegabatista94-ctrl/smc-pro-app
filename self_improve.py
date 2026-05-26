@@ -189,6 +189,14 @@ Responde SOLO con JSON (sin markdown):
             [{"role": "user", "content": prompt}],
             max_tokens=600, temperature=0.2, prefer_reasoning=True,
         )
+        # If all providers failed, don't store a garbage record — just skip
+        if response.startswith("⚠️ Todos los proveedores"):
+            _log.warning("HealEngine: all AI providers failed, skipping heal record")
+            return {"health_status": "unknown", "summary": response[:200],
+                    "error_patterns": "", "top_finding": "",
+                    "parameter_changes": {}, "actions_taken": [],
+                    "applied_changes": {}, "dna_updated": False,
+                    "new_dna": None, "ts": datetime.utcnow().isoformat()}
         assessment = _ai._parse_json(response)
         if not assessment:
             assessment = {"health_status": "unknown", "summary": response[:200],
@@ -196,9 +204,10 @@ Responde SOLO con JSON (sin markdown):
                           "actions_taken": []}
     except Exception as e:
         _log.warning("HealEngine AI call failed: %s", e)
-        assessment = {"health_status": "unknown", "summary": str(e)[:200],
-                      "error_patterns": "", "top_finding": "", "parameter_changes": {},
-                      "actions_taken": []}
+        return {"health_status": "unknown", "summary": str(e)[:200],
+                "error_patterns": "", "top_finding": "", "parameter_changes": {},
+                "actions_taken": [], "applied_changes": {}, "dna_updated": False,
+                "new_dna": None, "ts": datetime.utcnow().isoformat()}
 
     # ── Apply safe parameter changes ──────────────────────────────────────────
     changes     = assessment.get("parameter_changes") or {}
@@ -362,9 +371,12 @@ Responde en español con:
 Máximo 150 palabras."""
 
     try:
-        return _ai.call_ai(
+        result = _ai.call_ai(
             [{"role": "user", "content": prompt}],
             max_tokens=300, temperature=0.3,
         )
+        if result.startswith("⚠️"):
+            return "Sin IA disponible para analizar patrones — revisa API keys en Railway."
+        return result
     except Exception as e:
         return f"Error en análisis de patrones: {e}"
