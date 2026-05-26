@@ -5189,15 +5189,13 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
     _now_es    = _now_utc + __import__("datetime").timedelta(hours=UTC_OFFSET_SPAIN)
     _htime     = _now_utc.strftime("%H:%M UTC")
 
-    # Live price for the refresh indicator
+    # Live price for the refresh indicator — solo MT5
     try:
-        import yfinance as _yf_tick
-        _tick_df = _yf_tick.download("EURUSD=X", period="1d", interval="1m",
-                                     progress=False, auto_adjust=True)
-        _live_px = float(_tick_df["Close"].dropna().iloc[-1]) if not _tick_df.empty else None
+        _hdr_tick = get_mt5_tick(SYMBOL) if connected else None
+        _live_px  = _hdr_tick["bid"] if _hdr_tick else None
     except Exception:
-        _live_px = None
-    _live_px_str = f"{_live_px:.5f}" if _live_px else "—"
+        _live_px  = None
+    _live_px_str = f"{_live_px:.5f}" if _live_px is not None else "—"
     _live_dt_str = _now_es.strftime("%d/%m/%Y  %H:%M:%S")
 
     st.markdown(f"""
@@ -5991,14 +5989,14 @@ if st.session_state.analysis_executed:
     st.markdown("---")
     st.subheader("💶 EUR/USD — Precio Actual")
 
-    _px_bid  = tick["bid"]         if tick else (_live_px or signal.get("price") or 0)
+    _px_bid  = tick["bid"]         if tick else None
     _px_ask  = tick["ask"]         if tick else None
     _px_spr  = tick["spread_pips"] if tick else None
     _rsi_v   = signal.get("rsi")
     _ema21_v = signal.get("ema21", 0)
     _ema50_v = signal.get("ema50", 0)
     _atr_v   = signal.get("atr_1h_pips")
-    _src_lbl = "MT5 Bid" if tick else ("yfinance" if _live_px else "Último precio")
+    _src_lbl = "MT5 Bid" if tick else "MT5 no conectado"
     if _ema21_v and _ema50_v:
         if _ema21_v > _ema50_v:
             _trend_lbl, _trend_col = "▲ Alcista", "#3fb950"
@@ -6010,8 +6008,8 @@ if st.session_state.analysis_executed:
         _trend_lbl, _trend_col = "— Sin datos", "#8b949e"
 
     _pc1, _pc2, _pc3, _pc4, _pc5 = st.columns(5)
-    _pc1.metric(_src_lbl, f"{_px_bid:.5f}" if _px_bid else "—")
-    _pc2.metric("Ask", f"{_px_ask:.5f}" if _px_ask else "—")
+    _pc1.metric(_src_lbl, f"{_px_bid:.5f}" if _px_bid is not None else "—")
+    _pc2.metric("Ask", f"{_px_ask:.5f}" if _px_ask is not None else "—")
     _pc3.metric("Spread", f"{_px_spr} pips" if _px_spr is not None else "—",
                 delta=("✅ OK" if _px_spr and _px_spr < 1.5 else "⚠️ Alto") if _px_spr is not None else None)
     _pc4.metric("RSI 1H", f"{_rsi_v:.1f}" if _rsi_v is not None else "—")
