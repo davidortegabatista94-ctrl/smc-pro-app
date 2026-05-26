@@ -18,7 +18,180 @@ _DB_URL = os.environ.get("DATABASE_URL", "")
 def _get_conn():
     import psycopg2
     import psycopg2.extras
-    return psycopg2.connect(_DB_URL, cursor_factory=psycopg2.extras.RealDictCursor)
+    url = _DB_URL
+    # Railway Postgres URLs sometimes start with postgres:// — psycopg2 needs postgresql://
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    return psycopg2.connect(url, cursor_factory=psycopg2.extras.RealDictCursor)
+
+
+def ensure_tables() -> bool:
+    """Create all required tables if they don't exist. Safe to call on every startup."""
+    if not _DB_URL:
+        return False
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id VARCHAR(50) PRIMARY KEY,
+            display_name VARCHAR(100) NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            mt5_login VARCHAR(100) DEFAULT '',
+            mt5_password VARCHAR(100) DEFAULT '',
+            mt5_server VARCHAR(100) DEFAULT '',
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            last_login TIMESTAMPTZ
+        )""")
+        cur.execute("""
+        INSERT INTO users (id, display_name, password_hash) VALUES
+            ('david', 'David', 'david'),
+            ('javi', 'Javi', 'javi')
+        ON CONFLICT (id) DO NOTHING""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            token VARCHAR(255) PRIMARY KEY,
+            user_id VARCHAR(50) NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            expires_at TIMESTAMPTZ DEFAULT NOW() + INTERVAL '30 days'
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS advisor_chat (
+            id SERIAL PRIMARY KEY,
+            session_id VARCHAR(255) NOT NULL,
+            role VARCHAR(20) NOT NULL,
+            content TEXT NOT NULL,
+            user_id VARCHAR(50) DEFAULT 'david',
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS trades_history (
+            id SERIAL PRIMARY KEY,
+            direction VARCHAR(10) NOT NULL,
+            entry_price FLOAT,
+            sl_price FLOAT,
+            tp_price FLOAT,
+            exit_price FLOAT,
+            pips FLOAT DEFAULT 0,
+            pnl FLOAT DEFAULT 0,
+            outcome VARCHAR(20) DEFAULT '',
+            strategy VARCHAR(100) DEFAULT '',
+            score INT DEFAULT 0,
+            market_snapshot JSONB DEFAULT '{}'::jsonb,
+            dna_version INT DEFAULT 1,
+            user_id VARCHAR(50) DEFAULT 'david',
+            opened_at TIMESTAMPTZ DEFAULT NOW(),
+            closed_at TIMESTAMPTZ DEFAULT NOW(),
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS market_snapshots (
+            id SERIAL PRIMARY KEY,
+            price FLOAT,
+            signal VARCHAR(50),
+            score INT DEFAULT 0,
+            dxy_trend VARCHAR(50) DEFAULT '',
+            regime VARCHAR(50) DEFAULT '',
+            strategy VARCHAR(100) DEFAULT '',
+            snapshot_data JSONB DEFAULT '{}'::jsonb,
+            user_id VARCHAR(50) DEFAULT 'david',
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS backtest_cache (
+            cache_type VARCHAR(50) PRIMARY KEY,
+            results_json JSONB,
+            best_json JSONB,
+            n_bars INT DEFAULT 0,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key VARCHAR(100) PRIMARY KEY,
+            value TEXT DEFAULT '',
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_memory (
+            id SERIAL PRIMARY KEY,
+            user_id VARCHAR(50) NOT NULL,
+            memory_type VARCHAR(50) DEFAULT 'insight',
+            title VARCHAR(200),
+            content TEXT NOT NULL,
+            confidence FLOAT DEFAULT 0.7,
+            source VARCHAR(100) DEFAULT 'auto',
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS strategy_dna (
+            id SERIAL PRIMARY KEY,
+            version INT DEFAULT 1,
+            rules JSONB DEFAULT '{}'::jsonb,
+            fitness FLOAT DEFAULT 0,
+            trades_evaluated INT DEFAULT 0,
+            winrate FLOAT DEFAULT 0,
+            net_pips FLOAT DEFAULT 0,
+            key_insight TEXT DEFAULT '',
+            is_active BOOLEAN DEFAULT FALSE,
+            evolved_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS trade_analysis (
+            id SERIAL PRIMARY KEY,
+            direction VARCHAR(10),
+            outcome VARCHAR(20),
+            pips FLOAT DEFAULT 0,
+            strategy VARCHAR(100) DEFAULT '',
+            score INT DEFAULT 0,
+            market_snapshot JSONB DEFAULT '{}'::jsonb,
+            ai_analysis TEXT DEFAULT '',
+            dna_version INT DEFAULT 1,
+            user_id VARCHAR(50) DEFAULT 'david',
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS error_log (
+            id SERIAL PRIMARY KEY,
+            component VARCHAR(100) DEFAULT '',
+            severity VARCHAR(20) DEFAULT 'warning',
+            message TEXT DEFAULT '',
+            traceback TEXT DEFAULT '',
+            context JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS performance_metrics (
+            id SERIAL PRIMARY KEY,
+            metric_name VARCHAR(100) NOT NULL,
+            value FLOAT NOT NULL,
+            context JSONB DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS self_improvements (
+            id SERIAL PRIMARY KEY,
+            improvement_type VARCHAR(50) DEFAULT 'heal_cycle',
+            before_state JSONB DEFAULT '{}'::jsonb,
+            after_state JSONB DEFAULT '{}'::jsonb,
+            reason TEXT DEFAULT '',
+            applied BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        # Indexes
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_memory_user ON ai_memory(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_session ON advisor_chat(session_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_trades_user ON trades_history(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user ON user_sessions(user_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_sessions_exp ON user_sessions(expires_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_snapshots_ts ON market_snapshots(created_at)")
+        conn.commit()
+        conn.close()
+        _log.info("DB tables ensured OK")
+        return True
+    except Exception as e:
+        _log.warning("ensure_tables error: %s", e)
+        return False
 
 
 @contextmanager

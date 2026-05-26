@@ -106,6 +106,7 @@ _BT_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bt_c
 try:
     import db as _db
     _DB_OK = True
+    _db.ensure_tables()  # auto-create tables on first run
 except ImportError:
     _DB_OK = False
 
