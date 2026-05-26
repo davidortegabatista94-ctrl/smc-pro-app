@@ -455,6 +455,42 @@ _EURUSD_CACHE = {}
 _EURUSD_CACHE_TTL = timedelta(seconds=30)
 
 # ============================================
+# EMA RIBBON MULTI-MARCO
+# ============================================
+def get_ema_ribbon(df, lens=(5, 10, 20, 50)) -> dict:
+    """Calcula EMA Ribbon 5/10/20/50 y señales de cruce para un DataFrame OHLCV."""
+    if df is None or df.empty or len(df) < max(lens):
+        return {}
+    close = df["Close"]
+    emas  = {l: close.ewm(span=l, adjust=False).mean() for l in lens}
+    e5,  e10,  e20,  e50  = [float(emas[l].iloc[-1]) for l in lens]
+    e5p, e10p, e20p, e50p = [float(emas[l].iloc[-2]) for l in lens]
+    px = float(close.iloc[-1])
+
+    bull_align = e5 > e10 > e20 > e50
+    bear_align = e5 < e10 < e20 < e50
+
+    if bull_align:          trend = "▲ ALCISTA"
+    elif bear_align:        trend = "▼ BAJISTA"
+    elif e5 > e50:          trend = "↗ NEUTRAL+"
+    else:                   trend = "↘ NEUTRAL-"
+
+    bull_cross   = e5p <= e20p and e5 > e20 and px > e50   # EMA5 cruza sobre EMA20
+    bear_cross   = e5p >= e20p and e5 < e20 and px < e50   # EMA5 cruza bajo EMA20
+    golden_cross = e10p <= e50p and e10 > e50
+    death_cross  = e10p >= e50p and e10 < e50
+
+    return {
+        "ema5": e5, "ema10": e10, "ema20": e20, "ema50": e50,
+        "bull_align": bull_align, "bear_align": bear_align,
+        "trend": trend,
+        "buy_signal": bull_cross, "sell_signal": bear_cross,
+        "golden_cross": golden_cross, "death_cross": death_cross,
+        "above_ema50": px > e50,
+    }
+
+
+# ============================================
 # TRADINGVIEW — PRECIO E INDICADORES EN TIEMPO REAL
 # ============================================
 _TV_CACHE: dict = {}
@@ -3706,11 +3742,73 @@ if st.session_state.analysis_executed:
     "hide_legend": false,
     "save_image": false,
     "container_id": "tv_chart_widget",
-    "studies": ["RSI@tv-basicstudies", "MACD@tv-basicstudies"],
+    "studies": [
+      "RSI@tv-basicstudies",
+      "MACD@tv-basicstudies",
+      {{"id": "MAExp@tv-basicstudies", "inputs": {{"length": 5}}}},
+      {{"id": "MAExp@tv-basicstudies", "inputs": {{"length": 10}}}},
+      {{"id": "MAExp@tv-basicstudies", "inputs": {{"length": 20}}}},
+      {{"id": "MAExp@tv-basicstudies", "inputs": {{"length": 50}}}}
+    ],
     "show_popup_button": false
   }});
   </script>
 </div>""", height=510)
+
+    # ── EMA Ribbon Multi-Marco ────────────────────────────────────────────────
+    _df_4h = get_eurusd_data("4h")
+    _df_1d = get_eurusd_data("1d")
+    _ema_tfs = {
+        "15 min": get_ema_ribbon(df_15),
+        "1H":     get_ema_ribbon(df_1h),
+        "4H":     get_ema_ribbon(_df_4h),
+        "Daily":  get_ema_ribbon(_df_1d),
+    }
+    _any_ribbon = any(v for v in _ema_tfs.values())
+    if _any_ribbon:
+        with st.expander("🎀 EMA Ribbon 5/10/20/50 — Análisis Multi-Marco", expanded=True):
+            _rb_cols = st.columns(4)
+            _tf_labels = list(_ema_tfs.keys())
+            for _ci, (_tf_lbl, _rb) in enumerate(_ema_tfs.items()):
+                with _rb_cols[_ci]:
+                    st.markdown(f"**{_tf_lbl}**")
+                    if not _rb:
+                        st.caption("Sin datos")
+                        continue
+                    _trend_color = (
+                        "🟢" if _rb.get("bull_align") else
+                        "🔴" if _rb.get("bear_align") else
+                        "🟡"
+                    )
+                    st.markdown(f"{_trend_color} **{_rb.get('trend','—')}**")
+                    st.caption(f"EMA5:  `{_rb['ema5']:.5f}`")
+                    st.caption(f"EMA10: `{_rb['ema10']:.5f}`")
+                    st.caption(f"EMA20: `{_rb['ema20']:.5f}`")
+                    st.caption(f"EMA50: `{_rb['ema50']:.5f}`")
+                    _sigs = []
+                    if _rb.get("buy_signal"):    _sigs.append("🚀 BUY CROSS")
+                    if _rb.get("sell_signal"):   _sigs.append("💥 SELL CROSS")
+                    if _rb.get("golden_cross"):  _sigs.append("✨ Golden Cross")
+                    if _rb.get("death_cross"):   _sigs.append("💀 Death Cross")
+                    for _s in _sigs:
+                        st.success(_s) if "BUY" in _s or "Golden" in _s else st.error(_s)
+
+            # Global alignment status
+            st.markdown("---")
+            _bull_count = sum(1 for r in _ema_tfs.values() if r and r.get("bull_align"))
+            _bear_count = sum(1 for r in _ema_tfs.values() if r and r.get("bear_align"))
+            _total_tf   = sum(1 for r in _ema_tfs.values() if r)
+            if _total_tf > 0:
+                if _bull_count == _total_tf:
+                    st.success("✅ ALINEACIÓN GLOBAL ALCISTA — Todos los marcos temporales en tendencia alcista")
+                elif _bear_count == _total_tf:
+                    st.error("🔴 ALINEACIÓN GLOBAL BAJISTA — Todos los marcos temporales en tendencia bajista")
+                elif _bull_count > _bear_count:
+                    st.warning(f"⚠️ SESGO ALCISTA ({_bull_count}/{_total_tf} marcos alcistas) — Divergencia en algunos marcos")
+                elif _bear_count > _bull_count:
+                    st.warning(f"⚠️ SESGO BAJISTA ({_bear_count}/{_total_tf} marcos bajistas) — Divergencia en algunos marcos")
+                else:
+                    st.info("⚪ DIVERGENCIA — Sin consenso entre marcos temporales")
 
     # ── Gráfico Plotly con indicadores SMC ───────────────────────────────────
     _df_chart_map = {"15M": df_15, "1H": df_1h, "4H": get_eurusd_data("4h")}
