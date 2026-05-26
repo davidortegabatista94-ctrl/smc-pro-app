@@ -5096,7 +5096,20 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
     _hconn_cls = "bdg-g" if connected else "bdg-y"
     _hconn_dot = "●" if connected else "◐"
     _hconn_txt = "MT5 Live" if connected else "yfinance"
-    _htime     = datetime.utcnow().strftime("%H:%M UTC")
+    _now_utc   = datetime.utcnow()
+    _htime     = _now_utc.strftime("%H:%M UTC")
+
+    # Live price for the refresh indicator
+    try:
+        import yfinance as _yf_tick
+        _tick_df = _yf_tick.download("EURUSD=X", period="1d", interval="1m",
+                                     progress=False, auto_adjust=True)
+        _live_px = float(_tick_df["Close"].dropna().iloc[-1]) if not _tick_df.empty else None
+    except Exception:
+        _live_px = None
+    _live_px_str = f"{_live_px:.5f}" if _live_px else "—"
+    _live_dt_str = _now_utc.strftime("%d/%m/%Y  %H:%M:%S UTC")
+
     st.markdown(f"""
 <div class="smc-header">
   <div class="smc-hbrand">
@@ -5110,6 +5123,17 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
     <span class="smc-time">{_htime}</span>
   </div>
 </div>""", unsafe_allow_html=True)
+
+    # ── Indicador de refresco (fecha + precio en vivo) ──────────────────────
+    st.markdown(f"""<div style="
+        display:inline-flex;align-items:center;gap:14px;
+        background:#0d1117;border:1px solid #30363d;border-radius:8px;
+        padding:6px 16px;margin-bottom:8px;font-family:monospace">
+      <span style="color:#8b949e;font-size:11px">ÚLTIMO REFRESCO</span>
+      <span style="color:#e6edf3;font-size:13px;font-weight:600">{_live_dt_str}</span>
+      <span style="color:#8b949e;font-size:11px">EUR/USD</span>
+      <span style="color:#3fb950;font-size:15px;font-weight:700">{_live_px_str}</span>
+    </div>""", unsafe_allow_html=True)
 
     # ── Banner modo local (extensión MT5) ────────────────────────────────────
     if _IS_LOCAL:
