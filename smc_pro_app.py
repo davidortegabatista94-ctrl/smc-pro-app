@@ -5210,7 +5210,7 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
   <div class="smc-hinfo">
     <span class="smc-pair">EUR / USD</span>
     <span class="bdg bdg-b">👤 {current_user_name}</span>
-    <span class="smc-time">{_htime}</span>
+    <span class="smc-time" title="{_htime}">{_live_px_str}</span>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -5634,8 +5634,8 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
 # ── Sin botón: análisis automático cada 2 minutos, invisible para el usuario ──
 run_analysis = False
 
-# Auto-refresh fijo: cada 2 minutos, completamente invisible para el usuario
-refresh_secs = 120
+# Auto-refresh fijo: cada 3 minutos, completamente invisible para el usuario
+refresh_secs = 180
 
 # Guard de análisis: evita doble-trigger y asegura intervalo mínimo
 should_auto_refresh = False
@@ -5982,9 +5982,48 @@ if st.session_state.analysis_executed:
         sp = tick["spread_pips"]
         m3.metric("Spread", f"{sp} pips",
                   delta="✅ OK" if sp < 1.5 else "⚠️ Alto")
-        m4.metric("Hora tick", tick["time"].strftime("%H:%M:%S"))
+        m4.metric("Precio MT5", f"{tick['bid']:.5f}", help=tick["time"].strftime("%H:%M:%S"))
         if sp > 2:
             st.warning(f"⚠️ Spread de {sp} pips — espera que baje antes de entrar")
+
+    # ── Precio EUR/USD (sección dedicada) ────────────────────────────────────
+    st.markdown('<div id="sec-eurusd"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("💶 EUR/USD — Precio Actual")
+
+    _px_bid  = tick["bid"]         if tick else (_live_px or signal.get("price") or 0)
+    _px_ask  = tick["ask"]         if tick else None
+    _px_spr  = tick["spread_pips"] if tick else None
+    _rsi_v   = signal.get("rsi")
+    _ema21_v = signal.get("ema21", 0)
+    _ema50_v = signal.get("ema50", 0)
+    _atr_v   = signal.get("atr_1h_pips")
+    _src_lbl = "MT5 Bid" if tick else ("yfinance" if _live_px else "Último precio")
+    if _ema21_v and _ema50_v:
+        if _ema21_v > _ema50_v:
+            _trend_lbl, _trend_col = "▲ Alcista", "#3fb950"
+        elif _ema21_v < _ema50_v:
+            _trend_lbl, _trend_col = "▼ Bajista", "#f85149"
+        else:
+            _trend_lbl, _trend_col = "→ Lateral", "#e3b341"
+    else:
+        _trend_lbl, _trend_col = "— Sin datos", "#8b949e"
+
+    _pc1, _pc2, _pc3, _pc4, _pc5 = st.columns(5)
+    _pc1.metric(_src_lbl, f"{_px_bid:.5f}" if _px_bid else "—")
+    _pc2.metric("Ask", f"{_px_ask:.5f}" if _px_ask else "—")
+    _pc3.metric("Spread", f"{_px_spr} pips" if _px_spr is not None else "—",
+                delta=("✅ OK" if _px_spr and _px_spr < 1.5 else "⚠️ Alto") if _px_spr is not None else None)
+    _pc4.metric("RSI 1H", f"{_rsi_v:.1f}" if _rsi_v is not None else "—")
+    _pc5.metric("ATR 1H", f"{_atr_v} pips" if _atr_v else "—")
+    st.markdown(
+        f'<div style="display:inline-block;background:#161b22;border:1px solid #30363d;'
+        f'border-radius:8px;padding:7px 18px;margin-top:4px">'
+        f'<span style="color:#8b949e;font-size:12px">Tendencia EMA21/50 · </span>'
+        f'<span style="color:{_trend_col};font-weight:700;font-size:13px">{_trend_lbl}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
     # ── Señal principal ───────────────────────────────────────────────────────
     st.markdown('<div id="sec-senal"></div>', unsafe_allow_html=True)
@@ -7653,14 +7692,16 @@ if st.session_state.advisor_chat:
 st.markdown("---")
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
-# ── Auto-rerun invisible cada 2 minutos ───────────────────────────────────────
-st.session_state["_refresh_secs_live"] = 120
+# ── Auto-rerun invisible cada 3 minutos ───────────────────────────────────────
+# run_every="30s" es suficiente resolución para un umbral de 171s (95% de 180s).
+# El fragmento corre en el servidor: funciona aunque la pestaña no esté activa.
+st.session_state["_refresh_secs_live"] = 180
 
-@st.fragment(run_every="1s")
+@st.fragment(run_every="30s")
 def _auto_refresh_fragment():
     _last = st.session_state.get("last_analysis_time")
     _now  = time.time()
-    if not _last or (_now - _last) >= 114:   # 95% de 120s
+    if not _last or (_now - _last) >= 171:   # 95% de 180s
         st.rerun()
 
 _auto_refresh_fragment()

@@ -1,7 +1,7 @@
 """
 background_worker.py — Análisis autónomo 24/7 sin usuarios conectados.
 
-Ciclo cada 5 minutos:
+Ciclo cada 3 minutos:
   1. Señal rápida EUR/USD via yfinance (precio + EMA + RSI + régimen)
   2. Snapshot → DB (para que el usuario vea datos frescos al entrar)
   3. Observación de mercado → AI pattern mining
@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 _log = logging.getLogger("smc.bg")
 
-_CYCLE_SECS   = 300    # 5 minutos
+_CYCLE_SECS   = 180    # 3 minutos
 _STARTED      = False
 _LOCK         = threading.Lock()
 
