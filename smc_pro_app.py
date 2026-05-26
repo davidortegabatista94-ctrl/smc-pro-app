@@ -1832,7 +1832,7 @@ def _build_hourly_telegram_message(
             _entry_block = "\n⏸️ *Score bajo — sin entrada recomendada ahora*"
 
         msg = (
-            f"⚡ *SMC Pro — Resumen Horario*\n"
+            f"⚡ *SMC Pro — Resumen 2h*\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"🕐 {_now_str} | {win_label}\n"
             f"💱 EUR/USD: {_price_str}\n"
@@ -1915,6 +1915,50 @@ def _build_hourly_telegram_message(
             )
 
     return msg
+
+
+def _build_urgent_telegram_message(signal: dict, score: int, reason: str) -> str:
+    """Mensaje urgente cuando se detecta oportunidad o evento importante."""
+    from datetime import timezone as _tz
+    _now_utc = datetime.now(_tz.utc)
+    _now_es  = _now_utc + timedelta(hours=UTC_OFFSET_SPAIN)
+    _now_str = _now_es.strftime("%H:%M (España)")
+    _price   = signal.get("price")
+    _dir     = signal.get("final_signal", "N/A")
+    _entry   = signal.get("entry") or _price
+    _sl      = signal.get("stop_loss") or signal.get("sl")
+    _tp      = signal.get("take_profit") or signal.get("tp")
+    _regime  = signal.get("regime") or signal.get("kb_regime_label", "N/A")
+    _strat   = signal.get("strategy") or signal.get("kb_best_strategy", "")
+    _price_s = f"`{_price:.5f}`" if _price else "N/A"
+
+    _entry_block = ""
+    if _entry and _sl and _tp:
+        _tp_p = abs(_tp - _entry) / PIP
+        _sl_p = abs(_entry - _sl) / PIP
+        _rr   = _tp_p / _sl_p if _sl_p else 0
+        _entry_block = (
+            f"\n━━━━━━━━━━━━━━━━━━\n"
+            f"🔑 *Entrada sugerida:*\n"
+            f"  Precio: `{_entry:.5f}`\n"
+            f"  SL: `{_sl:.5f}` (-{_sl_p:.1f}p)\n"
+            f"  TP: `{_tp:.5f}` (+{_tp_p:.1f}p)\n"
+            f"  R:R 1:{_rr:.1f}"
+        )
+
+    return (
+        f"🚨 *SMC Pro — ALERTA IMPORTANTE*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {_now_str}\n"
+        f"💱 EUR/USD: {_price_s}\n"
+        f"📊 Score: *{score}/100*\n"
+        f"🎯 Señal: *{_dir}*\n"
+        f"📈 Régimen: {_regime}{(' | ' + _strat) if _strat else ''}\n"
+        f"⚠️ *Motivo:* {reason}"
+        f"{_entry_block}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ _Solo informativo. Usa siempre SL._"
+    )
 
 
 # ============================================
@@ -5542,8 +5586,8 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
     st.markdown("---")
     st.caption("⚠️ Solo informativo. No es consejo financiero.")
 
-# ── Botón ─────────────────────────────────────────────────────────────────────
-run_analysis = st.button("🔍 ANALIZAR MERCADO", type="primary", use_container_width=True)
+# ── Sin botón: análisis automático cada 2 minutos, invisible para el usuario ──
+run_analysis = False
 
 # Auto-refresh fijo: cada 2 minutos, completamente invisible para el usuario
 refresh_secs = 120
@@ -5792,7 +5836,7 @@ if st.session_state.analysis_executed:
                 _last_tg_dt = datetime.fromisoformat(_last_tg)
                 if not _last_tg_dt.tzinfo:
                     _last_tg_dt = _last_tg_dt.replace(tzinfo=_tz2.utc)
-                _should_tg = (datetime.now(_tz2.utc) - _last_tg_dt).total_seconds() >= 3600
+                _should_tg = (datetime.now(_tz2.utc) - _last_tg_dt).total_seconds() >= 7200
             if _should_tg:
                 _in_win, _win_lbl, _ = get_trading_window_info()
                 _tg_msg = _build_hourly_telegram_message(
@@ -5815,6 +5859,32 @@ if st.session_state.analysis_executed:
                     _db.set_setting("last_hourly_telegram", datetime.now(_tz2.utc).isoformat())
         except Exception as _tg_err:
             logging.warning("Hourly telegram error: %s", _tg_err)
+
+        # ── Alerta urgente: señal fuerte o evento importante ──────────────────
+        try:
+            _last_urg = _db.get_setting("last_urgent_telegram")
+            _urg_ok = True
+            if _last_urg:
+                _urg_dt = datetime.fromisoformat(_last_urg)
+                if not _urg_dt.tzinfo:
+                    _urg_dt = _urg_dt.replace(tzinfo=_tz2.utc)
+                _urg_ok = (datetime.now(_tz2.utc) - _urg_dt).total_seconds() >= 3600
+            _in_win_u, _, _ = get_trading_window_info()
+            _is_urgent = False
+            _urg_why = ""
+            if _in_win_u and _urg_ok:
+                if int(_sig_s) >= 80:
+                    _is_urgent = True
+                    _urg_why = f"Score {int(_sig_s)}/100 — confluencia muy alta"
+                elif int(_sig_s) >= 65 and vol_spikes:
+                    _is_urgent = True
+                    _urg_why = f"Score {int(_sig_s)}/100 + spike de volumen ({vol_spikes[0].get('ratio', 0):.1f}x)"
+            if _is_urgent:
+                _urg_msg = _build_urgent_telegram_message(signal, int(_sig_s), _urg_why)
+                if send_telegram_raw(_urg_msg):
+                    _db.set_setting("last_urgent_telegram", datetime.now(_tz2.utc).isoformat())
+        except Exception as _ue:
+            logging.warning("Urgent telegram error: %s", _ue)
 
     # ── Macro context enrichment (FRED + Finnhub) ────────────────────────────
     if "macro_context" not in st.session_state:
