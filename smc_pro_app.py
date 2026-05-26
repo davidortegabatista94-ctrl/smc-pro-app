@@ -5461,21 +5461,6 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
         st.info("Sin operaciones registradas aún")
 
     st.markdown("---")
-    st.subheader("�🔄 Auto-actualización")
-    _refresh_opts = ["Desactivado", "1 minuto", "2 minutos", "5 minutos", "10 minutos"]
-    if "refresh_select" not in st.session_state:
-        st.session_state["refresh_select"] = "Desactivado"
-    refresh_option = st.selectbox(
-        "Refrescar cada:",
-        _refresh_opts,
-        key="refresh_select"
-    )
-    refresh_map  = {"Desactivado": 0, "1 minuto": 60, "2 minutos": 120,
-                    "5 minutos": 300, "10 minutos": 600}
-    refresh_secs = refresh_map[refresh_option]
-    if refresh_secs > 0: st.success(f"✅ Auto-refresh activo: cada {refresh_option}")
-    else:                st.info("Auto-refresh desactivado — pulsa el boton para analizar")
-    st.markdown("---")
     # ── Estado de la base de datos ────────────────────────────────────────────
     st.subheader("🗄️ Base de Datos")
     if _DB_OK:
@@ -5536,6 +5521,9 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
 
 # ── Botón ─────────────────────────────────────────────────────────────────────
 run_analysis = st.button("🔍 ANALIZAR MERCADO", type="primary", use_container_width=True)
+
+# Auto-refresh fijo: cada 2 minutos, completamente invisible para el usuario
+refresh_secs = 120
 
 # Guard de análisis: evita doble-trigger y asegura intervalo mínimo
 should_auto_refresh = False
@@ -7404,4 +7392,137 @@ def _advisor_call(user_msg: str, history: list, context: str, api_key: str) -> s
     except ImportError:
         return "⚠️ Paquete `groq` instalándose — espera 1 minuto y recarga la app."
 
-    _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamient
+    _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamiento, y los aprendizajes acumulados de todas vuestras conversaciones anteriores.
+
+Tu objetivo no es solo analizar — es convertirte en el mejor consejero posible para {current_user_name} adaptándote a su estilo, sus errores pasados y sus puntos fuertes.
+
+{context}
+
+INSTRUCCIONES:
+{current_user_name} compartirá su visión/tesis. Analízala contra los datos de la app y su historial personal. Responde SIEMPRE con esta estructura:
+
+📊 **TU VISIÓN ENTENDIDA**
+Resumir lo que propone {current_user_name} en 1-2 frases.
+
+✅ **POR QUÉ SÍ** (confluencias a favor)
+Argumentos que respaldan la visión: backtest histórico (18+ años), señal actual de la app, técnico (EMA/RSI/MACD), fundamental (BCE/Fed/macro), patrones del usuario si aplican. Cita profit factors y win rates.
+
+❌ **POR QUÉ NO** (riesgos y contradicciones)
+Argumentos en contra: estrategias que fallen en este contexto, drawdowns históricos, alertas de la app, errores pasados de {current_user_name} si los hay en su historial.
+
+🎯 **VEREDICTO**
+Conclusión directa con nivel de convicción (ALTA/MEDIA/BAJA) y ajustes concretos (entrada, SL, TP, timing). Si detectas un patrón recurrente en {current_user_name}, menciónalo.
+
+🧠 **APRENDIZAJE** (solo si hay algo nuevo)
+En 1 frase: qué nuevo insight has extraído de esta conversación sobre el mercado o sobre {current_user_name}.
+
+REGLAS:
+- Responde en español, tutea a {current_user_name}
+- Sé cuantitativo — cita datos concretos del backtest como evidencia
+- Usa el historial real del usuario cuando sea relevante
+- Máximo 450 palabras en total
+- Si los datos de la app aún no están cargados (N/A), indícalo y razona con lo que tengas"""
+
+    _messages = [{"role": "system", "content": _system}]
+    for _h in history[-8:]:
+        _messages.append({"role": _h["role"], "content": _h["content"]})
+    _messages.append({"role": "user", "content": user_msg})
+
+    try:
+        _client = _Groq(api_key=api_key)
+        _resp = _client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=_messages,
+            max_tokens=1200,
+            temperature=0.4,
+        )
+        return _resp.choices[0].message.content
+    except Exception as _e:
+        return f"⚠️ Error al llamar a Groq: {_e}"
+
+
+# Mostrar historial de conversación
+for _msg in st.session_state.advisor_chat:
+    _av = "👤" if _msg["role"] == "user" else "🧠"
+    with st.chat_message(_msg["role"], avatar=_av):
+        st.markdown(_msg["content"])
+
+# Input del chat
+_chat_prompt = st.chat_input(
+    "Ej: Creo que el EUR/USD va a subir porque el BCE está hawkish y el DXY está cayendo..."
+)
+if _chat_prompt:
+    if not _ant_key:
+        st.error("⚠️ Configura la GROQ_API_KEY primero (ver configuración arriba).")
+    else:
+        with st.chat_message("user", avatar="👤"):
+            st.markdown(_chat_prompt)
+        st.session_state.advisor_chat.append({"role": "user", "content": _chat_prompt})
+        if _DB_OK:
+            try:
+                _db.save_chat_message(
+                    st.session_state.advisor_session_id, "user",
+                    _chat_prompt, user_id=current_user
+                )
+            except Exception:
+                pass
+
+        with st.chat_message("assistant", avatar="🧠"):
+            with st.spinner(f"Analizando tu visión, {current_user_name}..."):
+                _ctx_snap  = _advisor_context()
+                _ai_answer = _advisor_call(
+                    _chat_prompt,
+                    st.session_state.advisor_chat[:-1],
+                    _ctx_snap,
+                    _ant_key,
+                )
+            st.markdown(_ai_answer)
+        st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})
+        if _DB_OK:
+            try:
+                _db.save_chat_message(
+                    st.session_state.advisor_session_id, "assistant",
+                    _ai_answer, user_id=current_user
+                )
+            except Exception:
+                pass
+        # Auto-aprendizaje: extraer insight y guardar en ai_memory
+        if _DB_OK and _ant_key:
+            try:
+                _lesson = _extract_lesson(_chat_prompt, _ai_answer, _ant_key)
+                if _lesson:
+                    _db.save_ai_memory(
+                        current_user, "insight",
+                        f"Chat {datetime.now().strftime('%Y-%m-%d')}",
+                        _lesson, 0.7, "chat",
+                    )
+            except Exception:
+                pass
+
+if st.session_state.advisor_chat:
+    if st.button("🗑️ Limpiar conversación", key="_advisor_clear"):
+        if _DB_OK:
+            try:
+                _db.clear_chat_history(
+                    st.session_state.advisor_session_id, user_id=current_user
+                )
+            except Exception:
+                pass
+        st.session_state.advisor_chat = []
+        st.session_state[f"advisor_chat_{current_user}"] = []
+        st.rerun()
+
+st.markdown("---")
+st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
+
+# ── Auto-rerun invisible cada 2 minutos ───────────────────────────────────────
+st.session_state["_refresh_secs_live"] = 120
+
+@st.fragment(run_every="1s")
+def _auto_refresh_fragment():
+    _last = st.session_state.get("last_analysis_time")
+    _now  = time.time()
+    if not _last or (_now - _last) >= 114:   # 95% de 120s
+        st.rerun()
+
+_auto_refresh_fragment()
