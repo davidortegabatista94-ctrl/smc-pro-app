@@ -455,6 +455,71 @@ _EURUSD_CACHE = {}
 _EURUSD_CACHE_TTL = timedelta(seconds=30)
 
 # ============================================
+# TRADINGVIEW — PRECIO E INDICADORES EN TIEMPO REAL
+# ============================================
+_TV_CACHE: dict = {}
+_TV_CACHE_TTL = timedelta(seconds=30)
+
+def get_tv_data(symbol: str = "EURUSD", tf: str = "1h") -> dict:
+    """Precio e indicadores en tiempo real desde TradingView (sin MT5, sin OANDA)."""
+    cache_key = f"{symbol}_{tf}"
+    cached = _TV_CACHE.get(cache_key)
+    if cached:
+        ts, data = cached
+        if datetime.now() - ts < _TV_CACHE_TTL:
+            return data
+    try:
+        from tradingview_ta import TA_Handler, Interval
+        _tf_map = {
+            "1m": Interval.INTERVAL_1_MINUTE,
+            "5m": Interval.INTERVAL_5_MINUTES,
+            "15m": Interval.INTERVAL_15_MINUTES,
+            "30m": Interval.INTERVAL_30_MINUTES,
+            "1h": Interval.INTERVAL_1_HOUR,
+            "4h": Interval.INTERVAL_4_HOURS,
+            "1d": Interval.INTERVAL_1_DAY,
+        }
+        handler = TA_Handler(
+            symbol=symbol,
+            screener="forex",
+            exchange="FX_IDC",
+            interval=_tf_map.get(tf, Interval.INTERVAL_1_HOUR),
+        )
+        a   = handler.get_analysis()
+        ind = a.indicators
+        result = {
+            "price":        ind.get("close"),
+            "open":         ind.get("open"),
+            "high":         ind.get("high"),
+            "low":          ind.get("low"),
+            "change_pct":   ind.get("change"),
+            "rsi":          ind.get("RSI"),
+            "rsi14":        ind.get("RSI[1]"),
+            "ema20":        ind.get("EMA20"),
+            "ema50":        ind.get("EMA50"),
+            "ema200":       ind.get("EMA200"),
+            "macd":         ind.get("MACD.macd"),
+            "macd_signal":  ind.get("MACD.signal"),
+            "bb_upper":     ind.get("BB.upper"),
+            "bb_lower":     ind.get("BB.lower"),
+            "atr":          ind.get("ATR"),
+            "stoch_k":      ind.get("Stoch.K"),
+            "stoch_d":      ind.get("Stoch.D"),
+            "adx":          ind.get("ADX"),
+            "recommendation": a.summary.get("RECOMMENDATION", "NEUTRAL"),
+            "buy":          a.summary.get("BUY", 0),
+            "sell":         a.summary.get("SELL", 0),
+            "neutral":      a.summary.get("NEUTRAL", 0),
+            "source":       "TradingView",
+        }
+        _TV_CACHE[cache_key] = (datetime.now(), result)
+        return result
+    except Exception as e:
+        logging.debug("get_tv_data error: %s", e)
+        return {}
+
+
+# ============================================
 # MT5 — CONEXIÓN
 # ============================================
 _mt5_connected = False
@@ -695,25 +760,34 @@ def get_mt5_candles(symbol=SYMBOL, tf="1h", count=200):
         return pd.DataFrame()
 
 def get_mt5_tick(symbol=SYMBOL):
-    # Servicio remoto primero (Railway/OANDA — sin retardo)
+    # 1. Servicio remoto (Railway/OANDA)
     if _mt5_service_available():
         return _mt5_service_tick(symbol)
-    # MT5 local (Windows)
-    if not mt5_connect():
-        return None
-    try:
-        tick = mt5.symbol_info_tick(symbol)
-        if tick is None:
-            return None
+    # 2. MT5 local (Windows)
+    if mt5_connect():
+        try:
+            tick = mt5.symbol_info_tick(symbol)
+            if tick:
+                return {
+                    "bid":         tick.bid,
+                    "ask":         tick.ask,
+                    "spread_pips": round((tick.ask - tick.bid) / PIP, 1),
+                    "time":        datetime.fromtimestamp(tick.time),
+                }
+        except Exception as e:
+            logging.warning(f"get_mt5_tick local: {e}")
+    # 3. TradingView (sin necesidad de MT5 ni OANDA)
+    tv = get_tv_data(symbol.replace("m", ""), "1h")
+    if tv.get("price"):
+        p = tv["price"]
         return {
-            "bid":         tick.bid,
-            "ask":         tick.ask,
-            "spread_pips": round((tick.ask - tick.bid) / PIP, 1),
-            "time":        datetime.fromtimestamp(tick.time)
+            "bid":         p,
+            "ask":         p,
+            "spread_pips": 0.0,
+            "time":        datetime.now(),
+            "source":      "TradingView",
         }
-    except Exception as e:
-        logging.warning(f"get_mt5_tick: {e}")
-        return None
+    return None
 
 def get_mt5_account():
     # Servicio remoto primero
@@ -2521,12 +2595,15 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
     _now_es    = _now_utc + __import__("datetime").timedelta(hours=UTC_OFFSET_SPAIN)
     _htime     = _now_utc.strftime("%H:%M UTC")
 
-    # Live price — MT5 local o servicio remoto (OANDA)
+    # Live price — TradingView (siempre disponible, sin MT5 ni OANDA)
     try:
-        _hdr_tick = get_mt5_tick(SYMBOL) if (connected or _mt5_service_available()) else None
-        _live_px  = _hdr_tick["bid"] if _hdr_tick else None
+        _hdr_tv  = get_tv_data(SYMBOL, "1h")
+        _live_px = _hdr_tv.get("price")
+        if _live_px is None and (connected or _mt5_service_available()):
+            _hdr_tick = get_mt5_tick(SYMBOL)
+            _live_px  = _hdr_tick["bid"] if _hdr_tick else None
     except Exception:
-        _live_px  = None
+        _live_px = None
     _live_px_str = f"{_live_px:.5f}" if _live_px is not None else "—"
     _live_dt_str = _now_es.strftime("%d/%m/%Y  %H:%M:%S")
 
@@ -3319,57 +3396,69 @@ if st.session_state.analysis_executed:
         except Exception as _he:
             logging.warning("Self-heal error: %s", _he)
 
-    # ── Panel MT5 ─────────────────────────────────────────────────────────────
-    st.markdown('<div id="sec-precio"></div>', unsafe_allow_html=True)
-    if tick:
-        st.markdown("---")
-        st.subheader("📡 MT5 — Precio en Tiempo Real")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Bid", f"{tick['bid']:.5f}")
-        m2.metric("Ask", f"{tick['ask']:.5f}")
-        sp = tick["spread_pips"]
-        m3.metric("Spread", f"{sp} pips",
-                  delta="✅ OK" if sp < 1.5 else "⚠️ Alto")
-        m4.metric("Precio MT5", f"{tick['bid']:.5f}", help=tick["time"].strftime("%H:%M:%S"))
-        if sp > 2:
-            st.warning(f"⚠️ Spread de {sp} pips — espera que baje antes de entrar")
-
-    # ── Precio EUR/USD (sección dedicada) ────────────────────────────────────
+    # ── EUR/USD — Precio e indicadores desde TradingView ─────────────────────
     st.markdown('<div id="sec-eurusd"></div>', unsafe_allow_html=True)
     st.markdown("---")
     st.subheader("💶 EUR/USD — Precio Actual")
 
-    _sig_px  = signal.get("price")   # precio del análisis (yfinance) — siempre disponible
-    _px_bid  = tick["bid"]         if tick else _sig_px
-    _px_ask  = tick["ask"]         if tick else None
-    _px_spr  = tick["spread_pips"] if tick else None
-    _rsi_v   = signal.get("rsi")
-    _ema21_v = signal.get("ema21", 0)
-    _ema50_v = signal.get("ema50", 0)
-    _atr_v   = signal.get("atr_1h_pips")
-    _src_lbl = "MT5 Bid" if tick else ("EUR/USD" if _sig_px else "Sin datos")
-    if _ema21_v and _ema50_v:
-        if _ema21_v > _ema50_v:
-            _trend_lbl, _trend_col = "▲ Alcista", "#3fb950"
-        elif _ema21_v < _ema50_v:
-            _trend_lbl, _trend_col = "▼ Bajista", "#f85149"
-        else:
-            _trend_lbl, _trend_col = "→ Lateral", "#e3b341"
-    else:
-        _trend_lbl, _trend_col = "— Sin datos", "#8b949e"
+    _tv = get_tv_data("EURUSD", "1h")
+    _tv_px   = _tv.get("price") or signal.get("price") or (tick["bid"] if tick else None)
+    _tv_chg  = _tv.get("change_pct")
+    _tv_rsi  = _tv.get("rsi")    or signal.get("rsi")
+    _tv_ema20= _tv.get("ema20")  or signal.get("ema21")
+    _tv_ema50= _tv.get("ema50")  or signal.get("ema50")
+    _tv_atr  = _tv.get("atr")    or signal.get("atr_1h_pips")
+    _tv_adx  = _tv.get("adx")
+    _tv_macd = _tv.get("macd")
+    _tv_macd_sig = _tv.get("macd_signal")
+    _tv_rec  = _tv.get("recommendation", "")
+    _tv_buy  = _tv.get("buy", 0)
+    _tv_sell = _tv.get("sell", 0)
+    _tv_src  = "📡 TradingView" if _tv.get("source") == "TradingView" else ("MT5" if tick else "Análisis")
 
-    _pc1, _pc2, _pc3, _pc4, _pc5 = st.columns(5)
-    _pc1.metric(_src_lbl, f"{_px_bid:.5f}" if _px_bid is not None else "—")
-    _pc2.metric("Ask", f"{_px_ask:.5f}" if _px_ask is not None else "—")
-    _pc3.metric("Spread", f"{_px_spr} pips" if _px_spr is not None else "—",
-                delta=("✅ OK" if _px_spr and _px_spr < 1.5 else "⚠️ Alto") if _px_spr is not None else None)
-    _pc4.metric("RSI 1H", f"{_rsi_v:.1f}" if _rsi_v is not None else "—")
-    _pc5.metric("ATR 1H", f"{_atr_v} pips" if _atr_v else "—")
+    # Color del precio según cambio
+    _chg_col = "#3fb950" if (_tv_chg or 0) >= 0 else "#f85149"
+    _chg_str = f"{_tv_chg:+.4f}%" if _tv_chg is not None else ""
+
+    # Fila 1: precio principal + variación + recomendación TV
+    _r1c1, _r1c2, _r1c3, _r1c4 = st.columns([2, 1, 1, 1])
+    _r1c1.metric(
+        f"EUR/USD ({_tv_src})",
+        f"{_tv_px:.5f}" if _tv_px else "—",
+        delta=_chg_str if _chg_str else None,
+    )
+    _rec_icon = {"STRONG_BUY": "🟢🟢", "BUY": "🟢", "NEUTRAL": "⚪",
+                 "SELL": "🔴", "STRONG_SELL": "🔴🔴"}.get(_tv_rec, "⚪")
+    _r1c2.metric("TV Señal", f"{_rec_icon} {_tv_rec.replace('_', ' ')}" if _tv_rec else "—")
+    _r1c3.metric("Compradores", f"{_tv_buy}" if _tv_buy else "—")
+    _r1c4.metric("Vendedores", f"{_tv_sell}" if _tv_sell else "—")
+
+    # Fila 2: indicadores técnicos
+    _r2c1, _r2c2, _r2c3, _r2c4, _r2c5 = st.columns(5)
+    _r2c1.metric("RSI 14", f"{float(_tv_rsi):.1f}" if _tv_rsi is not None else "—",
+                 delta=("Sobrecompra ⚠️" if (_tv_rsi or 50) > 70 else ("Sobreventa ⚠️" if (_tv_rsi or 50) < 30 else None)))
+    _r2c2.metric("EMA 20", f"{float(_tv_ema20):.5f}" if _tv_ema20 else "—")
+    _r2c3.metric("EMA 50", f"{float(_tv_ema50):.5f}" if _tv_ema50 else "—")
+    _r2c4.metric("ADX", f"{float(_tv_adx):.1f}" if _tv_adx else "—",
+                 help="ADX > 25 = tendencia fuerte")
+    _r2c5.metric("ATR 1H", f"{float(_tv_atr):.1f} pips" if _tv_atr else "—")
+
+    # Tendencia EMA y MACD
+    _ema_up  = (_tv_ema20 and _tv_ema50 and _tv_ema20 > _tv_ema50)
+    _ema_dn  = (_tv_ema20 and _tv_ema50 and _tv_ema20 < _tv_ema50)
+    _macd_up = (_tv_macd and _tv_macd_sig and _tv_macd > _tv_macd_sig)
+    _trend_lbl = "▲ Alcista" if _ema_up else ("▼ Bajista" if _ema_dn else "→ Lateral")
+    _trend_col = "#3fb950" if _ema_up else ("#f85149" if _ema_dn else "#e3b341")
+    _macd_lbl  = "▲ Alcista" if _macd_up else ("▼ Bajista" if (_tv_macd and _tv_macd_sig) else "—")
+    _macd_col  = "#3fb950" if _macd_up else "#f85149"
     st.markdown(
-        f'<div style="display:inline-block;background:#161b22;border:1px solid #30363d;'
-        f'border-radius:8px;padding:7px 18px;margin-top:4px">'
-        f'<span style="color:#8b949e;font-size:12px">Tendencia EMA21/50 · </span>'
-        f'<span style="color:{_trend_col};font-weight:700;font-size:13px">{_trend_lbl}</span>'
+        f'<div style="display:flex;gap:12px;margin-top:6px">'
+        f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px 16px">'
+        f'<span style="color:#8b949e;font-size:11px">EMA20/50 · </span>'
+        f'<span style="color:{_trend_col};font-weight:700;font-size:13px">{_trend_lbl}</span></div>'
+        f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px 16px">'
+        f'<span style="color:#8b949e;font-size:11px">MACD · </span>'
+        f'<span style="color:{_macd_col};font-weight:700;font-size:13px">{_macd_lbl}</span></div>'
         f'</div>',
         unsafe_allow_html=True,
     )

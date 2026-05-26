@@ -10,3 +10,4 @@ groq>=0.4.0
 psycopg2-binary>=2.9.0
 plotly>=5.15.0
 openai>=1.0.0
+tradingview-ta>=3.3.0
