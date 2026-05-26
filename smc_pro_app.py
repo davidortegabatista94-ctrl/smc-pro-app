@@ -4982,6 +4982,8 @@ else:
         st.session_state.last_analysis_time = None
     if "analysis_executed" not in st.session_state:
         st.session_state.analysis_executed = False
+    if "chart_tf" not in st.session_state:
+        st.session_state.chart_tf = "1H"
     if "backtest_result" not in st.session_state:
         st.session_state.backtest_result = None
     if "strategy_comparison" not in st.session_state:
@@ -6224,29 +6226,77 @@ if st.session_state.analysis_executed:
         st.write("**Desglose del score:**")
         for r in score_reasons: st.write(f"• {r}")
 
-    # ── GRÁFICO TRADINGVIEW ───────────────────────────────────────────────────
+    # ── GRÁFICO ───────────────────────────────────────────────────────────────
     st.markdown('<div id="sec-chart"></div>', unsafe_allow_html=True)
     st.markdown("---")
-    st.subheader("📈 Gráfico EUR/USD 1H")
+
+    # ── Selector de timeframe ─────────────────────────────────────────────────
+    _tf_cols = st.columns([1, 1, 1, 6])
+    if _tf_cols[0].button("15 min", use_container_width=True,
+                          type="primary" if st.session_state.chart_tf == "15M" else "secondary"):
+        st.session_state.chart_tf = "15M"; st.rerun()
+    if _tf_cols[1].button("1H",     use_container_width=True,
+                          type="primary" if st.session_state.chart_tf == "1H"  else "secondary"):
+        st.session_state.chart_tf = "1H";  st.rerun()
+    if _tf_cols[2].button("4H",     use_container_width=True,
+                          type="primary" if st.session_state.chart_tf == "4H"  else "secondary"):
+        st.session_state.chart_tf = "4H";  st.rerun()
+
+    _tv_tf_map  = {"15M": "15",  "1H": "60",  "4H": "240"}
+    _label_map  = {"15M": "15 min", "1H": "1H", "4H": "4H"}
+    _tv_interval = _tv_tf_map[st.session_state.chart_tf]
+    st.subheader(f"📈 EUR/USD — {_label_map[st.session_state.chart_tf]}")
+
+    # ── Widget TradingView (tiempo real) ──────────────────────────────────────
+    import streamlit.components.v1 as _stc_chart
+    _stc_chart.html(f"""
+<div class="tradingview-widget-container" style="height:500px;width:100%">
+  <div id="tv_chart_widget" style="height:100%;width:100%"></div>
+  <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
+  <script type="text/javascript">
+  new TradingView.widget({{
+    "autosize": true,
+    "symbol": "FX:EURUSD",
+    "interval": "{_tv_interval}",
+    "timezone": "Europe/Madrid",
+    "theme": "dark",
+    "style": "1",
+    "locale": "es",
+    "toolbar_bg": "#0d1117",
+    "enable_publishing": false,
+    "hide_top_toolbar": false,
+    "hide_legend": false,
+    "save_image": false,
+    "container_id": "tv_chart_widget",
+    "studies": ["RSI@tv-basicstudies", "MACD@tv-basicstudies"],
+    "show_popup_button": false
+  }});
+  </script>
+</div>""", height=510)
+
+    # ── Gráfico Plotly con indicadores SMC ───────────────────────────────────
+    _df_chart_map = {"15M": df_15, "1H": df_1h, "4H": get_eurusd_data("4h")}
+    _df_chart = _df_chart_map.get(st.session_state.chart_tf, df_1h)
     _chart_trades = []
     if _DB_OK:
         try:
             _chart_trades = _db.load_trades(user_id=current_user, limit=30)
         except Exception:
             pass
-    _render_trading_chart(
-        df=df_1h,
-        signal=signal or {},
-        score=score,
-        session=session,
-        liq_levels=liq_levels or [],
-        poc=poc,
-        vol_spikes=vol_spikes or [],
-        market_structures=market_structures or {},
-        stop_hunts=stop_hunts or [],
-        news_items=(signal or {}).get("news", []),
-        trades_history=_chart_trades,
-    )
+    with st.expander("📊 Gráfico SMC con niveles (Plotly)", expanded=False):
+        _render_trading_chart(
+            df=_df_chart,
+            signal=signal or {},
+            score=score,
+            session=session,
+            liq_levels=liq_levels or [],
+            poc=poc,
+            vol_spikes=vol_spikes or [],
+            market_structures=market_structures or {},
+            stop_hunts=stop_hunts or [],
+            news_items=(signal or {}).get("news", []),
+            trades_history=_chart_trades,
+        )
 
     # ── Strategy DNA Panel ────────────────────────────────────────────────────
     st.markdown('<div id="sec-dna"></div>', unsafe_allow_html=True)
