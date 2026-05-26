@@ -152,7 +152,8 @@ _BT_CACHE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".bt_c
 try:
     import db as _db
     _DB_OK = True
-    _db.ensure_tables()  # auto-create tables on first run
+    _db.ensure_tables()         # auto-create tables on first run
+    _db.purge_bad_self_improvements()  # remove stale <think> / error entries
 except ImportError:
     _DB_OK = False
 
@@ -4706,13 +4707,22 @@ with _sim_col2:
     # ── Historial de mejoras ──────────────────────────────────────────────────
     if _DB_OK:
         try:
-            _improvements = _db.get_self_improvements(limit=5)
+            _improvements = _db.get_self_improvements(limit=20)
+            # Skip garbage entries: AI errors and raw <think> blocks
+            _improvements = [
+                _i for _i in _improvements
+                if not str(_i.get("reason", "")).startswith("⚠️ Todos los proveedores")
+                and not str(_i.get("reason", "")).strip().startswith("<think>")
+                and len(str(_i.get("reason", "")).strip()) > 20
+            ][:5]
             if _improvements:
                 st.markdown("**📋 Últimas auto-mejoras aplicadas**")
                 for _imp in _improvements:
                     _ic = "✅" if _imp.get("applied") else "📝"
                     _ts = str(_imp.get("created_at", ""))[:16]
                     st.caption(f"{_ic} {_ts} — {str(_imp.get('reason',''))[:80]}")
+            else:
+                st.caption("Sin mejoras registradas aún.")
         except Exception:
             pass
 
@@ -4872,7 +4882,7 @@ def _advisor_context() -> str:
 def _extract_lesson(user_msg: str, ai_response: str, api_key: str) -> str | None:
     """Extract a 1-sentence learning from a conversation. Returns None if nothing new."""
     try:
-        from groq import Groq as _Groq
+        from ai_engine import call_ai as _call_ai
         _prompt = (
             f"Conversación de trading EUR/USD:\n"
             f"USUARIO: {user_msg[:250]}\n"
@@ -4881,25 +4891,19 @@ def _extract_lesson(user_msg: str, ai_response: str, api_key: str) -> str | None
             f"más importante que el ADVISOR ha identificado sobre este usuario o mercado. "
             f"Si no hay nada nuevo o relevante que aprender, responde exactamente: NONE"
         )
-        _client = _Groq(api_key=api_key)
-        _resp = _client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{"role": "user", "content": _prompt}],
-            max_tokens=160,
-            temperature=0.2,
-        )
-        _r = _resp.choices[0].message.content.strip()
-        return None if _r.upper().startswith("NONE") or len(_r) < 12 else _r
+        _r = _call_ai([{"role": "user", "content": _prompt}],
+                      max_tokens=160, temperature=0.2).strip()
+        return None if _r.startswith("⚠️") or _r.upper().startswith("NONE") or len(_r) < 12 else _r
     except Exception:
         return None
 
 
-def _advisor_call(user_msg: str, history: list, context: str, api_key: str) -> str:
-    """Sends user message to Groq (LLaMA 3.3 70B) and returns the advisor response."""
-    try:
-        from groq import Groq as _Groq
-    except ImportError:
-        return "⚠️ Paquete `groq` instalándose — espera 1 minuto y recarga la app."
+def _advisor_call(user_msg: str, history: list, context: str) -> str:
+    """
+    Send user message to the best available AI provider (Groq → Cerebras → Zhipu → Claude).
+    Falls back to Claude (Anthropic) automatically if the free providers fail.
+    """
+    from ai_engine import call_ai as _call_ai
 
     _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamiento, y los aprendizajes acumulados de todas vuestras conversaciones anteriores.
 
@@ -4937,17 +4941,7 @@ REGLAS:
         _messages.append({"role": _h["role"], "content": _h["content"]})
     _messages.append({"role": "user", "content": user_msg})
 
-    try:
-        _client = _Groq(api_key=api_key)
-        _resp = _client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=_messages,
-            max_tokens=1200,
-            temperature=0.4,
-        )
-        return _resp.choices[0].message.content
-    except Exception as _e:
-        return f"⚠️ Error al llamar a Groq: {_e}"
+    return _call_ai(_messages, max_tokens=1200, temperature=0.4, prefer_quality=True)
 
 
 # Mostrar historial de conversación
@@ -4983,7 +4977,6 @@ if _chat_prompt:
                     _chat_prompt,
                     st.session_state.advisor_chat[:-1],
                     _ctx_snap,
-                    _ant_key,
                 )
             st.markdown(_ai_answer)
         st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})

@@ -1095,6 +1095,30 @@ def get_self_improvements(limit: int = 20) -> list[dict]:
         return []
 
 
+def purge_bad_self_improvements() -> int:
+    """Delete garbage self-improvement records (AI errors and raw <think> blocks)."""
+    if not _DB_URL:
+        return 0
+    try:
+        conn = _get_conn()
+        cur = conn.cursor()
+        cur.execute(
+            """DELETE FROM self_improvements
+               WHERE reason LIKE '⚠️ Todos los proveedores%'
+                  OR reason LIKE '<think>%'
+                  OR reason LIKE '%<think>%'
+                  OR LENGTH(TRIM(reason)) < 20"""
+        )
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        _log.info("purge_bad_self_improvements: deleted %d rows", deleted)
+        return deleted
+    except Exception as e:
+        _log.warning("purge_bad_self_improvements error: %s", e)
+        return 0
+
+
 def get_last_snapshot() -> dict | None:
     """Return the most recent market snapshot (from any source including bg worker)."""
     if not _DB_URL:
