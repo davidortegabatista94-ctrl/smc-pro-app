@@ -1,11 +1,19 @@
 @echo off
 cd /d "%~dp0"
-echo Iniciando SMC Pro App...
-echo Abre tu navegador en: http://localhost:8501
+echo.
+echo  ================================
+echo   SMC Pro - MT5 Bridge Local
+echo  ================================
+echo  Servidor Railway: https://smc-direct-production.up.railway.app
+echo  Visor local:      http://localhost:8501
+echo.
+echo  Abriendo navegador en 3 segundos...
+timeout /t 3 /nobreak >nul
+start "" "http://localhost:8501"
 echo.
 if exist ".venv\Scripts\streamlit.exe" (
-    .venv\Scripts\streamlit.exe run smc_pro_app.py
+    .venv\Scripts\streamlit.exe run local_viewer.py --server.port=8501 --server.headless=true
 ) else (
-    python -m streamlit run smc_pro_app.py
+    python -m streamlit run local_viewer.py --server.port=8501 --server.headless=true
 )
 pause
