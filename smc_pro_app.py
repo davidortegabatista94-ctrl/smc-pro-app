@@ -2818,19 +2818,37 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
                     st.caption(f"📋 Credenciales guardadas para {current_user_name}: {_saved_mt5}")
                 st.info("ℹ️ Ingresa credenciales arriba o abre MT5")
         else:
-            if sys.platform != "win32":
+            # MT5 local no disponible — mostrar estado del servicio OANDA remoto
+            if _mt5_service_available():
+                _svc_h = mt5_service_health()
+                _svc_connected = _svc_h.get("mt5") == "connected"
+                if _svc_connected:
+                    st.success("✅ OANDA Service conectado")
+                    _svc_acct = mt5_service_account()
+                    if _svc_acct and "balance" in _svc_acct:
+                        st.markdown(
+                            f"**Servidor:** {_svc_acct.get('server', 'OANDA')}  \n"
+                            f"**Balance:** {float(_svc_acct.get('balance', 0)):.2f} {_svc_acct.get('currency', '')}  \n"
+                            f"**Equity:** {float(_svc_acct.get('equity', 0)):.2f} {_svc_acct.get('currency', '')}  \n"
+                            f"**Margen libre:** {float(_svc_acct.get('free_margin', 0)):.2f}"
+                        )
+                    else:
+                        st.caption("Conectado — sin datos de cuenta aún")
+                else:
+                    st.warning(
+                        f"⚠️ Servicio OANDA configurado pero no conectado.\n\n"
+                        f"Estado: `{_svc_h.get('status', 'desconocido')}`\n\n"
+                        "Comprueba que `OANDA_API_TOKEN` y `OANDA_ACCOUNT_ID` "
+                        "están configurados en Railway."
+                    )
+            elif sys.platform != "win32":
                 st.info(
-                    "ℹ️ **MT5 no disponible en servidor cloud (Linux)**\n\n"
-                    "MetaTrader5 solo funciona en **Windows**. En la versión web, "
-                    "la app opera en modo **análisis** (señales, backtest, alertas Telegram) "
-                    "sin ejecución automática de órdenes.\n\n"
-                    "Para ejecutar órdenes reales, instala la app localmente en tu PC con Windows."
+                    "ℹ️ **Sin conexión de trading configurada**\n\n"
+                    "Configura las variables de entorno en Railway:\n"
+                    "`MT5_SERVICE_URL` · `OANDA_API_TOKEN` · `OANDA_ACCOUNT_ID`"
                 )
             else:
-                st.warning(
-                    "⚠️ Paquete MetaTrader5 no instalado.\n\n"
-                    f"Ejecuta en tu terminal: `pip install MetaTrader5`"
-                )
+                st.warning("⚠️ Paquete MetaTrader5 no instalado.\n\nEjecuta: `pip install MetaTrader5`")
 
         symbol_input = st.text_input("Símbolo MT5", value=SYMBOL,
                                       help="Ej: EURUSD, EURUSDm, EURUSD.")
