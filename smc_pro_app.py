@@ -5097,6 +5097,7 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
     _hconn_dot = "●" if connected else "◐"
     _hconn_txt = "MT5 Live" if connected else "yfinance"
     _now_utc   = datetime.utcnow()
+    _now_es    = _now_utc + __import__("datetime").timedelta(hours=UTC_OFFSET_SPAIN)
     _htime     = _now_utc.strftime("%H:%M UTC")
 
     # Live price for the refresh indicator
@@ -5108,7 +5109,7 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
     except Exception:
         _live_px = None
     _live_px_str = f"{_live_px:.5f}" if _live_px else "—"
-    _live_dt_str = _now_utc.strftime("%d/%m/%Y  %H:%M:%S UTC")
+    _live_dt_str = _now_es.strftime("%d/%m/%Y  %H:%M:%S")
 
     st.markdown(f"""
 <div class="smc-header">
