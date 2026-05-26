@@ -55,6 +55,51 @@ import random
 import sys
 import importlib.util
 
+# ── Backend modules (pure logic, no Streamlit) ────────────────────────────────
+from backend.config import (
+    NEWS_API_KEY, SCALP_TP_PIPS, SCALP_SL_PIPS, SCALP_MAX_HOLD,
+    PIP, SYMBOL, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID,
+    USER_CONFIG_FILE, POSITION_FILE, TRADES_LOG_FILE, CACHE_FILE,
+    MIN_DEFINITIVE_SCORE, BOT_ENABLED, BOT_VOLUME, CACHE_DURATION,
+    UTC_OFFSET_SPAIN, _RAILWAY_URL,
+)
+from backend.indicators import (
+    scalar, last_scalar, flatten_columns,
+    interpret_dxy_signal, interpret_cot_for_signal,
+    detect_volume_spikes, detect_volume_trend, analyze_volume_profile,
+    get_volume_delta, get_cvd, detect_liquidity_levels,
+    calculate_confluence_score, score_label,
+    calc_scalp_levels, find_support_resistance,
+    detect_stop_hunt, detect_market_structure,
+    detect_volume_absorption, ai_candlestick_patterns, calculate_trend_strength,
+    calc_smart_tp_sl, ai_market_bias, estimate_impact,
+)
+from backend.strategies import (
+    run_backtest, run_full_backtest, _run_single_strategy,
+    run_strategy_comparison, run_longterm_comparison,
+)
+from backend.knowledge_base import (
+    load_knowledge_base, save_knowledge_base, update_kb,
+    kb_record_pending_signal, kb_evaluate_and_learn, kb_best_strategy_for_conditions,
+    _STRATEGY_META, _STRATEGY_REGIME_AFFINITY, _REGIME_LABELS, _REGIME_ICONS,
+)
+from backend.market_context import (
+    get_market_session, get_spain_hour, is_trading_window, get_trading_window_info,
+    get_economic_calendar, explain_market_context, detect_market_regime,
+    get_cot_data, interpret_cot_for_signal as _cot_for_signal_mc,
+)
+from backend.signals import (
+    load_cache, save_cache,
+    get_backtest_data, get_longterm_data_2008,
+    get_rss_news, get_news, analyze_consensus, analyze_news,
+    calculate_indicators, analyze_timeframe,
+    get_eurusd_data_yf, get_dxy_yf, get_dxy_combined,
+)
+from services.telegram import (
+    send_telegram_raw, send_telegram_alert,
+    _build_hourly_telegram_message, _build_urgent_telegram_message,
+)
+
 # Lazy-load MetaTrader5 / yfinance
 _mt5 = None
 _yf = None
