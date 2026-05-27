@@ -3903,42 +3903,14 @@ if st.session_state.analysis_executed:
                     f"Pips: {float(_ev.get('net_pips') or 0):+.1f}  |  "
                     f"{_ev.get('key_insight','')[:60]}"
                 )
-        # Manual evolution button
+        # Evolución automática — solo se muestra el estado, no hay botón
         _trades_since = 0
         if _DB_OK:
             try:
                 _trades_since = _db.count_trades_since_last_evolution()
             except Exception:
                 pass
-        st.caption(f"Trades desde última evolución: {_trades_since} / 8 mínimo")
-        if st.button("🧬 Evolucionar Estrategia Ahora", key="_evolve_btn"):
-            if not _AI_ENGINE_OK:
-                st.error("ai_engine no disponible")
-            else:
-                with st.spinner("Analizando trades y evolucionando estrategia..."):
-                    try:
-                        _evo_trades = _db.get_trades_for_evolution() if _DB_OK else []
-                        _new_dna = _ai_engine.evolve_strategy(_evo_trades, _active_dna)
-                        if _new_dna:
-                            _nv = _new_dna.get("version", _dna_v + 1)
-                            if _DB_OK:
-                                _db.save_strategy_dna(
-                                    version=_nv,
-                                    rules=_new_dna,
-                                    fitness=float(_new_dna.get("fitness") or 0),
-                                    trades_evaluated=int(_new_dna.get("trades_evaluated") or 0),
-                                    winrate=float(_new_dna.get("winrate") or 0),
-                                    net_pips=float(_new_dna.get("net_pips") or 0),
-                                    key_insight=str(_new_dna.get("key_insight") or "")[:200],
-                                )
-                            st.session_state.active_dna = _new_dna
-                            st.success(f"✅ DNA v{_nv} generado — WR aprendido: {float(_new_dna.get('winrate') or 0):.1f}%")
-                            st.info(f"💡 {_new_dna.get('key_insight','')}")
-                            st.rerun()
-                        else:
-                            st.warning("⚠️ Necesitas al menos 5 trades cerrados para evolucionar")
-                    except Exception as _ee:
-                        st.error(f"Error en evolución: {_ee}")
+        st.caption(f"🧬 Evolución automática · Trades desde última: {_trades_since}/8 · Corre automáticamente al llegar a 8")
 
     # ── Auto-evolución: cada 8 trades cerrados ────────────────────────────────
     if _AI_ENGINE_OK and _DB_OK and run_fresh_analysis:
@@ -4154,20 +4126,35 @@ if st.session_state.analysis_executed:
         else:
             st.info("⚪ Sin absorción institucional detectada")
 
-    # ── COT — Datos Institucionales ───────────────────────────────────────────
+    # ── COT — Datos Institucionales (auto-actualizados cada 6h) ─────────────
     st.markdown('<div id="sec-cot"></div>', unsafe_allow_html=True)
     st.markdown("---")
-    st.subheader("🏦 Datos Institucionales — COT Report (CFTC) + Grandes Inversores")
+    _cot_h1, _cot_h2 = st.columns([3, 1])
+    _cot_h1.subheader("🏦 Datos Institucionales — COT Report (CFTC) + Grandes Inversores")
+    _cot_h2.caption("🔄 Auto cada 6h")
+
+    # Cargar COT desde DB (guardado por background worker) o caché de memoria
+    cot = None
+    try:
+        if _DB_OK:
+            _cot_rows = _db.get_metrics(name="cot_data", limit=1) or []
+            if _cot_rows:
+                _cot_ts = str(_cot_rows[0].get("created_at", ""))[:16]
+                cot = (_cot_rows[0].get("context") or {}).get("data")
+                if cot:
+                    st.session_state.cot_data = cot  # actualizar session_state
+    except Exception:
+        pass
+    # Fallback a session_state
+    if not cot:
+        cot = st.session_state.get("cot_data")
+
     cot_col1, cot_col2 = st.columns([2, 1])
     with cot_col1:
-        if st.button("🔄 Actualizar COT Data", key="refresh_cot"):
-            with st.spinner("Descargando datos CFTC..."):
-                st.session_state.cot_data = get_cot_data()
-        elif st.session_state.cot_data is None:
-            with st.spinner("Cargando COT..."):
-                st.session_state.cot_data = get_cot_data()
-        cot = st.session_state.cot_data
         if cot:
+            _cot_ts_str = _cot_ts if 'cot' in dir() and _cot_ts else ""
+            if _cot_ts_str:
+                st.caption(f"Última actualización: {_cot_ts_str}")
             bias_color = "🟢" if cot["bias_direction"] == "LONG" else "🔴"
             st.markdown(
                 f"**Informe COT** — fecha: `{cot['date']}`  \n"
@@ -4183,7 +4170,7 @@ if st.session_state.analysis_executed:
             else:
                 st.info("⚪ COT neutral — posiciones equilibradas")
         else:
-            st.info("Sin datos COT disponibles (timeout o sin conexión CFTC)")
+            st.info("⏳ El servidor descargará el COT automáticamente (cada 6h). Primera carga pendiente.")
     with cot_col2:
         st.write("**¿Qué es el COT?**")
         st.caption(
@@ -4192,7 +4179,7 @@ if st.session_state.analysis_executed:
             "Si aumentan longs → institucionales apuestan al alza del EUR."
         )
         st.write("**Fuente:** CFTC (semanal, viernes)")
-        st.write("**Refresco:** 12h de caché")
+        st.write("**Refresco:** automático cada 6h")
 
     # ── IA — Motor de Bias ────────────────────────────────────────────────────
     st.markdown('<div id="sec-ia"></div>', unsafe_allow_html=True)
@@ -4291,18 +4278,25 @@ with bt_ctrl_l:
                 )
 
 with bt_ctrl_r:
-    # Cargar calendario económico
-    if st.button("📅 Cargar Calendario Económico", key="load_cal"):
-        with st.spinner("Obteniendo eventos EUR/USD esta semana..."):
-            cal = get_economic_calendar()
-        st.session_state.economic_calendar = cal
-        if cal:
-            st.success(f"✅ {len(cal)} eventos cargados "
-                       f"({sum(1 for e in cal if e.get('impact','').upper()=='HIGH')} de alto impacto)")
-        else:
-            st.info("Sin eventos esta semana o API no disponible.")
-    cal_data = st.session_state.get("economic_calendar") or []
+    # Calendario económico — auto-cargado desde DB (background worker lo actualiza cada 6h)
+    st.caption("📅 **Calendario económico** — actualización automática cada 6h")
+    cal_data = []
+    try:
+        if _DB_OK:
+            _cal_rows = _db.get_metrics(name="economic_calendar", limit=1) or []
+            if _cal_rows:
+                _cal_ts   = str(_cal_rows[0].get("created_at", ""))[:16]
+                cal_data  = (_cal_rows[0].get("context") or {}).get("events", [])
+                if cal_data:
+                    st.session_state.economic_calendar = cal_data
+    except Exception:
+        pass
+    if not cal_data:
+        cal_data = st.session_state.get("economic_calendar") or []
     if cal_data:
+        _cal_ts_str = _cal_ts if "_cal_ts" in dir() else ""
+        if _cal_ts_str:
+            st.caption(f"Actualizado: {_cal_ts_str}")
         high_ev = [e for e in cal_data if e.get("impact","").upper() == "HIGH"]
         med_ev  = [e for e in cal_data if e.get("impact","").upper() == "MEDIUM"]
         st.markdown(f"**Esta semana:** {len(high_ev)} eventos ALTO impacto · {len(med_ev)} MEDIO impacto")
@@ -4312,6 +4306,8 @@ with bt_ctrl_r:
                 f"— {str(ev.get('date',''))[:10]} "
                 f"| Prev: {ev.get('previous','?')} | Fore: {ev.get('forecast','?')}"
             )
+    else:
+        st.info("⏳ El servidor cargará el calendario automáticamente (cada 6h).")
 
 # ── Comparación de estrategias ─────────────────────────────────────────────
 cmp_result = st.session_state.get("strategy_comparison")
@@ -5108,17 +5104,29 @@ if _LEARNER_OK:
             else:
                 st.info(f"✅ {_obs_count} observaciones acumuladas. El primer ciclo de aprendizaje se ejecutará en breve (cada 6h).")
 
-        # ── Ranking de estrategias ganadoras ─────────────────────────────────
+        # ── Ranking de estrategias ganadoras (auto-actualizado por el servidor) ─
         st.markdown("---")
-        st.markdown("**🏆 Ranking de estrategias — Doble Filtro (60d + 2008)**")
-        st.caption("🏆 Certificada (gana en 60d Y en 2008+) · ✅ Solo reciente (60d) · ❌ No gana actualmente")
+        _rnk_h1, _rnk_h2 = st.columns([3, 1])
+        _rnk_h1.markdown("**🏆 Ranking de estrategias — Doble Filtro (60d + 2008)**")
         try:
             import strategy_selector as _ss_mod
             _ranking = _ss_mod.get_latest_ranking()
             if not _ranking:
                 _ranking = []
+
+            # Timestamps de última actualización
+            _ts_60d = None
+            _ts_lt  = None
+            try:
+                _rk_rows = _db.get_metrics(name="strategy_ranking", limit=1) or []
+                if _rk_rows:
+                    _rk_ts = (_rk_rows[0].get("context") or {}).get("ts", "")
+                    _ts_60d = _rk_ts[:16] if _rk_ts else None
+            except Exception:
+                pass
+            _rnk_h2.caption(f"🔄 Auto cada 8h\n{'Actualizado: ' + _ts_60d if _ts_60d else 'Calculando...'}")
+
             if _ranking:
-                # Contadores de estado
                 _n_cert = sum(1 for _r in _ranking if _r.get("is_certified") or _r.get("badge") == "🏆")
                 _n_60d  = sum(1 for _r in _ranking if (_r.get("is_winner_60d") or _r.get("is_winner")) and not (_r.get("is_certified") or _r.get("badge") == "🏆"))
                 _n_lt   = sum(1 for _r in _ranking if _r.get("is_winner_lt"))
@@ -5137,7 +5145,6 @@ if _LEARNER_OK:
                 _rank_cols[5].markdown("**Estado**")
                 for _ri, _r in enumerate(_ranking[:12]):
                     _rc = st.columns([3, 1, 1, 1, 1, 1])
-                    # Determinar badge con retrocompatibilidad
                     if _r.get("badge"):
                         _emoji = _r["badge"]
                     elif _r.get("is_certified"):
@@ -5149,8 +5156,8 @@ if _LEARNER_OK:
                     _lbl = _r.get("label", _r.get("name", "?"))[:30]
                     _pos = "🥇" if _ri==0 else "🥈" if _ri==1 else "🥉" if _ri==2 else f"{_ri+1}."
                     _rc[0].caption(f"{_pos} {_lbl}")
-                    _wr = _r.get("winrate", 0)
-                    _pf = _r.get("profit_factor", 0)
+                    _wr  = _r.get("winrate", 0)
+                    _pf  = _r.get("profit_factor", 0)
                     _lt_wr = _r.get("lt_winrate", 0)
                     _lt_pf = _r.get("lt_profit_factor", 0)
                     _rc[1].caption(f"{'🟢' if _wr >= 55 else '🟡' if _wr >= 52 else '🔴'} {_wr:.0f}%")
@@ -5159,63 +5166,47 @@ if _LEARNER_OK:
                     _rc[4].caption(f"{_lt_pf:.2f}" if _lt_pf > 0 else "—")
                     _rc[5].caption(_emoji)
             else:
-                st.caption("El ranking se genera automáticamente cada 8h. Puedes forzarlo abajo.")
-
-            _btn_col1, _btn_col2 = st.columns(2)
-            with _btn_col1:
-                if st.button("🔄 Recalcular 60d ahora", key="_recalc_btn"):
-                    with st.spinner("Ejecutando las 17 estrategias en datos reales (60d)..."):
-                        try:
-                            _ss_mod.refresh_cache(force=True)
-                            _ss_mod.save_ranking_to_db(_ss_mod._cached_results)
-                            _n_w = len(_ss_mod._cached_winners)
-                            _n_c = len(_ss_mod.certified_winners())
-                            st.success(f"✅ {_n_w} ganadoras 60d · {_n_c} certificadas (ambos filtros)")
-                            st.rerun()
-                        except Exception as _re:
-                            st.error(f"Error: {_re}")
-            with _btn_col2:
-                if st.button("📅 Recalcular 2008 ahora", key="_recalc_lt_btn",
-                             help="Puede tardar 60-90s — corre en background"):
-                    with st.spinner("Ejecutando backtest 2008+ en datos diarios (~60s)..."):
-                        try:
-                            _ss_mod.refresh_lt_cache(force=True)
-                            _ss_mod.save_ranking_to_db(_ss_mod._cached_results)
-                            _n_lt = len(_ss_mod._cached_lt_winners)
-                            _n_c  = len(_ss_mod.certified_winners())
-                            st.success(f"✅ {_n_lt} ganadoras 2008+ · {_n_c} certificadas (ambos filtros)")
-                            st.rerun()
-                        except Exception as _re:
-                            st.error(f"Error: {_re}")
+                st.info("⏳ El servidor está calculando el ranking en background (primera vez puede tardar ~2 min). Se actualizará automáticamente.")
         except Exception:
-            st.caption("Módulo strategy_selector cargando...")
+            st.caption("Módulo strategy_selector cargando en background...")
 
-        if st.button("🚀 Ejecutar aprendizaje ahora", key="_learn_now_btn"):
-            with st.spinner("La IA está analizando todos los datos y creando la estrategia maestra..."):
-                try:
-                    # Force run by resetting the timer
-                    _db.set_setting("last_learn_ts", "")
-                    _new_master = _sl_mod.run_learning_cycle()
-                    if _new_master:
-                        st.success(f"✅ Estrategia maestra v{_new_master.get('version','?')} creada — {_new_master.get('ai_insight','')[:120]}")
-                        st.rerun()
-                    else:
-                        st.warning("No hay suficientes observaciones aún (mínimo 20). Espera unas horas.")
-                except Exception as _le:
-                    st.error(f"Error: {_le}")
+        # Estado del ciclo de aprendizaje
+        st.markdown("")
+        _learn_h1, _learn_h2 = st.columns([3, 1])
+        _learn_h1.caption("🧠 **Ciclo de aprendizaje IA** — corre automáticamente cada 6h")
+        try:
+            _last_learn = _db.get_setting("last_learn_ts") or ""
+            if _last_learn:
+                from datetime import datetime, timezone as _tz
+                _last_dt = datetime.fromisoformat(_last_learn)
+                if not _last_dt.tzinfo:
+                    _last_dt = _last_dt.replace(tzinfo=_tz.utc)
+                _hrs_ago = int((datetime.now(_tz.utc) - _last_dt).total_seconds() / 3600)
+                _nxt_hrs = max(0, 6 - _hrs_ago)
+                _learn_h2.caption(f"Último: hace {_hrs_ago}h · Próximo en ~{_nxt_hrs}h")
+            else:
+                _learn_h2.caption("Primera ejecución pendiente...")
+        except Exception:
+            pass
 
-# ── Patrones de mercado detectados ────────────────────────────────────────────
-if _SELF_IMPROVE_OK:
+# ── Patrones de mercado detectados (auto-actualizados cada 6h) ────────────────
+if _SELF_IMPROVE_OK and _DB_OK:
     with st.expander("🔎 Patrones detectados por IA en observaciones históricas", expanded=False):
-        if st.button("🧠 Analizar patrones ahora", key="_pattern_btn"):
-            with st.spinner("Analizando observaciones..."):
-                try:
-                    _pattern_rep = _self_improve.get_pattern_report(limit=100)
-                    st.write(_pattern_rep)
-                except Exception as _pe:
-                    st.error(f"Error: {_pe}")
-        else:
-            st.caption("Haz clic para analizar los últimos patrones detectados en el mercado.")
+        try:
+            _pat_rows = _db.get_metrics(name="pattern_report", limit=1) or []
+            if _pat_rows:
+                _pat_ctx = _pat_rows[0].get("context") or {}
+                _pat_rep = _pat_ctx.get("report", "")
+                _pat_ts  = str(_pat_rows[0].get("created_at", ""))[:16]
+                if _pat_rep:
+                    st.caption(f"🤖 Análisis automático · Última actualización: {_pat_ts} · Siguiente en ~6h")
+                    st.write(_pat_rep)
+                else:
+                    st.info("⏳ El servidor está analizando patrones en background. Disponible en la próxima ejecución (~6h desde el inicio).")
+            else:
+                st.info("⏳ El servidor ejecutará el análisis de patrones automáticamente (cada 6h). Primera ejecución pendiente.")
+        except Exception:
+            st.caption("Patrones: cargando desde servidor...")
 
 # ── Trading Advisor AI ────────────────────────────────────────────────────────
 st.markdown('<div id="sec-advisor"></div>', unsafe_allow_html=True)

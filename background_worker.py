@@ -164,11 +164,120 @@ def _cycle() -> None:
     except Exception as _sle:
         _log.debug("strategy_learner error: %s", _sle)
 
+    # 4c — Análisis de patrones (máx 1 vez/6h)
+    _pattern_analysis_if_due()
+
+    # 4d — COT + Calendario económico (máx 1 vez/6h)
+    _cot_calendar_if_due()
+
     # 5 — Bot autónomo (ejecuta orden si está activado en DB y score ≥ umbral)
     _bot_trade_if_due(signal, score)
 
     # 6 — Telegram
     _telegram_if_due(signal, score)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tareas periódicas autónomas
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PATTERN_INTERVAL_SECS  = 6 * 3600   # cada 6h
+_COT_CAL_INTERVAL_SECS  = 6 * 3600   # cada 6h
+
+
+def _pattern_analysis_if_due() -> None:
+    """Ejecuta análisis de patrones con IA y guarda resultado en DB (cada 6h)."""
+    try:
+        import db as _db
+        rows = _db.get_metrics(name="pattern_report", limit=1) or []
+        if rows:
+            from datetime import datetime, timezone
+            last_ts = rows[0].get("created_at")
+            if last_ts:
+                # Parsear timestamp si es string
+                if isinstance(last_ts, str):
+                    last_ts = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                if not last_ts.tzinfo:
+                    last_ts = last_ts.replace(tzinfo=timezone.utc)
+                elapsed = (datetime.now(timezone.utc) - last_ts).total_seconds()
+                if elapsed < _PATTERN_INTERVAL_SECS:
+                    return
+
+        _log.info("BG: ejecutando análisis de patrones...")
+        import self_improve as _si
+        report = _si.get_pattern_report(limit=200)
+        if report and not report.startswith("⚠️"):
+            _db.save_metric(
+                name="pattern_report",
+                value=0.0,
+                context={"report": report[:3000], "obs_limit": 200},
+            )
+            _log.info("BG: análisis de patrones guardado (%d chars)", len(report))
+    except Exception as _e:
+        _log.debug("pattern_analysis_if_due: %s", _e)
+
+
+def _cot_calendar_if_due() -> None:
+    """Descarga COT (CFTC) y calendario económico, guarda en DB (cada 6h)."""
+    try:
+        import db as _db
+        from datetime import datetime, timezone
+
+        # ── COT ──────────────────────────────────────────────────────────────
+        cot_rows = _db.get_metrics(name="cot_data", limit=1) or []
+        run_cot  = True
+        if cot_rows:
+            last_ts = cot_rows[0].get("created_at")
+            if isinstance(last_ts, str):
+                last_ts = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+            if last_ts and not last_ts.tzinfo:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            if last_ts and (datetime.now(timezone.utc) - last_ts).total_seconds() < _COT_CAL_INTERVAL_SECS:
+                run_cot = False
+
+        if run_cot:
+            try:
+                from backend.market_context import get_cot_data
+                cot = get_cot_data()
+                if cot:
+                    _db.save_metric(
+                        name="cot_data",
+                        value=float(cot.get("net_position", 0)),
+                        context={"data": cot},
+                    )
+                    _log.info("BG: COT actualizado — bias=%s", cot.get("bias_direction"))
+            except Exception as _ce:
+                _log.debug("cot update: %s", _ce)
+
+        # ── Calendario económico ──────────────────────────────────────────────
+        cal_rows = _db.get_metrics(name="economic_calendar", limit=1) or []
+        run_cal  = True
+        if cal_rows:
+            last_ts = cal_rows[0].get("created_at")
+            if isinstance(last_ts, str):
+                last_ts = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+            if last_ts and not last_ts.tzinfo:
+                last_ts = last_ts.replace(tzinfo=timezone.utc)
+            if last_ts and (datetime.now(timezone.utc) - last_ts).total_seconds() < _COT_CAL_INTERVAL_SECS:
+                run_cal = False
+
+        if run_cal:
+            try:
+                from backend.market_context import get_economic_calendar
+                cal = get_economic_calendar()
+                if cal:
+                    hi = sum(1 for e in cal if e.get("impact", "").upper() == "HIGH")
+                    _db.save_metric(
+                        name="economic_calendar",
+                        value=float(len(cal)),
+                        context={"events": cal, "high_impact": hi},
+                    )
+                    _log.info("BG: Calendario actualizado — %d eventos (%d alto impacto)", len(cal), hi)
+            except Exception as _cale:
+                _log.debug("calendar update: %s", _cale)
+
+    except Exception as _e:
+        _log.debug("cot_calendar_if_due: %s", _e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
