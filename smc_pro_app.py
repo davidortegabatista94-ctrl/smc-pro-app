@@ -5039,6 +5039,89 @@ with _sim_col2:
         except Exception:
             pass
 
+# ── Estrategia Maestra Adaptativa ─────────────────────────────────────────────
+try:
+    import strategy_learner as _sl_mod
+    _LEARNER_OK = True
+except ImportError:
+    _LEARNER_OK = False
+
+if _LEARNER_OK:
+    with st.expander("🧬 Estrategia Maestra Adaptativa", expanded=True):
+        _master = None
+        if _DB_OK:
+            try:
+                _master = _db.load_active_strategy()
+            except Exception:
+                pass
+
+        if _master and _master.get("source") == "meta_learner":
+            _mv = _master.get("version", "?")
+            _mobs = _master.get("obs_analyzed", 0)
+            _mevolved = str(_master.get("evolved_at", ""))[:16]
+            _minsight = _master.get("ai_insight", "")
+            _mimprove = _master.get("improvement", "")
+
+            st.success(f"🧬 **DNA Maestro v{_mv}** — {_mobs} observaciones analizadas")
+            if _minsight:
+                st.info(f"💡 **Insight IA:** {_minsight}")
+            if _mimprove:
+                st.caption(f"📈 Mejora vs anterior: {_mimprove}")
+
+            # Pesos de señal
+            _sw = _master.get("signal_weights") or {}
+            if _sw:
+                st.markdown("**⚖️ Pesos de señal aprendidos:**")
+                _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
+                _sc1.metric("Técnico",      f"{_sw.get('technical',0)*100:.0f}%")
+                _sc2.metric("DXY",          f"{_sw.get('dxy',0)*100:.0f}%")
+                _sc3.metric("Volumen",      f"{_sw.get('volume',0)*100:.0f}%")
+                _sc4.metric("Sentimiento",  f"{_sw.get('sentiment',0)*100:.0f}%")
+                _sc5.metric("Fundamental",  f"{_sw.get('fundamental',0)*100:.0f}%")
+
+            # Mejores condiciones
+            _bc = _master.get("best_conditions") or []
+            _ac = _master.get("avoid_conditions") or []
+            if _bc or _ac:
+                _cc1, _cc2 = st.columns(2)
+                if _bc:
+                    _cc1.markdown("**✅ Mejores condiciones:**")
+                    for _c in _bc:
+                        _cc1.caption(f"• {_c}")
+                if _ac:
+                    _cc2.markdown("**⛔ Evitar:**")
+                    for _c in _ac:
+                        _cc2.caption(f"• {_c}")
+
+            st.caption(f"Última evolución: {_mevolved} | Próxima en ~6h")
+
+        else:
+            _obs_count = 0
+            if _DB_OK:
+                try:
+                    _obs_count = len(_db.get_metrics(name="market_observation", limit=200) or [])
+                except Exception:
+                    pass
+            _needed = max(0, 20 - _obs_count)
+            if _needed > 0:
+                st.info(f"🔄 Acumulando datos... {_obs_count}/20 observaciones necesarias para el primer aprendizaje.\nEl sistema aprenderá automáticamente.")
+            else:
+                st.info(f"✅ {_obs_count} observaciones acumuladas. El primer ciclo de aprendizaje se ejecutará en breve (cada 6h).")
+
+        if st.button("🚀 Ejecutar aprendizaje ahora", key="_learn_now_btn"):
+            with st.spinner("La IA está analizando todos los datos y creando la estrategia maestra..."):
+                try:
+                    # Force run by resetting the timer
+                    _db.set_setting("last_learn_ts", "")
+                    _new_master = _sl_mod.run_learning_cycle()
+                    if _new_master:
+                        st.success(f"✅ Estrategia maestra v{_new_master.get('version','?')} creada — {_new_master.get('ai_insight','')[:120]}")
+                        st.rerun()
+                    else:
+                        st.warning("No hay suficientes observaciones aún (mínimo 20). Espera unas horas.")
+                except Exception as _le:
+                    st.error(f"Error: {_le}")
+
 # ── Patrones de mercado detectados ────────────────────────────────────────────
 if _SELF_IMPROVE_OK:
     with st.expander("🔎 Patrones detectados por IA en observaciones históricas", expanded=False):

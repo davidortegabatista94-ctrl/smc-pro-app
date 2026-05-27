@@ -885,6 +885,11 @@ def get_evolution_history(limit: int = 8) -> list[dict]:
         return []
 
 
+def get_strategy_dna_history(limit: int = 10) -> list[dict]:
+    """Alias de get_evolution_history para strategy_learner."""
+    return get_evolution_history(limit=limit)
+
+
 def get_trades_for_evolution(limit: int = 60) -> list[dict]:
     """Return recent closed trades with market_snapshot for evolution analysis."""
     if not _DB_URL:

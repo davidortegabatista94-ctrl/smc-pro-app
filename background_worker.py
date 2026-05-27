@@ -118,6 +118,14 @@ def _cycle() -> None:
     except Exception:
         pass
 
+    # 4b — Meta-aprendizaje: estrategia maestra adaptativa (máx 1 vez/6h)
+    try:
+        import strategy_learner as _sl
+        if _sl.should_run_learning():
+            _sl.run_learning_cycle()
+    except Exception as _sle:
+        _log.debug("strategy_learner error: %s", _sle)
+
     # 5 — Bot autónomo (ejecuta orden si está activado en DB y score ≥ umbral)
     _bot_trade_if_due(signal, score)
 
