@@ -32,11 +32,11 @@ DEFAULT_MASTER_DNA = {
     "version":        1,
     "source":         "default",
     "signal_weights": {
-        "technical":   0.40,
-        "dxy":         0.20,
-        "volume":      0.20,
-        "sentiment":   0.10,
-        "fundamental": 0.10,
+        "technical":   0.30,   # indicadores técnicos (EMA, RSI, MACD…)
+        "fundamental": 0.30,   # noticias + FRED macro (explica el movimiento real)
+        "dxy":         0.20,   # correlación inversa con el dólar
+        "volume":      0.12,   # volumen y delta
+        "sentiment":   0.08,   # sentimiento de noticias (complementa fundamental)
     },
     "session_weights": {
         "London": 1.00,
@@ -178,6 +178,7 @@ def _build_master_prompt(
     prev_versions: int,
     strategy_ranking: list | None = None,
     strategy_winners: list | None = None,
+    fund_history: list | None = None,
 ) -> str:
     return f"""Eres el motor de meta-aprendizaje de SMC Pro, un bot de trading EUR/USD.
 
@@ -204,7 +205,10 @@ ESTRATEGIAS GANADORAS EN BACKTEST REAL (últimos 60 días):
 Ganadoras (WR≥52%, PF≥1.1): {json.dumps(strategy_winners or [], ensure_ascii=False)}
 Ranking top-10: {json.dumps(strategy_ranking or [], ensure_ascii=False, indent=2)}
 
-CONTEXTO MACRO ACTUAL (FRED):
+SEÑAL FUNDAMENTAL — NOTICIAS (últimas 20 lecturas de RSS + FRED):
+{json.dumps(fund_history or [], ensure_ascii=False, indent=2) if fund_history else "Sin historial de noticias aún — se acumulará en las próximas horas"}
+
+CONTEXTO MACRO ACTUAL (FRED — Fed rate, CPI, desempleo, yield curve):
 {json.dumps(macro, ensure_ascii=False, indent=2) if macro else "Sin datos macro disponibles"}
 
 DNA PREVIO (v{prev_dna.get("version", 1)}, {prev_versions} versiones evolucionadas):
@@ -224,6 +228,13 @@ REGLAS DE ORO que NUNCA puedes violar:
 - min_score nunca menor de 55 (protección capital)
 - No operar en sesión "Off" con score < 75
 - Si DXY contradice la señal, aumentar el umbral mínimo en +8 puntos
+
+REGLA CRÍTICA sobre signal_weights:
+- "fundamental" NUNCA puede ser 0.0 ni menos de 0.20
+- Las noticias (Reuters, ECB, Fed, Bloomberg, CPI, NFP…) CAUSAN el movimiento.
+  Lo técnico solo lo refleja con retardo.
+- Si el historial de noticias muestra señales consistentes → sube su peso (hasta 0.40)
+- "fundamental" = noticias macro de alto impacto; "sentiment" = tono general de titulares
 
 Responde SOLO con JSON (sin markdown, sin texto extra):
 {{
@@ -315,6 +326,22 @@ def run_learning_cycle() -> dict | None:
     except Exception:
         pass
 
+    # ── 3c. Historial de señales fundamentales ──────────────────────────────
+    fund_history: list[dict] = []
+    try:
+        fund_rows = _db.get_metrics(name="fundamental_signal", limit=100) or []
+        fund_history = [
+            {
+                "score":     float(r.get("value", 0)),
+                "direction": (r.get("context") or {}).get("direction", ""),
+                "hi_impact": (r.get("context") or {}).get("hi_impact", 0),
+                "ts":        str(r.get("created_at", ""))[:16],
+            }
+            for r in fund_rows[-20:]  # últimas 20
+        ]
+    except Exception:
+        pass
+
     # ── 4. Contexto macro ───────────────────────────────────────────────────
     macro = _get_macro_context()
 
@@ -338,6 +365,7 @@ def run_learning_cycle() -> dict | None:
         prev_versions=prev_versions,
         strategy_ranking=strategy_ranking,
         strategy_winners=strategy_winners,
+        fund_history=fund_history,
     )
 
     try:

@@ -124,12 +124,23 @@ def _cycle() -> None:
     except Exception:
         pass
 
-    # 3 — Macro FRED (usa caché interna de 4h)
+    # 3 — Fundamental: FRED + 20 fuentes RSS de noticias (caché 30 min)
+    _fund: dict = {}
     try:
         import data_feeds as _df
-        _df.get_fred_indicators()
-    except Exception:
-        pass
+        _fund = _df.get_news_fundamental()   # descarga noticias y guarda en DB
+        _df.get_fred_indicators()            # FRED (caché 4h)
+
+        # Ajustar score con señal fundamental
+        _f_adj, _f_reasons = _df.get_fundamental_score_bonus(_fund, direction)
+        if _f_adj != 0:
+            score = max(0, min(100, score + _f_adj))
+            signal["score"]            = score
+            signal["fundamental_adj"]  = _f_adj
+            signal["fundamental_dir"]  = _fund.get("direction", "NEUTRAL")
+            signal["fundamental_news"] = _fund.get("hi_impact", 0)
+    except Exception as _fe:
+        _log.debug("fundamental feed error: %s", _fe)
 
     # 4 — Self-heal (máx 1/h, comprueba internamente)
     try:
