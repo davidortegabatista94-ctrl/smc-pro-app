@@ -565,11 +565,21 @@ def get_tv_data(symbol: str = "EURUSD", tf: str = "1h") -> dict:
 _mt5_connected = False
 _mt5_error_message = None
 
-# ── Integración con MT5 Service (Docker en Railway) ───────────────
-# Si MT5_SERVICE_URL está definida, todas las órdenes se envían al
-# servicio Docker remoto en lugar de usar MT5 local (solo Windows).
-_MT5_SERVICE_URL = os.getenv("MT5_SERVICE_URL", "").rstrip("/")
-_MT5_API_TOKEN   = os.getenv("MT5_API_TOKEN", "")
+# ── Integración con OANDA (directo o via MT5 Service) ────────────────────────
+# Prioridad: 1) MT5_SERVICE_URL (servicio remoto) 2) OANDA env vars (directo)
+_MT5_SERVICE_URL  = os.getenv("MT5_SERVICE_URL", "").rstrip("/")
+_MT5_API_TOKEN    = os.getenv("MT5_API_TOKEN", "")
+_OANDA_API_TOKEN  = os.getenv("OANDA_API_TOKEN", "").strip()
+_OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID", "").strip()
+
+# Carga mt5_bridge si OANDA está configurado directamente (sin servicio remoto)
+_oanda_bridge = None
+if not _MT5_SERVICE_URL and _OANDA_API_TOKEN and _OANDA_ACCOUNT_ID:
+    try:
+        from mt5_service import mt5_bridge as _oanda_bridge
+    except Exception as _oe:
+        logging.warning("OANDA bridge no disponible: %s", _oe)
+        _oanda_bridge = None
 
 def _mt5_service_headers():
     h = {"Content-Type": "application/json"}
@@ -578,12 +588,20 @@ def _mt5_service_headers():
     return h
 
 def _mt5_service_available() -> bool:
-    """True si MT5_SERVICE_URL está configurada."""
-    return bool(_MT5_SERVICE_URL)
+    """True si hay conexión OANDA disponible (remota o directa)."""
+    return bool(_MT5_SERVICE_URL) or (_oanda_bridge is not None)
 
 def mt5_service_health() -> dict:
-    """Consulta el estado del servicio MT5 remoto."""
-    if not _mt5_service_available():
+    """Estado de la conexión OANDA (directa o via servicio remoto)."""
+    if _oanda_bridge is not None:
+        try:
+            ok = _oanda_bridge.is_connected()
+            return {"mt5": "connected" if ok else "disconnected",
+                    "status": "ok" if ok else "error",
+                    "source": "oanda_direct"}
+        except Exception as e:
+            return {"status": "error", "error": str(e), "source": "oanda_direct"}
+    if not _MT5_SERVICE_URL:
         return {"status": "no configurado"}
     reqs = get_requests()
     if not reqs:
@@ -595,59 +613,68 @@ def mt5_service_health() -> dict:
         return {"status": "error", "error": str(e)}
 
 def mt5_service_account() -> dict | None:
-    """Obtiene info de cuenta desde el servicio MT5 remoto."""
-    if not _mt5_service_available():
+    """Info de cuenta OANDA (directa o via servicio remoto)."""
+    if _oanda_bridge is not None:
+        try:
+            return _oanda_bridge.get_account_info()
+        except Exception:
+            return None
+    if not _MT5_SERVICE_URL:
         return None
     reqs = get_requests()
     if not reqs:
         return None
     try:
-        r = reqs.get(
-            f"{_MT5_SERVICE_URL}/account",
-            headers=_mt5_service_headers(),
-            timeout=5,
-        )
+        r = reqs.get(f"{_MT5_SERVICE_URL}/account",
+                     headers=_mt5_service_headers(), timeout=5)
         return r.json() if r.ok else None
     except Exception as e:
         logging.warning(f"mt5_service_account error: {e}")
         return None
 
 def mt5_service_positions() -> list:
-    """Obtiene posiciones abiertas desde el servicio MT5 remoto."""
-    if not _mt5_service_available():
+    """Posiciones abiertas en OANDA (directa o via servicio remoto)."""
+    if _oanda_bridge is not None:
+        try:
+            return _oanda_bridge.get_open_positions()
+        except Exception:
+            return []
+    if not _MT5_SERVICE_URL:
         return []
     reqs = get_requests()
     if not reqs:
         return []
     try:
-        r = reqs.get(
-            f"{_MT5_SERVICE_URL}/positions",
-            headers=_mt5_service_headers(),
-            timeout=5,
-        )
+        r = reqs.get(f"{_MT5_SERVICE_URL}/positions",
+                     headers=_mt5_service_headers(), timeout=5)
         return r.json() if r.ok else []
     except Exception as e:
         logging.warning(f"mt5_service_positions error: {e}")
         return []
 
 def _mt5_service_tick(symbol=None) -> dict | None:
-    """Precio bid/ask en tiempo real desde el servicio remoto (/tick/<symbol>)."""
-    if not _mt5_service_available():
+    """Precio bid/ask en tiempo real desde OANDA (directa o via servicio remoto)."""
+    sym = symbol or SYMBOL
+    if _oanda_bridge is not None:
+        try:
+            data = _oanda_bridge.get_current_price(sym)
+            if data and "bid" in data:
+                data.setdefault("time", datetime.now())
+                return data
+        except Exception:
+            pass
+        return None
+    if not _MT5_SERVICE_URL:
         return None
     reqs = get_requests()
     if not reqs:
         return None
-    sym = symbol or SYMBOL
     try:
-        r = reqs.get(
-            f"{_MT5_SERVICE_URL}/tick/{sym}",
-            headers=_mt5_service_headers(),
-            timeout=5,
-        )
+        r = reqs.get(f"{_MT5_SERVICE_URL}/tick/{sym}",
+                     headers=_mt5_service_headers(), timeout=5)
         if r.ok:
             data = r.json()
             if "bid" in data:
-                # Normaliza el campo time si viene como string ISO
                 if "time" in data and isinstance(data["time"], str):
                     try:
                         from datetime import datetime as _dt
@@ -663,12 +690,14 @@ def _mt5_service_tick(symbol=None) -> dict | None:
 
 def mt5_service_place_order(symbol, direction, volume, price, sl, tp,
                              comment="SMC Pro Bot") -> dict:
-    """
-    Envía una orden al servicio MT5 remoto vía REST.
-    Retorna dict con {"success": bool, ...}.
-    """
-    if not _mt5_service_available():
-        return {"success": False, "error": "MT5_SERVICE_URL no configurada"}
+    """Envía una orden a OANDA (directa o via servicio remoto)."""
+    if _oanda_bridge is not None:
+        try:
+            return _oanda_bridge.place_order(symbol, direction, volume, price, sl, tp, comment)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    if not _MT5_SERVICE_URL:
+        return {"success": False, "error": "OANDA no configurado — añade OANDA_API_TOKEN en Railway"}
     reqs = get_requests()
     if not reqs:
         return {"success": False, "error": "requests no disponible"}
@@ -676,27 +705,24 @@ def mt5_service_place_order(symbol, direction, volume, price, sl, tp,
         payload = {
             "symbol":    symbol,
             "direction": "BUY" if direction in ("LONG", "BUY") else "SELL",
-            "volume":    volume,
-            "price":     price,
-            "sl":        sl,
-            "tp":        tp,
-            "comment":   comment,
+            "volume":    volume, "price": price, "sl": sl, "tp": tp, "comment": comment,
         }
-        r = reqs.post(
-            f"{_MT5_SERVICE_URL}/trade",
-            json=payload,
-            headers=_mt5_service_headers(),
-            timeout=10,
-        )
+        r = reqs.post(f"{_MT5_SERVICE_URL}/trade", json=payload,
+                      headers=_mt5_service_headers(), timeout=10)
         return r.json()
     except Exception as e:
         logging.warning(f"mt5_service_place_order error: {e}")
         return {"success": False, "error": str(e)}
 
 def mt5_service_close_position(ticket: int) -> dict:
-    """Cierra una posición en el servicio MT5 remoto."""
-    if not _mt5_service_available():
-        return {"success": False, "error": "MT5_SERVICE_URL no configurada"}
+    """Cierra una posición en OANDA (directa o via servicio remoto)."""
+    if _oanda_bridge is not None:
+        try:
+            return _oanda_bridge.close_position(ticket)
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+    if not _MT5_SERVICE_URL:
+        return {"success": False, "error": "OANDA no configurado"}
     reqs = get_requests()
     if not reqs:
         return {"success": False, "error": "requests no disponible"}
@@ -2960,9 +2986,11 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
                     )
             elif sys.platform != "win32":
                 st.info(
-                    "ℹ️ **Sin conexión de trading configurada**\n\n"
-                    "Configura las variables de entorno en Railway:\n"
-                    "`MT5_SERVICE_URL` · `OANDA_API_TOKEN` · `OANDA_ACCOUNT_ID`"
+                    "ℹ️ **Conecta OANDA para operar en vivo**\n\n"
+                    "Añade estas variables en Railway → Variables:\n"
+                    "• `OANDA_API_TOKEN` — token de tu cuenta OANDA\n"
+                    "• `OANDA_ACCOUNT_ID` — ID de cuenta OANDA\n\n"
+                    "El análisis y las señales funcionan sin esto."
                 )
             else:
                 st.warning("⚠️ Paquete MetaTrader5 no instalado.\n\nEjecuta: `pip install MetaTrader5`")
