@@ -145,6 +145,41 @@ def run_heal_cycle(active_dna: dict, current_user: str = "system") -> dict | Non
     wr    = round(len(wins) / len(recent_trades) * 100, 1) if recent_trades else 0
     net_p = round(sum(t.get("pips") or 0 for t in recent_trades), 1) if recent_trades else 0
 
+    # ── Detect operating mode: signal-only vs live trading ────────────────────
+    try:
+        obs_count = len(_db.get_metrics(name="market_observation", limit=50) or [])
+    except Exception:
+        obs_count = 0
+
+    signal_only_mode = (len(recent_trades) == 0 and obs_count > 0)
+
+    # In signal-only mode, skip heal entirely — nothing to fix with parameter changes
+    if signal_only_mode:
+        _log.info("HealEngine: signal-only mode (%d observations, 0 trades) — skip parameter tuning", obs_count)
+        # Store a minimal informational record (not a warning/critical)
+        try:
+            _db.save_self_improvement(
+                improvement_type="heal_cycle",
+                before={"mode": "signal_only", "observations": obs_count},
+                after={},
+                reason=f"Modo señales activo — {obs_count} observaciones acumuladas. Sin broker conectado, sin trades que evaluar.",
+                applied=False,
+            )
+        except Exception:
+            pass
+        return {
+            "health_status": "ok",
+            "summary": f"Sistema en modo señales. {obs_count} observaciones acumuladas. Análisis y Telegram activos.",
+            "error_patterns": "Sin errores críticos",
+            "top_finding": "Sistema operativo en modo señales — esperando conexión broker para operar",
+            "parameter_changes": {},
+            "actions_taken": [],
+            "applied_changes": {},
+            "dna_updated": False,
+            "new_dna": None,
+            "ts": datetime.utcnow().isoformat(),
+        }
+
     error_summary = []
     for e in errors[-10:]:
         error_summary.append({"component": e.get("component", "?"),
@@ -154,8 +189,10 @@ def run_heal_cycle(active_dna: dict, current_user: str = "system") -> dict | Non
 
     prompt = f"""Eres el motor de auto-mejora de SMC Pro, un bot de trading EUR/USD.
 
+MODO: {"TRADING ACTIVO" if recent_trades else "SIN TRADES AÚN"}
 ESTADO ACTUAL (DNA v{dna_version}):
 - Trades recientes: {len(recent_trades)} | Win Rate: {wr}% | Pips netos: {net_p:+.1f}
+- Observaciones de mercado acumuladas: {obs_count}
 - Precisión por indicador: {json.dumps(ind_accuracy, ensure_ascii=False)}
 - Errores recientes (últimas 6h): {json.dumps(error_summary, ensure_ascii=False)}
 
@@ -168,6 +205,8 @@ ANÁLISIS REQUERIDO:
 3. SESIONES: ¿hay sesiones con win rate < 40%? ¿habría que blacklistearlas?
 4. PARÁMETROS: ¿qué parámetros del DNA mejorarían el rendimiento?
 5. ACCIONES: lista exacta de cambios a aplicar con justificación
+
+IMPORTANTE: Si no hay trades, evalúa SOLO errores y calidad de señales. NO marques "critical" por falta de trades.
 
 Responde SOLO con JSON (sin markdown):
 {{
