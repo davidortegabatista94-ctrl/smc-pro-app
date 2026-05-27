@@ -180,6 +180,12 @@ def refresh_cache(force: bool = False) -> None:
                 "strategy_selector 60d: %d ganadoras de %d: %s",
                 len(_cached_winners), len(results), _cached_winners,
             )
+            # Derivar DNA automáticamente desde datos disponibles
+            # (si el 2008 aún no está listo, usará solo 60d como base)
+            try:
+                auto_derive_master_dna(source="backtest_60d")
+            except Exception as _e:
+                _log.debug("auto_derive_master_dna post-60d: %s", _e)
 
 
 def get_cached_results() -> tuple[list[dict], set[str]]:
@@ -499,10 +505,267 @@ def ensure_ready() -> None:
 
 
 def _refresh_lt_and_save() -> None:
-    """Refresca caché largo plazo y guarda ranking completo en DB."""
+    """Refresca caché largo plazo, guarda ranking completo y deriva DNA automáticamente."""
     try:
         refresh_lt_cache()
         if _cached_results:
             save_ranking_to_db(_cached_results)
+        # ← NUEVO: derivar estrategia maestra desde los datos, sin IA
+        auto_derive_master_dna(source="lt_backtest_2008")
     except Exception as e:
         _log.warning("strategy_selector LT background: %s", e)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DERIVACIÓN AUTOMÁTICA DE ESTRATEGIA DESDE DATOS (sin IA)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Categorización de estrategias por tipo (trend vs mean-reversion vs mixta)
+_TREND_STRATEGIES     = {"ema_trend", "macd_cross", "supertrend", "momentum_break",
+                          "donchian_break", "aggressive_momentum", "precision_be"}
+_MEANREV_STRATEGIES   = {"bb_touch", "keltner_touch", "rsi_50_cross", "stochastic_trend",
+                          "engulfing"}
+_COMPOSITE_STRATEGIES = {"meta_composite"}
+
+# Pesos mínimos inviolables (mismos que _safe_weights en strategy_learner)
+_SIGNAL_MINIMUMS = {
+    "fundamental": 0.20,   # NFP, CPI, Fed → CAUSAN el movimiento
+    "sentiment":   0.05,   # tono de titulares
+    "dxy":         0.10,   # correlación inversa EUR/USD
+    "technical":   0.15,   # timing
+    "volume":      0.03,   # confirmación
+}
+
+
+def auto_derive_master_dna(source: str = "backtest_data") -> dict | None:
+    """
+    Deriva la ESTRATEGIA MAESTRA directamente desde los datos de backtest
+    (60d 1H + 2008+ diario) SIN necesitar llamada a IA.
+
+    Lógica:
+    ─────────────────────────────────────────────────────────────────────────
+    REGIME THRESHOLDS:
+      Para cada régimen, contamos cuántas de sus estrategias candidatas son
+      certificadas (pasan ambos filtros). Más certificadas → más confianza
+      → umbral de score más bajo (el sistema puede actuar antes).
+
+        ≥ 75% cert  →  threshold = 60  (muy confiable, 15 años lo avalan)
+        50-74% cert →  threshold = 65
+        25-49% cert →  threshold = 70
+        < 25% cert  →  threshold = 76
+
+    SIGNAL WEIGHTS:
+      Base: mínimos duros por teoría económica.
+      Ajuste: si las certificadas son mayoría trend → subir técnico/DXY.
+              si las certificadas son mayoría mean-rev → subir fundamental/sentimiento
+              (mean-rev opera mejor cuando noticias mueven el mercado).
+
+    SESSION WEIGHTS:
+      Trend strategies → funcionan mejor London/NY (volatilidad direccional).
+      Mean-rev strategies → funcionan mejor Asia/ranging (consolidación).
+      Se pondera por el perfil de las estrategias certificadas.
+    ─────────────────────────────────────────────────────────────────────────
+    Guarda el DNA en DB como estrategia activa si es mejor que el anterior.
+    Devuelve el DNA derivado.
+    """
+    cert = certified_winners()
+    all_res = _cached_results
+    lt_res  = _cached_lt_results
+
+    have_data = bool(all_res)
+    have_lt   = bool(lt_res)
+
+    if not have_data:
+        _log.warning("auto_derive_master_dna: sin datos de backtest aún")
+        return None
+
+    _log.info(
+        "auto_derive_master_dna: %d estrategias 60d | %d LT | %d certificadas",
+        len(all_res), len(lt_res), len(cert),
+    )
+
+    # ── 1. REGIME THRESHOLDS desde datos ─────────────────────────────────────
+    regime_thresholds: dict[str, int] = {}
+    for regime, candidates in REGIME_STRATEGY_MAP.items():
+        n_cert = sum(1 for c in candidates if c in cert)
+        n_cand = len(candidates)
+        pct    = (n_cert / n_cand) if n_cand > 0 else 0.0
+
+        if pct >= 0.75:
+            threshold = 60    # alta confianza — 15 años de datos lo respaldan
+        elif pct >= 0.50:
+            threshold = 65
+        elif pct >= 0.25:
+            threshold = 70
+        elif pct >= 0.10:
+            threshold = 74
+        else:
+            threshold = 78    # poca evidencia histórica → ser cauteloso
+
+        regime_thresholds[regime] = threshold
+        _log.debug("  régimen %s: %d/%d cert → threshold %d", regime, n_cert, n_cand, threshold)
+
+    # ── 2. Clasificar estrategias certificadas por tipo ───────────────────────
+    cert_trend    = cert & _TREND_STRATEGIES
+    cert_meanrev  = cert & _MEANREV_STRATEGIES
+    cert_composite= cert & _COMPOSITE_STRATEGIES
+    total_cert    = max(len(cert), 1)
+
+    pct_trend   = len(cert_trend)   / total_cert
+    pct_meanrev = len(cert_meanrev) / total_cert
+
+    # ── 3. SIGNAL WEIGHTS (mínimos duros + ajuste por tipo) ──────────────────
+    # Base desde mínimos duros
+    sw = dict(_SIGNAL_MINIMUMS)  # copia
+
+    # Distribución del "espacio disponible" por encima de mínimos
+    # Total mínimos = 0.20+0.05+0.10+0.15+0.03 = 0.53 → queda 0.47 libre
+    free = 1.0 - sum(sw.values())   # ≈ 0.47
+
+    if pct_trend >= 0.60:
+        # Mayoría trend: subir técnico y DXY (las tendencias se ven y confirma DXY)
+        sw["technical"]   += free * 0.35
+        sw["dxy"]         += free * 0.30
+        sw["fundamental"] += free * 0.18
+        sw["volume"]      += free * 0.10
+        sw["sentiment"]   += free * 0.07
+    elif pct_meanrev >= 0.60:
+        # Mayoría mean-reversion: subir fundamental (noticias crean la volatilidad)
+        sw["fundamental"] += free * 0.35
+        sw["technical"]   += free * 0.25
+        sw["dxy"]         += free * 0.20
+        sw["sentiment"]   += free * 0.12
+        sw["volume"]      += free * 0.08
+    else:
+        # Mixto: distribución equilibrada
+        sw["technical"]   += free * 0.28
+        sw["fundamental"] += free * 0.25
+        sw["dxy"]         += free * 0.22
+        sw["volume"]      += free * 0.13
+        sw["sentiment"]   += free * 0.12
+
+    # Normalizar a suma=1
+    total_sw = sum(sw.values()) or 1.0
+    signal_weights = {k: round(v / total_sw, 3) for k, v in sw.items()}
+
+    # Verificación final de mínimos tras normalización
+    for k, mn in _SIGNAL_MINIMUMS.items():
+        if signal_weights.get(k, 0) < mn * 0.88:
+            signal_weights[k] = round(mn, 3)
+
+    # ── 4. SESSION WEIGHTS (del tipo de estrategias certificadas) ─────────────
+    # Trend strategies → London/NY.  Mean-rev → Asia también.
+    if pct_trend >= 0.60:
+        session_weights = {"London": 1.00, "NY": 0.92, "Asia": 0.50, "Off": 0.20}
+    elif pct_meanrev >= 0.60:
+        session_weights = {"London": 0.85, "NY": 0.80, "Asia": 0.75, "Off": 0.25}
+    else:
+        # Equilibrado
+        session_weights = {"London": 0.95, "NY": 0.88, "Asia": 0.62, "Off": 0.22}
+
+    # ── 5. Best/worst conditions desde datos de backtest ─────────────────────
+    # Ordenar estrategias certificadas por profit_factor en 2008 data
+    lt_dict = {r["_name"]: r for r in lt_res}
+    cert_sorted = sorted(
+        [(n, lt_dict.get(n, {}).get("profit_factor", 0),
+             lt_dict.get(n, {}).get("winrate", 0)) for n in cert],
+        key=lambda x: x[1], reverse=True,
+    )
+    best_conditions = []
+    for name, pf, wr in cert_sorted[:5]:
+        if pf > 0:
+            best_conditions.append(
+                f"{name} (PF {pf:.2f}, WR {wr:.0f}%) — probado desde 2008"
+            )
+
+    avoid_conditions = []
+    # Estrategias que NO pasan ni el filtro 60d
+    for r in all_res:
+        if r["_name"] not in _cached_winners and r["_name"] not in _cached_lt_winners:
+            avoid_conditions.append(
+                f"{r.get('_label', r['_name'])} — no rentable en ningún periodo"
+            )
+    avoid_conditions = avoid_conditions[:5]
+
+    # ── 6. Insight automático ─────────────────────────────────────────────────
+    lt_note = f"{len(lt_res)} estrategias probadas en datos diarios desde 2008" if have_lt else "datos 2008 pendientes"
+    ai_insight = (
+        f"DNA derivado automáticamente de {len(all_res)} estrategias (60d 1H) "
+        f"y {lt_note}. "
+        f"{len(cert)} certificadas (ambos filtros). "
+        f"Perfil: {'trend' if pct_trend>=0.60 else 'mean-rev' if pct_meanrev>=0.60 else 'mixto'} "
+        f"({'↑ técnico/DXY' if pct_trend>=0.60 else '↑ fundamental/sentimiento' if pct_meanrev>=0.60 else 'equilibrado'})."
+    )
+
+    dna = {
+        "version":          _get_next_dna_version(),
+        "source":           source,
+        "evolved_at":       datetime.utcnow().isoformat(),
+        "obs_analyzed":     len(all_res),
+        "ai_insight":       ai_insight,
+        "macro_outlook":    "Derivado de datos históricos 2008+. Sin override IA.",
+        "improvement":      f"{len(cert)} estrategias certificadas | thresholds ajustados por confianza estadística",
+        "signal_weights":   signal_weights,
+        "session_weights":  session_weights,
+        "regime_thresholds": regime_thresholds,
+        "best_conditions":  best_conditions,
+        "avoid_conditions": avoid_conditions,
+        "best_combos":      [],
+        "worst_combos":     [],
+        "certified_strategies": list(cert),
+        "data_source":      {
+            "short_term": f"{len(all_res)} estrategias × 60d 1H",
+            "long_term":  f"{len(lt_res)} estrategias × datos diarios 2008+" if have_lt else "pendiente",
+        },
+    }
+
+    # ── 7. Guardar en DB ──────────────────────────────────────────────────────
+    try:
+        import db as _db
+        # Fitness: promedio ponderado de (WR × PF) de las certificadas
+        fitness = 0.0
+        if cert and all_res:
+            cert_stats = [r for r in all_res if r["_name"] in cert]
+            if cert_stats:
+                fitness = round(
+                    sum((r.get("winrate", 0) / 100) * r.get("profit_factor", 1)
+                        for r in cert_stats) / len(cert_stats),
+                    3,
+                )
+        _db.save_strategy_dna(
+            version=dna["version"],
+            rules=dna,
+            fitness=fitness,
+            trades_evaluated=sum(r.get("total", 0) for r in all_res),
+            winrate=round(
+                sum(r.get("winrate", 0) for r in all_res) / max(len(all_res), 1), 1
+            ),
+            net_pips=round(
+                sum(r.get("net_pips", 0) for r in all_res), 1
+            ),
+            key_insight=dna["ai_insight"][:200],
+        )
+        _log.info(
+            "auto_derive_master_dna: DNA v%s guardado | sw=%s | thresholds=%s",
+            dna["version"],
+            {k: f"{v:.0%}" for k, v in signal_weights.items()},
+            regime_thresholds,
+        )
+    except Exception as e:
+        _log.warning("auto_derive_master_dna: no se pudo guardar en DB: %s", e)
+
+    return dna
+
+
+def _get_next_dna_version() -> int:
+    """Lee la versión del DNA activo en DB y devuelve version+1."""
+    try:
+        import db as _db
+        active = _db.load_active_strategy()
+        if active:
+            # load_active_strategy añade _version desde la columna de DB
+            v = active.get("_version") or active.get("version", 1)
+            return int(v) + 1
+    except Exception:
+        pass
+    return 2

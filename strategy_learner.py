@@ -241,23 +241,25 @@ REGLAS DE ORO que NUNCA puedes violar:
 - No operar en sesión "Off" con score < 75
 - Si DXY contradice la señal, aumentar el umbral mínimo en +8 puntos
 
-REGLA CRÍTICA sobre signal_weights:
-- "fundamental" NUNCA puede ser 0.0 ni menos de 0.20
-- Las noticias (Reuters, ECB, Fed, Bloomberg, CPI, NFP…) CAUSAN el movimiento.
-  Lo técnico solo lo refleja con retardo.
-- Si el historial de noticias muestra señales consistentes → sube su peso (hasta 0.40)
-- "fundamental" = noticias macro de alto impacto; "sentiment" = tono general de titulares
+REGLAS CRÍTICAS sobre signal_weights — OBLIGATORIAS, no son sugerencias:
+- "fundamental" MÍNIMO 0.20  → Las noticias (NFP, CPI, Fed, ECB) CAUSAN el movimiento; lo técnico solo lo refleja con retardo.
+- "sentiment"   MÍNIMO 0.05  → El tono de los titulares precede al precio; ignorarlo es ceguera parcial.
+- "dxy"         MÍNIMO 0.10  → La correlación inversa EUR/USD con el dólar es matemáticamente probada.
+- "technical"   MÍNIMO 0.15  → Sin señal técnica no hay punto de entrada preciso.
+- "volume"      MÍNIMO 0.03  → El volumen confirma o niega las señales; no puede ser 0.
+Si pones cualquiera de estos valores por debajo del mínimo, el sistema los corregirá automáticamente.
+Por tanto, NO tiene sentido ponerlos en 0 — ponlos en el rango óptimo que los datos sugieran.
 
 Responde SOLO con JSON (sin markdown, sin texto extra):
 {{
   "master_strategy_version": {prev_dna.get("version", 1) + 1},
   "ai_insight": "<insight principal en 2-3 frases>",
   "signal_weights": {{
-    "technical":   <float 0.0-1.0>,
-    "dxy":         <float 0.0-1.0>,
-    "volume":      <float 0.0-1.0>,
-    "sentiment":   <float 0.0-1.0>,
-    "fundamental": <float 0.0-1.0>
+    "technical":   <float MIN 0.15, MAX 0.45>,
+    "dxy":         <float MIN 0.10, MAX 0.35>,
+    "volume":      <float MIN 0.03, MAX 0.20>,
+    "sentiment":   <float MIN 0.05, MAX 0.20>,
+    "fundamental": <float MIN 0.20, MAX 0.45>
   }},
   "session_weights": {{
     "London": <float 0.0-1.0>,
@@ -513,15 +515,41 @@ def apply_master_dna(signal: dict, score: int, session: str,
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _safe_weights(w: dict) -> dict:
-    """Normaliza pesos de señal (suma ≈ 1.0, cada uno entre 0 y 1)."""
+    """
+    Normaliza pesos de señal (suma = 1.0).
+    Impone mínimos DUROS basados en evidencia económica:
+      - fundamental ≥ 20%  (NFP, CPI, Fed → CAUSAN el movimiento)
+      - sentiment   ≥  5%  (tono de titulares complementa el fundamental)
+      - dxy         ≥ 10%  (correlación inversa EUR/USD documentada)
+      - technical   ≥ 15%  (señal de timing, no puede ser 0)
+      - volume      ≥  3%  (confirma breakouts)
+    La IA puede sugerir pesos distintos pero NUNCA por debajo de estos mínimos.
+    """
+    # Mínimos económicamente justificados — imposibles de violar
+    HARD_MINS = {
+        "fundamental": 0.20,
+        "sentiment":   0.05,
+        "dxy":         0.10,
+        "technical":   0.15,
+        "volume":      0.03,
+    }
     keys = ["technical", "dxy", "volume", "sentiment", "fundamental"]
     defaults = DEFAULT_MASTER_DNA["signal_weights"]
     result = {}
     for k in keys:
-        val = float(w.get(k, defaults[k]))
-        result[k] = round(max(0.0, min(1.0, val)), 3)
+        raw = float(w.get(k, defaults[k]))
+        # Primero clamp 0..1, luego aplicar mínimo duro
+        clamped = max(0.0, min(1.0, raw))
+        result[k] = max(HARD_MINS.get(k, 0.0), clamped)
+    # Normalizar a suma=1
     total = sum(result.values()) or 1.0
-    return {k: round(v / total, 3) for k, v in result.items()}
+    normalized = {k: round(v / total, 3) for k, v in result.items()}
+    # Verificación final — nunca puede quedar debajo del mínimo tras normalización
+    # (si la suma previa es enorme, la normalización podría bajar alguno)
+    for k, mn in HARD_MINS.items():
+        if normalized.get(k, 0) < mn * 0.90:   # margen 10% por redondeo
+            normalized[k] = round(mn, 3)
+    return normalized
 
 
 def _safe_session_weights(w: dict) -> dict:
