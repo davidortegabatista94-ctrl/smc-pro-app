@@ -5108,6 +5108,47 @@ if _LEARNER_OK:
             else:
                 st.info(f"✅ {_obs_count} observaciones acumuladas. El primer ciclo de aprendizaje se ejecutará en breve (cada 6h).")
 
+        # ── Ranking de estrategias ganadoras ─────────────────────────────────
+        st.markdown("---")
+        st.markdown("**🏆 Ranking de estrategias ganadoras (backtest 60d)**")
+        try:
+            import strategy_selector as _ss_mod
+            _ranking = _ss_mod.get_latest_ranking()
+            if not _ranking:
+                _ranking = []
+            if _ranking:
+                _rank_cols = st.columns([3, 1, 1, 1, 1])
+                _rank_cols[0].markdown("**Estrategia**")
+                _rank_cols[1].markdown("**WR%**")
+                _rank_cols[2].markdown("**PF**")
+                _rank_cols[3].markdown("**Pips**")
+                _rank_cols[4].markdown("**Estado**")
+                for _ri, _r in enumerate(_ranking[:10]):
+                    _rc = st.columns([3, 1, 1, 1, 1])
+                    _is_win = _r.get("is_winner", False)
+                    _emoji  = "✅" if _is_win else "❌"
+                    _lbl    = _r.get("label", _r.get("name", "?"))[:35]
+                    _rc[0].caption(f"{'🥇' if _ri==0 else '🥈' if _ri==1 else '🥉' if _ri==2 else f'{_ri+1}.'} {_lbl}")
+                    _wr_color = "🟢" if _r.get("winrate",0) >= 55 else "🔴"
+                    _rc[1].caption(f"{_wr_color} {_r.get('winrate',0):.0f}%")
+                    _rc[2].caption(f"{_r.get('profit_factor',0):.2f}")
+                    _rc[3].caption(f"{_r.get('net_pips',0):+.0f}")
+                    _rc[4].caption(_emoji)
+            else:
+                st.caption("El ranking se genera automáticamente cada 8h. Puedes forzarlo abajo.")
+
+            if st.button("🔄 Recalcular backtest ahora", key="_recalc_btn"):
+                with st.spinner("Ejecutando las 17 estrategias en datos reales (60d)..."):
+                    try:
+                        _ss_mod.refresh_cache(force=True)
+                        _ss_mod.save_ranking_to_db(_ss_mod._cached_results)
+                        st.success(f"✅ {len(_ss_mod._cached_winners)} estrategias ganadoras de {len(_ss_mod._cached_results)}")
+                        st.rerun()
+                    except Exception as _re:
+                        st.error(f"Error: {_re}")
+        except Exception:
+            st.caption("Módulo strategy_selector cargando...")
+
         if st.button("🚀 Ejecutar aprendizaje ahora", key="_learn_now_btn"):
             with st.spinner("La IA está analizando todos los datos y creando la estrategia maestra..."):
                 try:

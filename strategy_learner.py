@@ -176,6 +176,8 @@ def _build_master_prompt(
     macro: dict,
     prev_dna: dict,
     prev_versions: int,
+    strategy_ranking: list | None = None,
+    strategy_winners: list | None = None,
 ) -> str:
     return f"""Eres el motor de meta-aprendizaje de SMC Pro, un bot de trading EUR/USD.
 
@@ -197,6 +199,10 @@ MEJORES COMBINACIONES (sesión × régimen × DXY):
 
 PEORES COMBINACIONES (evitar o requerir score muy alto):
 {json.dumps(worst_combos, ensure_ascii=False, indent=2)}
+
+ESTRATEGIAS GANADORAS EN BACKTEST REAL (últimos 60 días):
+Ganadoras (WR≥52%, PF≥1.1): {json.dumps(strategy_winners or [], ensure_ascii=False)}
+Ranking top-10: {json.dumps(strategy_ranking or [], ensure_ascii=False, indent=2)}
 
 CONTEXTO MACRO ACTUAL (FRED):
 {json.dumps(macro, ensure_ascii=False, indent=2) if macro else "Sin datos macro disponibles"}
@@ -288,6 +294,27 @@ def run_learning_cycle() -> dict | None:
     regime_stats  = _get_regime_stats(obs_stats)
     best, worst   = _best_worst_combos(obs_stats)
 
+    # ── 3b. Datos de estrategias ganadoras del selector ────────────────────
+    strategy_ranking: list[dict] = []
+    strategy_winners: list[str]  = []
+    try:
+        import strategy_selector as _ss
+        _ss.ensure_ready()
+        all_res, winners = _ss.get_cached_results()
+        strategy_winners = list(winners)
+        strategy_ranking = [
+            {
+                "name":    r["_name"],
+                "label":   r["_label"],
+                "winrate": r.get("winrate", 0),
+                "pf":      r.get("profit_factor", 0),
+                "winner":  r["_name"] in winners,
+            }
+            for r in all_res[:10]
+        ]
+    except Exception:
+        pass
+
     # ── 4. Contexto macro ───────────────────────────────────────────────────
     macro = _get_macro_context()
 
@@ -309,6 +336,8 @@ def run_learning_cycle() -> dict | None:
         macro=macro,
         prev_dna=prev_dna,
         prev_versions=prev_versions,
+        strategy_ranking=strategy_ranking,
+        strategy_winners=strategy_winners,
     )
 
     try:

@@ -74,14 +74,41 @@ def _cycle() -> None:
     final  = signal.get("final_signal", "NEUTRAL")
     sess   = signal.get("session", "")
     regime = signal.get("regime", "")
+    direction = signal.get("direction") or ""
+
+    # 0 — Selector de estrategias (caché 8h, sin bloquear)
+    _sel_result: dict = {}
+    try:
+        import strategy_selector as _ss
+        _ss.ensure_ready()   # solo descarga si el caché expiró
+        _sel_result = _ss.select_for_signal(
+            regime=regime, direction=direction,
+            score=score, session=sess,
+        )
+        # Ajustar score con el consenso estratégico
+        _boost = _sel_result.get("score_boost", 0)
+        score  = max(0, min(100, score + _boost))
+        signal["score"]            = score
+        signal["strategy_sel"]     = _sel_result.get("recommended", "")
+        signal["strategy_support"] = _sel_result.get("supporting", [])
+        signal["strategy_boost"]   = _boost
+        signal["strategy_detail"]  = _sel_result.get("detail", "")
+    except Exception as _se:
+        _log.debug("strategy_selector error: %s", _se)
 
     # 1 — Snapshot en DB
     try:
         import db as _db
         _db.save_snapshot(
             price=price, signal=final, score=score,
-            dxy_trend="N/A", regime=regime, strategy="bg_worker",
-            extra={"session": sess, "source": "bg"},
+            dxy_trend="N/A", regime=regime,
+            strategy=_sel_result.get("recommended", "bg_worker"),
+            extra={
+                "session": sess, "source": "bg",
+                "strategy_support": _sel_result.get("supporting", []),
+                "strategy_boost":   _sel_result.get("score_boost", 0),
+                "veto":             _sel_result.get("veto", False),
+            },
             user_id="system",
         )
     except Exception:
