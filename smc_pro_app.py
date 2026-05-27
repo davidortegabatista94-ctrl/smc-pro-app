@@ -549,6 +549,10 @@ def get_tv_data(symbol: str = "EURUSD", tf: str = "1h") -> dict:
             "source":       "TradingView",
         }
         _TV_CACHE[cache_key] = (datetime.now(), result)
+        # Evict oldest entry when cache grows too large (7 TFs × handful of symbols)
+        if len(_TV_CACHE) > 50:
+            oldest = min(_TV_CACHE, key=lambda k: _TV_CACHE[k][0])
+            del _TV_CACHE[oldest]
         return result
     except Exception as e:
         logging.debug("get_tv_data error: %s", e)
@@ -3768,7 +3772,6 @@ if st.session_state.analysis_executed:
     if _any_ribbon:
         with st.expander("🎀 EMA Ribbon 5/10/20/50 — Análisis Multi-Marco", expanded=True):
             _rb_cols = st.columns(4)
-            _tf_labels = list(_ema_tfs.keys())
             for _ci, (_tf_lbl, _rb) in enumerate(_ema_tfs.items()):
                 with _rb_cols[_ci]:
                     st.markdown(f"**{_tf_lbl}**")
@@ -3785,13 +3788,15 @@ if st.session_state.analysis_executed:
                     st.caption(f"EMA10: `{_rb['ema10']:.5f}`")
                     st.caption(f"EMA20: `{_rb['ema20']:.5f}`")
                     st.caption(f"EMA50: `{_rb['ema50']:.5f}`")
-                    _sigs = []
-                    if _rb.get("buy_signal"):    _sigs.append("🚀 BUY CROSS")
-                    if _rb.get("sell_signal"):   _sigs.append("💥 SELL CROSS")
-                    if _rb.get("golden_cross"):  _sigs.append("✨ Golden Cross")
-                    if _rb.get("death_cross"):   _sigs.append("💀 Death Cross")
-                    for _s in _sigs:
-                        st.success(_s) if "BUY" in _s or "Golden" in _s else st.error(_s)
+                    _sig_map = [
+                        ("buy_signal",   st.success, "🚀 BUY CROSS"),
+                        ("sell_signal",  st.error,   "💥 SELL CROSS"),
+                        ("golden_cross", st.success, "✨ Golden Cross"),
+                        ("death_cross",  st.error,   "💀 Death Cross"),
+                    ]
+                    for _key, _fn, _label in _sig_map:
+                        if _rb.get(_key):
+                            _fn(_label)
 
             # Global alignment status
             st.markdown("---")
@@ -3811,7 +3816,7 @@ if st.session_state.analysis_executed:
                     st.info("⚪ DIVERGENCIA — Sin consenso entre marcos temporales")
 
     # ── Gráfico Plotly con indicadores SMC ───────────────────────────────────
-    _df_chart_map = {"15M": df_15, "1H": df_1h, "4H": get_eurusd_data("4h")}
+    _df_chart_map = {"15M": df_15, "1H": df_1h, "4H": _df_4h}
     _df_chart = _df_chart_map.get(st.session_state.chart_tf, df_1h)
     _chart_trades = []
     if _DB_OK:
