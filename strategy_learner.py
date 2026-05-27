@@ -163,7 +163,80 @@ def _get_macro_context() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONSTRUCCIÓN DEL PROMPT MAESTRO
+# HELPERS DE ANÁLISIS — construyen contexto rico para el prompt
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fmt_strategy_table(all_res: list[dict], lt_dict: dict,
+                         cert: set, winners60: set, lt_winners: set) -> str:
+    """Tabla compacta de las 17 estrategias con sus stats 60d y 2008."""
+    if not all_res:
+        return "Sin datos de backtest disponibles aún."
+    lines = ["Estrategia            | WR60d | PF60d | Ops60d | WR2008 | PF2008 | Ops2008 | Estado"]
+    lines.append("-" * 100)
+    for r in all_res:
+        name  = r["_name"]
+        lt    = lt_dict.get(name, {})
+        badge = "🏆CERT" if name in cert else ("✅60d" if name in winners60 else ("📅2008" if name in lt_winners else "❌"))
+        lines.append(
+            f"{name:<22}| {r.get('winrate',0):>5.1f}%| {r.get('profit_factor',0):>5.2f} | "
+            f"{r.get('total',0):>6} | {lt.get('winrate',0):>6.1f}%| {lt.get('profit_factor',0):>6.2f} | "
+            f"{lt.get('total',0):>7} | {badge}"
+        )
+    return "\n".join(lines)
+
+
+def _fmt_regime_matrix(cert: set, winners60: set) -> str:
+    """Para cada régimen: qué estrategias certificadas aplican y el nivel de confianza."""
+    from strategy_selector import REGIME_STRATEGY_MAP
+    lines = []
+    for regime, candidates in REGIME_STRATEGY_MAP.items():
+        cert_here = [c for c in candidates if c in cert]
+        w60_here  = [c for c in candidates if c in winners60 and c not in cert]
+        pct = round(len(cert_here) / len(candidates) * 100) if candidates else 0
+        confidence = "MUY ALTA" if pct >= 75 else "ALTA" if pct >= 50 else "MEDIA" if pct >= 25 else "BAJA"
+        threshold  = 60 if pct >= 75 else 65 if pct >= 50 else 70 if pct >= 25 else 77
+        lines.append(
+            f"  {regime:<15} | confianza {confidence} ({pct}%) | threshold recomendado: {threshold} | "
+            f"certificadas: {cert_here or 'ninguna'} | solo-60d: {w60_here or 'ninguna'}"
+        )
+    return "\n".join(lines)
+
+
+def _summarize_fund_history(fund_rows: list[dict]) -> dict:
+    """Extrae estadísticas de tendencia del historial de noticias."""
+    if not fund_rows:
+        return {"status": "sin_datos"}
+    scores  = [float(r.get("value", 0)) for r in fund_rows]
+    dirs    = [((r.get("context") or {}).get("direction", "NEUTRAL")) for r in fund_rows]
+    hi_imps = [int((r.get("context") or {}).get("hi_impact", 0)) for r in fund_rows]
+    n = len(scores)
+    n_bull = sum(1 for d in dirs if d in ("LONG", "UP", "COMPRA"))
+    n_bear = sum(1 for d in dirs if d in ("SHORT", "DOWN", "VENTA"))
+    avg_sc = round(sum(scores) / n, 3) if n else 0
+    trend  = "ALCISTA" if n_bull > n_bear * 1.3 else "BAJISTA" if n_bear > n_bull * 1.3 else "NEUTRAL"
+    hi_pct = round(sum(1 for h in hi_imps if h >= 3) / n * 100) if n else 0
+    # Últimas 10 vs primeras 10 (tendencia reciente)
+    recent_bull = sum(1 for d in dirs[-10:] if d in ("LONG", "UP", "COMPRA"))
+    older_bull  = sum(1 for d in dirs[:10]  if d in ("LONG", "UP", "COMPRA"))
+    momentum = "acelerando alcista" if recent_bull > older_bull else \
+               "acelerando bajista" if recent_bull < older_bull else "estable"
+    return {
+        "lecturas": n,
+        "tendencia_general": trend,
+        "pct_bullish": round(n_bull / n * 100) if n else 0,
+        "pct_bearish": round(n_bear / n * 100) if n else 0,
+        "score_medio": avg_sc,
+        "pct_alto_impacto": hi_pct,
+        "momentum_reciente": momentum,
+        "top_headlines": [
+            (r.get("context") or {}).get("top_headlines", [])[:2]
+            for r in fund_rows[-5:]
+        ],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONSTRUCCIÓN DEL PROMPT MAESTRO (versión completa con todos los datos)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _build_master_prompt(
@@ -180,104 +253,170 @@ def _build_master_prompt(
     strategy_winners: list | None = None,
     certified: list | None = None,
     fund_history: list | None = None,
+    # Nuevos argumentos con toda la evidencia
+    strategy_table: str = "",
+    regime_matrix: str = "",
+    fund_summary: dict | None = None,
+    lt_results_count: int = 0,
+    baseline_dna: dict | None = None,
 ) -> str:
-    _cert_note = (
-        f"🏆 CERTIFICADAS (ganan en 60d 1H Y en datos diarios desde 2008): {json.dumps(certified or [], ensure_ascii=False)}\n"
-        f"⚠️ REGLA: Solo usar estrategias certificadas para señales de máxima confianza. "
-        f"Si una estrategia NO está en la lista certificada, aplicar más cautela (score más alto requerido)."
-        if certified
-        else "Sin datos de backtest 2008 aún — usando solo filtro 60d."
+    next_v = int(prev_dna.get("_version") or prev_dna.get("version") or 1) + 1
+    cert_list = json.dumps(certified or [], ensure_ascii=False)
+
+    _lt_note = (
+        f"{lt_results_count} estrategias probadas en datos DIARIOS EUR/USD DESDE 2008 (~4400+ barras, 15+ años)"
+        if lt_results_count > 0
+        else "Backtest 2008 aún en progreso — disponible pronto"
     )
-    return f"""Eres el motor de meta-aprendizaje de SMC Pro, un bot de trading EUR/USD.
 
-Tu misión: analizar TODOS los datos disponibles y crear la ESTRATEGIA MAESTRA más rentable posible.
-La estrategia debe funcionar en el mayor número de condiciones posible, adaptándose a cada contexto.
-IMPORTANTE: Solo aprende de lo que GANA. Solo usa estrategias cuando han demostrado ser ganadoras
-en AMBOS filtros temporales (corto plazo 60d Y largo plazo desde 2008).
+    _baseline_note = (
+        f"DNA DERIVADO AUTOMÁTICAMENTE DE LOS DATOS (úsalo como punto de partida y mejóralo con tu análisis):\n"
+        f"{json.dumps(baseline_dna, ensure_ascii=False, indent=2)}"
+        if baseline_dna
+        else "Sin baseline previo — crea la estrategia desde cero."
+    )
 
-═══════════════════════════════════════════════
-DATOS ACUMULADOS ({obs_count} observaciones de mercado)
-═══════════════════════════════════════════════
+    _fund_note = (
+        f"ANÁLISIS ESTADÍSTICO DE {fund_summary.get('lecturas', 0)} LECTURAS DE NOTICIAS:\n"
+        f"  Tendencia general: {fund_summary.get('tendencia_general', 'N/A')}\n"
+        f"  Bullish/Bearish: {fund_summary.get('pct_bullish', 0)}% / {fund_summary.get('pct_bearish', 0)}%\n"
+        f"  Score medio fundamental: {fund_summary.get('score_medio', 0)}\n"
+        f"  Alto impacto (NFP/CPI/Fed): {fund_summary.get('pct_alto_impacto', 0)}% de las lecturas\n"
+        f"  Momentum reciente: {fund_summary.get('momentum_reciente', 'N/A')}"
+        if fund_summary and fund_summary.get("lecturas", 0) > 0
+        else "Historial de noticias acumulando — disponible en próximas horas."
+    )
 
-RENDIMIENTO POR SESIÓN:
+    return f"""Eres el motor de estrategia maestra de SMC Pro, un bot algorítmico de trading EUR/USD.
+
+CONTEXTO: Tienes acceso a {lt_results_count} estrategias probadas sobre 15+ años de datos
+diarios (desde 2008 — crisis financiera, recuperación, Brexit, COVID, subidas de tipos Fed).
+Esto te da evidencia ESTADÍSTICAMENTE SÓLIDA para ser DECISIVO y PRECISO.
+
+Tu misión: sintetizar TODO lo que sabes en el DNA óptimo que maximice la calidad de señales
+en el mayor número de condiciones posibles. No seas conservador por falta de datos — TIENES los datos.
+
+══════════════════════════════════════════════════════════════════
+SECCIÓN 1 — EVIDENCIA HISTÓRICA 15 AÑOS ({_lt_note})
+══════════════════════════════════════════════════════════════════
+
+TABLA COMPLETA DE RENDIMIENTO (60d 1H + 2008+ Daily):
+{strategy_table if strategy_table else json.dumps(strategy_ranking or [], indent=2)}
+
+ESTRATEGIAS CERTIFICADAS (pasan AMBOS filtros — son tu arsenal principal):
+{cert_list}
+
+MATRIZ DE RÉGIMEN × ESTRATEGIAS CERTIFICADAS:
+(Cuántas estrategias certificadas aplican a cada régimen → determina la confianza y el threshold)
+{regime_matrix}
+
+══════════════════════════════════════════════════════════════════
+SECCIÓN 2 — OBSERVACIONES DE MERCADO EN VIVO ({obs_count} señales registradas)
+══════════════════════════════════════════════════════════════════
+
+RENDIMIENTO POR SESIÓN (score promedio y distribución de señales):
 {json.dumps(session_stats, ensure_ascii=False, indent=2)}
 
-RENDIMIENTO POR RÉGIMEN DE MERCADO:
+RENDIMIENTO POR RÉGIMEN:
 {json.dumps(regime_stats, ensure_ascii=False, indent=2)}
 
-MEJORES COMBINACIONES (sesión × régimen × DXY):
-{json.dumps(best_combos, ensure_ascii=False, indent=2)}
+MEJORES COMBINACIONES (sesión × régimen × DXY — opera aquí):
+{json.dumps(best_combos[:5], ensure_ascii=False, indent=2)}
 
-PEORES COMBINACIONES (evitar o requerir score muy alto):
-{json.dumps(worst_combos, ensure_ascii=False, indent=2)}
+PEORES COMBINACIONES (evitar o exigir score muy alto):
+{json.dumps(worst_combos[:5], ensure_ascii=False, indent=2)}
 
-ESTRATEGIAS — DOBLE FILTRO (60d 1H + desde 2008 diario):
-{_cert_note}
-Ganadoras 60d (WR≥52%, PF≥1.1): {json.dumps(strategy_winners or [], ensure_ascii=False)}
-Ranking detallado (winner_60d=gana reciente, winner_lt=gana desde 2008, certified=ambos):
-{json.dumps(strategy_ranking or [], ensure_ascii=False, indent=2)}
+══════════════════════════════════════════════════════════════════
+SECCIÓN 3 — ANÁLISIS FUNDAMENTAL (RSS 20 fuentes + FRED)
+══════════════════════════════════════════════════════════════════
 
-SEÑAL FUNDAMENTAL — NOTICIAS (últimas 20 lecturas de RSS + FRED):
-{json.dumps(fund_history or [], ensure_ascii=False, indent=2) if fund_history else "Sin historial de noticias aún — se acumulará en las próximas horas"}
+{_fund_note}
 
-CONTEXTO MACRO ACTUAL (FRED — Fed rate, CPI, desempleo, yield curve):
-{json.dumps(macro, ensure_ascii=False, indent=2) if macro else "Sin datos macro disponibles"}
+CONTEXTO MACRO ACTUAL (Fed rate, CPI, desempleo, yield curve, GDP):
+{json.dumps(macro, ensure_ascii=False, indent=2) if macro else "FRED no disponible en este momento"}
 
-DNA PREVIO (v{prev_dna.get("version", 1)}, {prev_versions} versiones evolucionadas):
-{json.dumps(prev_dna, ensure_ascii=False, indent=2)}
+══════════════════════════════════════════════════════════════════
+SECCIÓN 4 — DNA ACTUAL Y BASELINE DE DATOS
+══════════════════════════════════════════════════════════════════
 
-═══════════════════════════════════════════════
-ANÁLISIS REQUERIDO
-═══════════════════════════════════════════════
+DNA ACTIVO (v{prev_dna.get("_version") or prev_dna.get("version", 1)}, {prev_versions} versiones):
+signal_weights actuales: {json.dumps((prev_dna.get("signal_weights") or {}), ensure_ascii=False)}
+session_weights actuales: {json.dumps((prev_dna.get("session_weights") or {}), ensure_ascii=False)}
+regime_thresholds actuales: {json.dumps((prev_dna.get("regime_thresholds") or {}), ensure_ascii=False)}
 
-1. ¿Qué sesión y régimen producen las señales de mayor calidad (score más alto)?
-2. ¿Cuándo NO operar? (condiciones donde el score es sistemáticamente bajo)
-3. ¿Qué peso dar a cada fuente de señal? (técnico, DXY, volumen, sentimiento, fundamental)
-4. ¿Cómo ajustar el umbral mínimo de score según el contexto?
-5. ¿Qué insight clave se extrae de todos los datos para mejorar la estrategia?
+{_baseline_note}
 
-REGLAS DE ORO que NUNCA puedes violar:
-- min_score nunca menor de 55 (protección capital)
-- No operar en sesión "Off" con score < 75
-- Si DXY contradice la señal, aumentar el umbral mínimo en +8 puntos
+══════════════════════════════════════════════════════════════════
+TU ANÁLISIS — SÉ DECISIVO, TIENES 15 AÑOS DE EVIDENCIA
+══════════════════════════════════════════════════════════════════
 
-REGLAS CRÍTICAS sobre signal_weights — OBLIGATORIAS, no son sugerencias:
-- "fundamental" MÍNIMO 0.20  → Las noticias (NFP, CPI, Fed, ECB) CAUSAN el movimiento; lo técnico solo lo refleja con retardo.
-- "sentiment"   MÍNIMO 0.05  → El tono de los titulares precede al precio; ignorarlo es ceguera parcial.
-- "dxy"         MÍNIMO 0.10  → La correlación inversa EUR/USD con el dólar es matemáticamente probada.
-- "technical"   MÍNIMO 0.15  → Sin señal técnica no hay punto de entrada preciso.
-- "volume"      MÍNIMO 0.03  → El volumen confirma o niega las señales; no puede ser 0.
-Si pones cualquiera de estos valores por debajo del mínimo, el sistema los corregirá automáticamente.
-Por tanto, NO tiene sentido ponerlos en 0 — ponlos en el rango óptimo que los datos sugieran.
+Analiza TODA la evidencia anterior y determina:
 
-Responde SOLO con JSON (sin markdown, sin texto extra):
+1. SIGNAL WEIGHTS: ¿Qué importancia relativa tiene cada fuente?
+   - ¿Las noticias macro (NFP, CPI, Fed) mueven el EUR/USD? → peso fundamental
+   - ¿El DXY predice la dirección del EUR? → peso dxy
+   - ¿Los indicadores técnicos dan buen timing de entrada? → peso technical
+   - ¿El volumen confirma las señales? → peso volume
+   - ¿El sentimiento de titulares anticipa el movimiento? → peso sentiment
+
+2. SESSION WEIGHTS: ¿En qué sesiones las señales son más fiables?
+   - London/NY overlap: típicamente el mejor momento para EUR/USD
+   - Asia: mercado más tranquilo, señales de menor calidad
+   - Off: evitar salvo señal muy fuerte
+
+3. REGIME THRESHOLDS: ¿Cuándo ser más/menos exigente?
+   - Si tienes muchas estrategias certificadas para ese régimen → threshold bajo
+   - Si las estrategias fallan en ese régimen → threshold alto
+
+4. MACRO+FUNDAMENTAL: ¿Qué dice el contexto actual?
+   - Política Fed vs ECB → dirección estructural EUR/USD
+   - Inflación y empleo → expectativas de tipos
+   - Tendencia reciente de noticias → momentum fundamental
+
+REGLAS INVIOLABLES (el sistema las aplica automáticamente, no hace falta que seas conservador):
+✓ fundamental MÍNIMO 0.20 — las noticias CAUSAN el movimiento
+✓ sentiment   MÍNIMO 0.05 — el tono de titulares anticipa el precio
+✓ dxy         MÍNIMO 0.10 — correlación inversa EUR/USD es matemática
+✓ technical   MÍNIMO 0.15 — necesario para el timing preciso de entrada
+✓ volume      MÍNIMO 0.03 — confirma o desmiente señales
+✓ regime thresholds entre 55 y 88
+✓ session Off siempre ≤ 0.30
+
+Responde SOLO con JSON válido (sin markdown, sin texto antes ni después):
 {{
-  "master_strategy_version": {prev_dna.get("version", 1) + 1},
-  "ai_insight": "<insight principal en 2-3 frases>",
+  "master_strategy_version": {next_v},
+  "ai_insight": "<2-3 frases con el hallazgo más importante de los 15 años de datos>",
+  "macro_outlook": "<situación macro actual Fed/ECB y su impacto en EUR/USD>",
   "signal_weights": {{
-    "technical":   <float MIN 0.15, MAX 0.45>,
-    "dxy":         <float MIN 0.10, MAX 0.35>,
-    "volume":      <float MIN 0.03, MAX 0.20>,
-    "sentiment":   <float MIN 0.05, MAX 0.20>,
-    "fundamental": <float MIN 0.20, MAX 0.45>
+    "technical":   <0.15-0.45>,
+    "dxy":         <0.10-0.35>,
+    "volume":      <0.03-0.20>,
+    "sentiment":   <0.05-0.20>,
+    "fundamental": <0.20-0.45>
   }},
   "session_weights": {{
-    "London": <float 0.0-1.0>,
-    "NY":     <float 0.0-1.0>,
-    "Asia":   <float 0.0-1.0>,
-    "Off":    <float 0.0-1.0>
+    "London": <0.70-1.00>,
+    "NY":     <0.65-1.00>,
+    "Asia":   <0.30-0.80>,
+    "Off":    <0.10-0.30>
   }},
   "regime_thresholds": {{
-    "trending_up":   <int 55-88>,
-    "trending_down": <int 55-88>,
-    "ranging":       <int 55-88>,
-    "neutral":       <int 55-88>,
-    "unknown":       <int 55-88>
+    "trending_up":   <55-85>,
+    "trending_down": <55-85>,
+    "ranging":       <60-88>,
+    "neutral":       <60-85>,
+    "unknown":       <65-88>
   }},
-  "best_conditions": ["<condición 1>", "<condición 2>", "<condición 3>"],
-  "avoid_conditions": ["<condición a evitar 1>", "<condición a evitar 2>"],
-  "macro_outlook": "<cómo el contexto macro afecta la estrategia>",
-  "improvement_vs_prev": "<qué mejora respecto al DNA anterior>"
+  "best_conditions": [
+    "<sesión+régimen+condición que históricamente da las mejores señales>",
+    "<segunda mejor condición>",
+    "<tercera mejor condición>"
+  ],
+  "avoid_conditions": [
+    "<condición donde las señales fallan consistentemente>",
+    "<segunda condición a evitar>"
+  ],
+  "improvement_vs_prev": "<qué cambia respecto al DNA anterior y por qué lo justifican los datos>"
 }}"""
 
 
@@ -319,63 +458,90 @@ def run_learning_cycle() -> dict | None:
     regime_stats  = _get_regime_stats(obs_stats)
     best, worst   = _best_worst_combos(obs_stats)
 
-    # ── 3b. Datos de estrategias ganadoras del selector ────────────────────
+    # ── 3b. Datos completos de estrategias (60d + 2008) ────────────────────
     strategy_ranking: list[dict] = []
     strategy_winners: list[str]  = []
     certified: list[str]         = []
+    strategy_table:  str         = ""
+    regime_matrix:   str         = ""
+    lt_results_count: int        = 0
+    baseline_dna: dict | None    = None
     try:
         import strategy_selector as _ss
         _ss.ensure_ready()
-        all_res, winners = _ss.get_cached_results()
+        all_res, winners   = _ss.get_cached_results()
         lt_res, lt_winners = _ss.get_lt_cached_results()
-        cert_set = _ss.certified_winners()
-        strategy_winners = list(winners)
-        certified        = list(cert_set)
-        lt_dict = {r["_name"]: r for r in lt_res}
+        cert_set           = _ss.certified_winners()
+
+        strategy_winners  = list(winners)
+        certified         = list(cert_set)
+        lt_results_count  = len(lt_res)
+        lt_dict           = {r["_name"]: r for r in lt_res}
+
+        # Tabla completa de todas las estrategias (para el prompt de IA)
+        strategy_table = _fmt_strategy_table(all_res, lt_dict, cert_set, winners, lt_winners)
+
+        # Matriz régimen × estrategias certificadas
+        regime_matrix = _fmt_regime_matrix(cert_set, winners)
+
+        # Ranking compacto para compatibilidad
         strategy_ranking = [
             {
                 "name":       r["_name"],
-                "label":      r["_label"],
-                "winrate":    r.get("winrate", 0),
-                "pf":         r.get("profit_factor", 0),
-                "lt_winrate": lt_dict.get(r["_name"], {}).get("winrate", 0),
-                "lt_pf":      lt_dict.get(r["_name"], {}).get("profit_factor", 0),
+                "label":      r.get("_label", r["_name"]),
+                "winrate":    round(r.get("winrate", 0), 1),
+                "pf":         round(r.get("profit_factor", 0), 2),
+                "trades_60d": r.get("total", 0),
+                "lt_winrate": round(lt_dict.get(r["_name"], {}).get("winrate", 0), 1),
+                "lt_pf":      round(lt_dict.get(r["_name"], {}).get("profit_factor", 0), 2),
+                "lt_trades":  lt_dict.get(r["_name"], {}).get("total", 0),
                 "winner_60d": r["_name"] in winners,
                 "winner_lt":  r["_name"] in lt_winners,
-                "certified":  r["_name"] in cert_set,  # pasa ambos filtros
+                "certified":  r["_name"] in cert_set,
             }
-            for r in all_res[:12]
+            for r in all_res
         ]
-    except Exception:
-        pass
 
-    # ── 3c. Historial de señales fundamentales ──────────────────────────────
+        # DNA derivado de datos como baseline para la IA
+        try:
+            baseline_dna = _ss.auto_derive_master_dna(source="learner_baseline")
+        except Exception:
+            baseline_dna = None
+
+    except Exception as _se:
+        _log.debug("StrategyLearner: error cargando selector: %s", _se)
+
+    # ── 3c. Historial de señales fundamentales (último 100 + resumen) ──────
     fund_history: list[dict] = []
+    fund_summary: dict       = {}
     try:
-        fund_rows = _db.get_metrics(name="fundamental_signal", limit=100) or []
+        fund_rows = _db.get_metrics(name="fundamental_signal", limit=200) or []
+        fund_summary = _summarize_fund_history(fund_rows)
+        # Para el prompt: últimas 30 lecturas con detalle
         fund_history = [
             {
-                "score":     float(r.get("value", 0)),
+                "score":     round(float(r.get("value", 0)), 3),
                 "direction": (r.get("context") or {}).get("direction", ""),
-                "hi_impact": (r.get("context") or {}).get("hi_impact", 0),
+                "hi_impact": int((r.get("context") or {}).get("hi_impact", 0)),
                 "ts":        str(r.get("created_at", ""))[:16],
+                "headlines": ((r.get("context") or {}).get("top_headlines") or [])[:2],
             }
-            for r in fund_rows[-20:]  # últimas 20
+            for r in fund_rows[-30:]
         ]
     except Exception:
         pass
 
-    # ── 4. Contexto macro ───────────────────────────────────────────────────
+    # ── 4. Contexto macro FRED ──────────────────────────────────────────────
     macro = _get_macro_context()
 
     # ── 5. Versiones previas ────────────────────────────────────────────────
     try:
-        all_dnas = _db.get_strategy_dna_history(limit=10) or []
+        all_dnas      = _db.get_strategy_dna_history(limit=10) or []
         prev_versions = len(all_dnas)
     except Exception:
         prev_versions = 1
 
-    # ── 6. Llamar a la IA ───────────────────────────────────────────────────
+    # ── 6. Llamar a la IA con TODO el contexto ──────────────────────────────
     prompt = _build_master_prompt(
         obs_count=len(raw_obs),
         obs_stats=obs_stats,
@@ -390,12 +556,19 @@ def run_learning_cycle() -> dict | None:
         strategy_winners=strategy_winners,
         certified=certified,
         fund_history=fund_history,
+        strategy_table=strategy_table,
+        regime_matrix=regime_matrix,
+        fund_summary=fund_summary,
+        lt_results_count=lt_results_count,
+        baseline_dna=baseline_dna,
     )
+
+    _log.info("StrategyLearner: prompt construido (%d chars) — llamando IA", len(prompt))
 
     try:
         response = _ai.call_ai(
             [{"role": "user", "content": prompt}],
-            max_tokens=900, temperature=0.15, prefer_quality=True,
+            max_tokens=1400, temperature=0.12, prefer_quality=True,
         )
         if response.startswith("⚠️ Todos los proveedores"):
             _log.warning("StrategyLearner: AI no disponible")
@@ -411,25 +584,44 @@ def run_learning_cycle() -> dict | None:
         return None
 
     # ── 7. Construir el nuevo DNA maestro ───────────────────────────────────
-    new_version = int(prev_dna.get("version") or 1) + 1
+    new_version = int(
+        prev_dna.get("_version") or prev_dna.get("version") or 1
+    ) + 1
+
+    # Aplicar mínimos duros SIEMPRE — la IA puede sugerir, el sistema garantiza
+    safe_sw  = _safe_weights(new_dna_ai.get("signal_weights") or {})
+    safe_ses = _safe_session_weights(new_dna_ai.get("session_weights") or {})
+    safe_thr = _safe_thresholds(new_dna_ai.get("regime_thresholds") or {})
+
+    _log.info(
+        "StrategyLearner v%d — signal_weights FINALES: %s",
+        new_version,
+        {k: f"{v:.0%}" for k, v in safe_sw.items()}
+    )
+
     new_dna = {
-        "version":          new_version,
-        "source":           "meta_learner",
-        "evolved_at":       datetime.utcnow().isoformat(),
-        "obs_analyzed":     len(raw_obs),
-        "ai_insight":       new_dna_ai.get("ai_insight", "")[:300],
-        "macro_outlook":    new_dna_ai.get("macro_outlook", "")[:200],
-        "improvement":      new_dna_ai.get("improvement_vs_prev", "")[:200],
-        "signal_weights":   _safe_weights(new_dna_ai.get("signal_weights") or {}),
-        "session_weights":  _safe_session_weights(new_dna_ai.get("session_weights") or {}),
-        "regime_thresholds": _safe_thresholds(new_dna_ai.get("regime_thresholds") or {}),
-        "best_conditions":  new_dna_ai.get("best_conditions", [])[:5],
-        "avoid_conditions": new_dna_ai.get("avoid_conditions", [])[:5],
-        "best_combos":      best[:3],
-        "worst_combos":     worst[:3],
-        # Compatibilidad con el sistema de heal
-        "min_score":        new_dna_ai.get("regime_thresholds", {}).get("neutral", 68),
-        "dxy_filter_strength": new_dna_ai.get("signal_weights", {}).get("dxy", 1.0),
+        "version":              new_version,
+        "source":               "meta_learner_ai",
+        "evolved_at":           datetime.utcnow().isoformat(),
+        "obs_analyzed":         len(raw_obs),
+        "lt_strategies_tested": lt_results_count,
+        "certified_count":      len(certified),
+        "ai_insight":           new_dna_ai.get("ai_insight", "")[:400],
+        "macro_outlook":        new_dna_ai.get("macro_outlook", "")[:250],
+        "improvement":          new_dna_ai.get("improvement_vs_prev", "")[:250],
+        "signal_weights":       safe_sw,
+        "session_weights":      safe_ses,
+        "regime_thresholds":    safe_thr,
+        "best_conditions":      new_dna_ai.get("best_conditions", [])[:5],
+        "avoid_conditions":     new_dna_ai.get("avoid_conditions", [])[:5],
+        "best_combos":          best[:5],
+        "worst_combos":         worst[:5],
+        "certified_strategies": certified,
+        "fund_trend":           fund_summary.get("tendencia_general", "N/A") if fund_summary else "N/A",
+        "fund_pct_bullish":     fund_summary.get("pct_bullish", 0) if fund_summary else 0,
+        # Compatibilidad con el sistema de heal/score
+        "min_score":            safe_thr.get("neutral", 68),
+        "dxy_filter_strength":  safe_sw.get("dxy", 0.20),
     }
 
     # ── 8. Guardar en DB ────────────────────────────────────────────────────
