@@ -178,12 +178,22 @@ def _build_master_prompt(
     prev_versions: int,
     strategy_ranking: list | None = None,
     strategy_winners: list | None = None,
+    certified: list | None = None,
     fund_history: list | None = None,
 ) -> str:
+    _cert_note = (
+        f"🏆 CERTIFICADAS (ganan en 60d 1H Y en datos diarios desde 2008): {json.dumps(certified or [], ensure_ascii=False)}\n"
+        f"⚠️ REGLA: Solo usar estrategias certificadas para señales de máxima confianza. "
+        f"Si una estrategia NO está en la lista certificada, aplicar más cautela (score más alto requerido)."
+        if certified
+        else "Sin datos de backtest 2008 aún — usando solo filtro 60d."
+    )
     return f"""Eres el motor de meta-aprendizaje de SMC Pro, un bot de trading EUR/USD.
 
 Tu misión: analizar TODOS los datos disponibles y crear la ESTRATEGIA MAESTRA más rentable posible.
 La estrategia debe funcionar en el mayor número de condiciones posible, adaptándose a cada contexto.
+IMPORTANTE: Solo aprende de lo que GANA. Solo usa estrategias cuando han demostrado ser ganadoras
+en AMBOS filtros temporales (corto plazo 60d Y largo plazo desde 2008).
 
 ═══════════════════════════════════════════════
 DATOS ACUMULADOS ({obs_count} observaciones de mercado)
@@ -201,9 +211,11 @@ MEJORES COMBINACIONES (sesión × régimen × DXY):
 PEORES COMBINACIONES (evitar o requerir score muy alto):
 {json.dumps(worst_combos, ensure_ascii=False, indent=2)}
 
-ESTRATEGIAS GANADORAS EN BACKTEST REAL (últimos 60 días):
-Ganadoras (WR≥52%, PF≥1.1): {json.dumps(strategy_winners or [], ensure_ascii=False)}
-Ranking top-10: {json.dumps(strategy_ranking or [], ensure_ascii=False, indent=2)}
+ESTRATEGIAS — DOBLE FILTRO (60d 1H + desde 2008 diario):
+{_cert_note}
+Ganadoras 60d (WR≥52%, PF≥1.1): {json.dumps(strategy_winners or [], ensure_ascii=False)}
+Ranking detallado (winner_60d=gana reciente, winner_lt=gana desde 2008, certified=ambos):
+{json.dumps(strategy_ranking or [], ensure_ascii=False, indent=2)}
 
 SEÑAL FUNDAMENTAL — NOTICIAS (últimas 20 lecturas de RSS + FRED):
 {json.dumps(fund_history or [], ensure_ascii=False, indent=2) if fund_history else "Sin historial de noticias aún — se acumulará en las próximas horas"}
@@ -308,20 +320,29 @@ def run_learning_cycle() -> dict | None:
     # ── 3b. Datos de estrategias ganadoras del selector ────────────────────
     strategy_ranking: list[dict] = []
     strategy_winners: list[str]  = []
+    certified: list[str]         = []
     try:
         import strategy_selector as _ss
         _ss.ensure_ready()
         all_res, winners = _ss.get_cached_results()
+        lt_res, lt_winners = _ss.get_lt_cached_results()
+        cert_set = _ss.certified_winners()
         strategy_winners = list(winners)
+        certified        = list(cert_set)
+        lt_dict = {r["_name"]: r for r in lt_res}
         strategy_ranking = [
             {
-                "name":    r["_name"],
-                "label":   r["_label"],
-                "winrate": r.get("winrate", 0),
-                "pf":      r.get("profit_factor", 0),
-                "winner":  r["_name"] in winners,
+                "name":       r["_name"],
+                "label":      r["_label"],
+                "winrate":    r.get("winrate", 0),
+                "pf":         r.get("profit_factor", 0),
+                "lt_winrate": lt_dict.get(r["_name"], {}).get("winrate", 0),
+                "lt_pf":      lt_dict.get(r["_name"], {}).get("profit_factor", 0),
+                "winner_60d": r["_name"] in winners,
+                "winner_lt":  r["_name"] in lt_winners,
+                "certified":  r["_name"] in cert_set,  # pasa ambos filtros
             }
-            for r in all_res[:10]
+            for r in all_res[:12]
         ]
     except Exception:
         pass
@@ -365,6 +386,7 @@ def run_learning_cycle() -> dict | None:
         prev_versions=prev_versions,
         strategy_ranking=strategy_ranking,
         strategy_winners=strategy_winners,
+        certified=certified,
         fund_history=fund_history,
     )
 

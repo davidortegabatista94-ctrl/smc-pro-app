@@ -5110,42 +5110,83 @@ if _LEARNER_OK:
 
         # ── Ranking de estrategias ganadoras ─────────────────────────────────
         st.markdown("---")
-        st.markdown("**🏆 Ranking de estrategias ganadoras (backtest 60d)**")
+        st.markdown("**🏆 Ranking de estrategias — Doble Filtro (60d + 2008)**")
+        st.caption("🏆 Certificada (gana en 60d Y en 2008+) · ✅ Solo reciente (60d) · ❌ No gana actualmente")
         try:
             import strategy_selector as _ss_mod
             _ranking = _ss_mod.get_latest_ranking()
             if not _ranking:
                 _ranking = []
             if _ranking:
-                _rank_cols = st.columns([3, 1, 1, 1, 1])
+                # Contadores de estado
+                _n_cert = sum(1 for _r in _ranking if _r.get("is_certified") or _r.get("badge") == "🏆")
+                _n_60d  = sum(1 for _r in _ranking if (_r.get("is_winner_60d") or _r.get("is_winner")) and not (_r.get("is_certified") or _r.get("badge") == "🏆"))
+                _n_lt   = sum(1 for _r in _ranking if _r.get("is_winner_lt"))
+                _rk1, _rk2, _rk3 = st.columns(3)
+                _rk1.metric("🏆 Certificadas", _n_cert, help="Ganan en 60d 1H Y en 2008+ diario")
+                _rk2.metric("✅ Solo reciente", _n_60d, help="Ganan en 60d 1H pero no tienen datos 2008 aún")
+                _rk3.metric("📅 Ganan 2008+", _n_lt, help="Probadas rentables en datos históricos desde 2008")
+                st.markdown("")
+
+                _rank_cols = st.columns([3, 1, 1, 1, 1, 1])
                 _rank_cols[0].markdown("**Estrategia**")
-                _rank_cols[1].markdown("**WR%**")
-                _rank_cols[2].markdown("**PF**")
-                _rank_cols[3].markdown("**Pips**")
-                _rank_cols[4].markdown("**Estado**")
-                for _ri, _r in enumerate(_ranking[:10]):
-                    _rc = st.columns([3, 1, 1, 1, 1])
-                    _is_win = _r.get("is_winner", False)
-                    _emoji  = "✅" if _is_win else "❌"
-                    _lbl    = _r.get("label", _r.get("name", "?"))[:35]
-                    _rc[0].caption(f"{'🥇' if _ri==0 else '🥈' if _ri==1 else '🥉' if _ri==2 else f'{_ri+1}.'} {_lbl}")
-                    _wr_color = "🟢" if _r.get("winrate",0) >= 55 else "🔴"
-                    _rc[1].caption(f"{_wr_color} {_r.get('winrate',0):.0f}%")
-                    _rc[2].caption(f"{_r.get('profit_factor',0):.2f}")
-                    _rc[3].caption(f"{_r.get('net_pips',0):+.0f}")
-                    _rc[4].caption(_emoji)
+                _rank_cols[1].markdown("**WR 60d**")
+                _rank_cols[2].markdown("**PF 60d**")
+                _rank_cols[3].markdown("**WR 2008**")
+                _rank_cols[4].markdown("**PF 2008**")
+                _rank_cols[5].markdown("**Estado**")
+                for _ri, _r in enumerate(_ranking[:12]):
+                    _rc = st.columns([3, 1, 1, 1, 1, 1])
+                    # Determinar badge con retrocompatibilidad
+                    if _r.get("badge"):
+                        _emoji = _r["badge"]
+                    elif _r.get("is_certified"):
+                        _emoji = "🏆"
+                    elif _r.get("is_winner_60d") or _r.get("is_winner"):
+                        _emoji = "✅"
+                    else:
+                        _emoji = "❌"
+                    _lbl = _r.get("label", _r.get("name", "?"))[:30]
+                    _pos = "🥇" if _ri==0 else "🥈" if _ri==1 else "🥉" if _ri==2 else f"{_ri+1}."
+                    _rc[0].caption(f"{_pos} {_lbl}")
+                    _wr = _r.get("winrate", 0)
+                    _pf = _r.get("profit_factor", 0)
+                    _lt_wr = _r.get("lt_winrate", 0)
+                    _lt_pf = _r.get("lt_profit_factor", 0)
+                    _rc[1].caption(f"{'🟢' if _wr >= 55 else '🟡' if _wr >= 52 else '🔴'} {_wr:.0f}%")
+                    _rc[2].caption(f"{_pf:.2f}")
+                    _rc[3].caption(f"{'🟢' if _lt_wr >= 55 else '🟡' if _lt_wr >= 52 else '—'} {_lt_wr:.0f}%" if _lt_wr > 0 else "—")
+                    _rc[4].caption(f"{_lt_pf:.2f}" if _lt_pf > 0 else "—")
+                    _rc[5].caption(_emoji)
             else:
                 st.caption("El ranking se genera automáticamente cada 8h. Puedes forzarlo abajo.")
 
-            if st.button("🔄 Recalcular backtest ahora", key="_recalc_btn"):
-                with st.spinner("Ejecutando las 17 estrategias en datos reales (60d)..."):
-                    try:
-                        _ss_mod.refresh_cache(force=True)
-                        _ss_mod.save_ranking_to_db(_ss_mod._cached_results)
-                        st.success(f"✅ {len(_ss_mod._cached_winners)} estrategias ganadoras de {len(_ss_mod._cached_results)}")
-                        st.rerun()
-                    except Exception as _re:
-                        st.error(f"Error: {_re}")
+            _btn_col1, _btn_col2 = st.columns(2)
+            with _btn_col1:
+                if st.button("🔄 Recalcular 60d ahora", key="_recalc_btn"):
+                    with st.spinner("Ejecutando las 17 estrategias en datos reales (60d)..."):
+                        try:
+                            _ss_mod.refresh_cache(force=True)
+                            _ss_mod.save_ranking_to_db(_ss_mod._cached_results)
+                            _n_w = len(_ss_mod._cached_winners)
+                            _n_c = len(_ss_mod.certified_winners())
+                            st.success(f"✅ {_n_w} ganadoras 60d · {_n_c} certificadas (ambos filtros)")
+                            st.rerun()
+                        except Exception as _re:
+                            st.error(f"Error: {_re}")
+            with _btn_col2:
+                if st.button("📅 Recalcular 2008 ahora", key="_recalc_lt_btn",
+                             help="Puede tardar 60-90s — corre en background"):
+                    with st.spinner("Ejecutando backtest 2008+ en datos diarios (~60s)..."):
+                        try:
+                            _ss_mod.refresh_lt_cache(force=True)
+                            _ss_mod.save_ranking_to_db(_ss_mod._cached_results)
+                            _n_lt = len(_ss_mod._cached_lt_winners)
+                            _n_c  = len(_ss_mod.certified_winners())
+                            st.success(f"✅ {_n_lt} ganadoras 2008+ · {_n_c} certificadas (ambos filtros)")
+                            st.rerun()
+                        except Exception as _re:
+                            st.error(f"Error: {_re}")
         except Exception:
             st.caption("Módulo strategy_selector cargando...")
 
