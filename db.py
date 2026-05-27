@@ -1107,7 +1107,10 @@ def purge_bad_self_improvements() -> int:
                WHERE reason LIKE '⚠️ Todos los proveedores%'
                   OR reason LIKE '<think>%'
                   OR reason LIKE '%<think>%'
-                  OR LENGTH(TRIM(reason)) < 20"""
+                  OR reason LIKE '{%'
+                  OR reason LIKE '{ %'
+                  OR reason LIKE '%"health_status"%'
+                  OR LENGTH(TRIM(reason)) < 15"""
         )
         deleted = cur.rowcount
         conn.commit()

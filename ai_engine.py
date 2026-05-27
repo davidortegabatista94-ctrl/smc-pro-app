@@ -171,16 +171,27 @@ def call_ai(messages: list, max_tokens: int = 1200, temperature: float = 0.4,
 
 def _parse_json(text: str) -> dict | None:
     """Strip markdown fences and parse JSON. Returns None on failure."""
+    import re as _re
     text = text.strip()
+    # Strip markdown code fences
     if text.startswith("```"):
         parts = text.split("```")
         text = parts[1] if len(parts) > 1 else text
         if text.startswith("json"):
             text = text[4:]
+    # Try direct parse
     try:
         return json.loads(text.strip())
     except Exception:
-        return None
+        pass
+    # Try to find the first {...} block (handles preamble / postamble text)
+    m = _re.search(r'\{[\s\S]*\}', text)
+    if m:
+        try:
+            return json.loads(m.group())
+        except Exception:
+            pass
+    return None
 
 
 # ── Strategy DNA ──────────────────────────────────────────────────────────────

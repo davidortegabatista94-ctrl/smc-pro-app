@@ -5016,11 +5016,17 @@ with _sim_col2:
         try:
             _improvements = _db.get_self_improvements(limit=20)
             # Skip garbage entries: AI errors and raw <think> blocks
+            def _reason_ok(r: str) -> bool:
+                r = r.strip()
+                if not r or len(r) < 15:                         return False
+                if r.startswith("⚠️ Todos los proveedores"):     return False
+                if r.startswith("<think>"):                       return False
+                if r.startswith("{") or r.startswith("["):        return False  # raw JSON
+                if r.startswith("{ ") or '"health_status"' in r: return False  # JSON fragment
+                return True
             _improvements = [
                 _i for _i in _improvements
-                if not str(_i.get("reason", "")).startswith("⚠️ Todos los proveedores")
-                and not str(_i.get("reason", "")).strip().startswith("<think>")
-                and len(str(_i.get("reason", "")).strip()) > 20
+                if _reason_ok(str(_i.get("reason", "")))
             ][:5]
             if _improvements:
                 st.markdown("**📋 Últimas auto-mejoras aplicadas**")

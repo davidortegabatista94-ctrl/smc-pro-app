@@ -199,7 +199,11 @@ Responde SOLO con JSON (sin markdown):
                     "new_dna": None, "ts": datetime.utcnow().isoformat()}
         assessment = _ai._parse_json(response)
         if not assessment:
-            assessment = {"health_status": "unknown", "summary": response[:200],
+            # Parse failed — extract a readable summary instead of storing raw JSON
+            _summary = response[:200].strip()
+            if _summary.startswith("{") or '"health_status"' in _summary:
+                _summary = "Ciclo de análisis completado (sin cambios aplicados)"
+            assessment = {"health_status": "unknown", "summary": _summary,
                           "error_patterns": "", "top_finding": "", "parameter_changes": {},
                           "actions_taken": []}
     except Exception as e:
