@@ -2985,13 +2985,7 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
                         "están configurados en Railway."
                     )
             elif sys.platform != "win32":
-                st.info(
-                    "ℹ️ **Conecta OANDA para operar en vivo**\n\n"
-                    "Añade estas variables en Railway → Variables:\n"
-                    "• `OANDA_API_TOKEN` — token de tu cuenta OANDA\n"
-                    "• `OANDA_ACCOUNT_ID` — ID de cuenta OANDA\n\n"
-                    "El análisis y las señales funcionan sin esto."
-                )
+                st.success("✅ Modo señales activo — análisis y Telegram funcionando")
             else:
                 st.warning("⚠️ Paquete MetaTrader5 no instalado.\n\nEjecuta: `pip install MetaTrader5`")
 
@@ -4638,12 +4632,11 @@ _local_ok  = is_mt5_available() and mt5_connect()
 _any_conn  = _svc_ok or _local_ok
 
 if _svc_ok:
-    st.success("✅ OANDA/MT5 Service conectado — trading remoto disponible")
+    st.success("✅ OANDA conectado — trading automático disponible")
 elif _local_ok:
     st.success("✅ MT5 local conectado — trading disponible")
 else:
-    st.error("❌ Sin conexión MT5/OANDA — Bot no disponible")
-    st.info("Configura MT5_SERVICE_URL + OANDA_API_TOKEN en las variables de entorno de Railway, o abre MT5 localmente.")
+    st.info("📊 **Modo señales** — análisis, scoring y Telegram activos.\nEjecución automática de órdenes no configurada.")
 
 if _any_conn:
     # Estado actual del bot
