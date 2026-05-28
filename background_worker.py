@@ -18,14 +18,15 @@ from datetime import datetime, timezone
 
 _log = logging.getLogger("smc.bg")
 
-_CYCLE_SECS      = 180    # 3 minutos
-_STARTED         = False
-_LOCK            = threading.Lock()
-_BOT_MIN_SCORE   = 70     # score mínimo para ejecutar orden automática
-_MT5_SERVICE_URL = os.environ.get("MT5_SERVICE_URL", "").rstrip("/")
-_MT5_API_TOKEN   = os.environ.get("MT5_API_TOKEN", "")
-_SYMBOL          = "EURUSD"
-_BOT_VOLUME      = float(os.environ.get("BOT_DEFAULT_VOLUME", "0.01"))
+_CYCLE_SECS           = 180       # 3 minutos
+_STARTED              = False
+_LOCK                 = threading.Lock()
+_BOT_MIN_SCORE        = 70        # score mínimo para ejecutar orden automática
+_MT5_SERVICE_URL      = os.environ.get("MT5_SERVICE_URL", "").rstrip("/")
+_MT5_API_TOKEN        = os.environ.get("MT5_API_TOKEN", "")
+_SYMBOL               = "EURUSD"
+_BOT_VOLUME           = float(os.environ.get("BOT_DEFAULT_VOLUME", "0.01"))
+_STRAT_ALERT_COOLDOWN = 4 * 3600  # 4h entre alertas de la misma estrategia+dirección
 
 TELEGRAM_TOKEN   = os.environ.get(
     "TELEGRAM_BOT_TOKEN",
@@ -65,7 +66,7 @@ def _loop() -> None:
 
 
 def _cycle() -> None:
-    signal = _quick_signal()
+    signal, df_1h = _quick_signal()
     if not signal:
         return
 
@@ -173,7 +174,10 @@ def _cycle() -> None:
     # 5 — Bot autónomo (ejecuta orden si está activado en DB y score ≥ umbral)
     _bot_trade_if_due(signal, score)
 
-    # 6 — Telegram
+    # 6 — Alertas Telegram por estrategia
+    _check_strategy_alerts(df_1h, price)
+
+    # 7 — Telegram horario / urgente
     _telegram_if_due(signal, score)
 
 
@@ -386,18 +390,24 @@ def _service_post(path: str, body: dict) -> dict | None:
 # Señal rápida (sin Streamlit, sin MT5)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _quick_signal() -> dict:
-    """EUR/USD 1H via yfinance: precio, EMA21/50, RSI, régimen, score."""
+def _quick_signal() -> tuple:
+    """EUR/USD 1H via yfinance: precio, EMA21/50, RSI, régimen, score.
+    Retorna (signal_dict, df) — df tiene 20d de datos para las estrategias.
+    """
     try:
         import yfinance as yf
         import pandas as pd
 
         df = yf.download(
-            "EURUSD=X", period="5d", interval="1h",
+            "EURUSD=X", period="20d", interval="1h",
             progress=False, auto_adjust=True,
         )
         if df is None or df.empty or len(df) < 30:
-            return {}
+            return {}, None
+
+        # Flatten MultiIndex columns (yfinance multi-ticker format)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
         close = df["Close"].squeeze()
         high  = df["High"].squeeze()
@@ -464,10 +474,68 @@ def _quick_signal() -> dict:
             "ema50": round(ema50, 5),
             "atr_1h_pips": atr_pips,
             "dxy_dir": "",
-        }
+        }, df
     except Exception as exc:
         _log.debug("Quick signal error: %s", exc)
-        return {}
+        return {}, None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Alertas por estrategia
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _check_strategy_alerts(df, price: float) -> None:
+    """Evalúa las 17 estrategias y envía Telegram cuando alguna da señal de entrada.
+    Cooldown de 4h por estrategia+dirección para evitar spam.
+    """
+    if df is None or len(df) < 115:
+        return
+    try:
+        from backend.strategies import _live_strategy_signal
+        from backend.knowledge_base import _STRATEGY_META
+        import db as _db
+    except Exception as e:
+        _log.debug("_check_strategy_alerts import error: %s", e)
+        return
+
+    now = datetime.now(timezone.utc)
+
+    for strat_key, meta in _STRATEGY_META.items():
+        try:
+            direction, reason = _live_strategy_signal(df, strat_key)
+            if direction not in ("LONG", "SHORT"):
+                continue
+
+            # Cooldown: 4h entre alertas de la misma estrategia+dirección
+            db_key = f"strat_tg_{strat_key}_{direction}"
+            last_alert = _db.get_setting(db_key)
+            if last_alert:
+                try:
+                    last_dt = datetime.fromisoformat(last_alert)
+                    if not last_dt.tzinfo:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    if (now - last_dt).total_seconds() < _STRAT_ALERT_COOLDOWN:
+                        continue
+                except Exception:
+                    pass
+
+            icon  = "🟢" if direction == "LONG" else "🔴"
+            label = meta.get("label", strat_key)
+            msg = (
+                f"🎯 *SEÑAL DE ENTRADA — SMC Pro*\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"📊 Estrategia: *{label}*\n"
+                f"💱 EUR/USD: `{price:.5f}`\n"
+                f"{icon} Dirección: *{direction}*\n"
+                f"📝 {reason}\n"
+                f"🕐 UTC {now.strftime('%H:%M')}  |  Bot SMC Pro"
+            )
+            if _send_tg(msg):
+                _db.set_setting(db_key, now.isoformat())
+                _log.info("Alerta estrategia enviada: %s %s", strat_key, direction)
+
+        except Exception as e:
+            _log.debug("Strategy alert error [%s]: %s", strat_key, e)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
