@@ -3825,6 +3825,20 @@ if st.session_state.analysis_executed:
             trades_history=_chart_trades,
         )
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECCIÓN: ANÁLISIS TÉCNICO AVANZADO
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown(
+        '<div style="background:linear-gradient(90deg,#0d2137,#0a3d62);'
+        'border-left:4px solid #1e90ff;border-radius:8px;padding:10px 18px;margin:18px 0 4px 0">'
+        '<span style="color:#1e90ff;font-size:13px;font-weight:700;letter-spacing:1px">'
+        '📈 ANÁLISIS TÉCNICO AVANZADO</span>'
+        '<span style="color:#8b949e;font-size:11px;margin-left:10px">'
+        'DNA · Volumen · Scalping · Estructura · Manipulación</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     # ── Strategy DNA Panel ────────────────────────────────────────────────────
     st.markdown('<div id="sec-dna"></div>', unsafe_allow_html=True)
     st.markdown("---")
@@ -4089,6 +4103,20 @@ if st.session_state.analysis_executed:
         else:
             st.info("⚪ Sin absorción institucional detectada")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECCIÓN: FUNDAMENTAL & COT
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown(
+        '<div style="background:linear-gradient(90deg,#0d2137,#1a3a1a);'
+        'border-left:4px solid #3fb950;border-radius:8px;padding:10px 18px;margin:18px 0 4px 0">'
+        '<span style="color:#3fb950;font-size:13px;font-weight:700;letter-spacing:1px">'
+        '🏦 FUNDAMENTAL & INSTITUCIONAL</span>'
+        '<span style="color:#8b949e;font-size:11px;margin-left:10px">'
+        'COT Report · Grandes Inversores · CFTC</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     # ── COT — Datos Institucionales (auto-actualizados cada 6h) ─────────────
     st.markdown('<div id="sec-cot"></div>', unsafe_allow_html=True)
     st.markdown("---")
@@ -4144,6 +4172,20 @@ if st.session_state.analysis_executed:
         st.write("**Fuente:** CFTC (semanal, viernes)")
         st.write("**Refresco:** automático cada 6h")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECCIÓN: IA & ESTRATEGIAS
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown(
+        '<div style="background:linear-gradient(90deg,#0d2137,#2d1b4e);'
+        'border-left:4px solid #a855f7;border-radius:8px;padding:10px 18px;margin:18px 0 4px 0">'
+        '<span style="color:#a855f7;font-size:13px;font-weight:700;letter-spacing:1px">'
+        '🤖 IA & ESTRATEGIAS</span>'
+        '<span style="color:#8b949e;font-size:11px;margin-left:10px">'
+        'Motor de Bias · Confluencia · Señales</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     # ── IA — Motor de Bias ────────────────────────────────────────────────────
     st.markdown('<div id="sec-ia"></div>', unsafe_allow_html=True)
     st.markdown("---")
@@ -4183,1218 +4225,1236 @@ if st.session_state.analysis_executed:
 else:
     st.info("📊 Presiona 'ANALIZAR MERCADO' para ver el análisis completo")
 
-# ── BACKTEST + COMPARACIÓN DE ESTRATEGIAS + CONTEXTO DE MERCADO ───────────────
-st.markdown('<div id="sec-backtest"></div>', unsafe_allow_html=True)
+
+# Navegacion principal
 st.markdown("---")
-st.subheader("🧠 Backtest Inteligente — 4 Estrategias + Contexto Fundamental")
-st.caption(
-    "Compara 4 estrategias sobre el mismo año de datos. La ganadora se guarda en la base de conocimiento. "
-    "El panel de contexto explica POR QUÉ el mercado está donde está (técnico + fundamental + institucional)."
-)
+_t_bt, _t_bot, _t_mejora, _t_ia = st.tabs([
+    "📊 Backtest & Mercado",
+    "🤖 Bot & Posiciones",
+    "🔬 Auto-Mejora",
+    "🧠 Asesor IA",
+])
 
-bt_ctrl_l, bt_ctrl_r = st.columns([1, 2])
-with bt_ctrl_l:
-    bt_use_windows = st.checkbox("Solo ventanas 7-12h / 15-20h", value=True, key="bt_windows")
-    run_bt_btn = st.button("🚀 Comparar 17 Estrategias (~1 año)", type="primary", key="run_bt")
-    if run_bt_btn:
-        with st.spinner("Descargando hasta 1 año de datos EURUSD 1h..."):
-            bt_df = get_backtest_data("1h")
-        if bt_df.empty:
-            st.error("Sin datos históricos — verifica conexión a internet.")
-        else:
-            n_c = len(bt_df)
-            with st.spinner(f"Comparando 17 estrategias sobre {n_c} velas ({n_c//24}d) — puede tardar 30-90s..."):
-                cmp = run_strategy_comparison(bt_df, use_windows=bt_use_windows)
-            if not cmp:
-                st.warning("Sin operaciones — pocos datos o mercado lateral extremo.")
-            else:
-                st.session_state.strategy_comparison = cmp
-                st.session_state.backtest_result = cmp["best"]
-                # Persistir en DB + disco
-                _save_bt_cache(cmp, st.session_state.get("lt_comparison"))
-                if _DB_OK:
-                    try:
-                        _sig_snap = signal if isinstance(signal, dict) else {}
-                        _db.save_snapshot(
-                            price=price or 0,
-                            signal=_sig_snap.get("final_signal", "NEUTRAL"),
-                            score=score or 0,
-                            dxy_trend=dxy_trend or "",
-                            regime=_sig_snap.get("regime", ""),
-                            strategy=cmp["best"].get("strategy", ""),
-                            extra={"best_pf": cmp["best"].get("profit_factor", 0),
-                                   "best_wr": cmp["best"].get("winrate", 0)},
-                        )
-                    except Exception:
-                        pass
-                # Contexto de mercado sobre los mismos datos del backtest
-                cot_snap  = st.session_state.get("cot_data")
-                cal_snap  = st.session_state.get("economic_calendar") or get_economic_calendar()
-                news_snap = st.session_state.get("current_news") or []
-                ctx_snap  = explain_market_context(bt_df, cot=cot_snap, calendar=cal_snap, news=news_snap)
-                st.session_state.market_context_reasons = ctx_snap
-                # Guardar en base de conocimiento (incluye contexto fundamental)
-                kb = update_kb(cmp, cot=cot_snap, calendar=cal_snap, market_ctx=ctx_snap)
-                st.success(
-                    f"✅ Comparación completada. Mejor estrategia: **{cmp['best']['label']}** "
-                    f"(PF={cmp['best']['profit_factor']} · WR={cmp['best']['winrate']}%)"
-                )
-
-with bt_ctrl_r:
-    # Calendario económico — auto-cargado desde DB (background worker lo actualiza cada 6h)
-    st.caption("📅 **Calendario económico** — actualización automática cada 6h")
-    cal_data = []
-    try:
-        if _DB_OK:
-            _cal_rows = _db.get_metrics(name="economic_calendar", limit=1) or []
-            if _cal_rows:
-                _cal_ts   = str(_cal_rows[0].get("created_at", ""))[:16]
-                cal_data  = (_cal_rows[0].get("context") or {}).get("events", [])
-                if cal_data:
-                    st.session_state.economic_calendar = cal_data
-    except Exception:
-        pass
-    if not cal_data:
-        cal_data = st.session_state.get("economic_calendar") or []
-    if cal_data:
-        _cal_ts_str = _cal_ts if "_cal_ts" in dir() else ""
-        if _cal_ts_str:
-            st.caption(f"Actualizado: {_cal_ts_str}")
-        high_ev = [e for e in cal_data if e.get("impact","").upper() == "HIGH"]
-        med_ev  = [e for e in cal_data if e.get("impact","").upper() == "MEDIUM"]
-        st.markdown(f"**Esta semana:** {len(high_ev)} eventos ALTO impacto · {len(med_ev)} MEDIO impacto")
-        for ev in high_ev[:5]:
-            st.markdown(
-                f"🔴 **[{ev.get('currency','')}]** {ev.get('title','')} "
-                f"— {str(ev.get('date',''))[:10]} "
-                f"| Prev: {ev.get('previous','?')} | Fore: {ev.get('forecast','?')}"
-            )
-    else:
-        st.info("⏳ El servidor cargará el calendario automáticamente (cada 6h).")
-
-# ── Comparación de estrategias ─────────────────────────────────────────────
-cmp_result = st.session_state.get("strategy_comparison")
-if cmp_result:
-    st.markdown("### 📊 Ranking de Estrategias")
-    best_name = cmp_result["best"]["strategy"]
-
-    if "_RANK_EMOJI" not in globals():
-        _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
-    # Tabla comparativa
-    rows = []
-    for i, r in enumerate(cmp_result["results"]):
-        rentable = r.get("profit_factor", 0) >= 1.0 and r.get("winrate", 0) >= r.get("be_winrate", 0)
-        be_n = r.get("be_count", 0)
-        rows.append({
-            "Pos":          _RANK_EMOJI[i] if i < len(_RANK_EMOJI) else f"#{i+1}",
-            "Estrategia":   r.get("label", r.get("strategy", "?")),
-            "Operaciones":  r.get("total", 0),
-            "Win Rate":     f"{r.get('winrate', 0)}%",
-            "BE (scratch)": be_n,
-            "WR sin BE":    f"{r.get('be_winrate', 0)}%",
-            "Profit Factor":f"{r.get('profit_factor', 0)}x",
-            "Net Pips":     f"{r.get('net_pips', 0):+.1f}",
-            "Max DD":       f"{r.get('max_dd', 0)}%",
-            "P&L $":        f"${r.get('net_pnl', 0):+.2f}",
-            "Estado":       "✅ Rentable" if rentable else "⚠️ Marginal",
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-    # Ganadora detallada
-    best = cmp_result["best"]
-    st.markdown(f"### 🏆 Estrategia Ganadora: {best['label']}")
-    st.info(f"**Por qué funciona:** {best['why']}\n\n✅ **Ventajas:** {best['pros']}\n\n⚠️ **Limitaciones:** {best['cons']}")
-
-    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-    mc1.metric("Operaciones", best["total"])
-    mc2.metric("Win Rate", f"{best['winrate']}%", delta=f"BE={best['be_winrate']}%")
-    mc3.metric("Profit Factor", f"{best['profit_factor']}x")
-    mc4.metric("Net Pips", f"{best['net_pips']:+.1f}p")
-    mc5.metric("Max Drawdown", f"{best['max_dd']}%")
-
-    # Curva de capital de la ganadora
-    eq_list = best.get("equity", [])
-    if len(eq_list) > 2:
-        st.write("**Curva de capital — estrategia ganadora ($10,000 capital inicial · 0.01 lot):**")
-        st.line_chart(pd.DataFrame({"Capital ($)": eq_list}), height=220)
-
-    # Tabs: curvas de todas + tabla de trades
-    with st.expander("Ver curvas de capital de todas las estrategias", expanded=False):
-        max_len = max(len(r["equity"]) for r in cmp_result["results"])
-        eq_all = {}
-        for r in cmp_result["results"]:
-            eq_padded = r["equity"] + [r["equity"][-1]] * (max_len - len(r["equity"]))
-            eq_all[r["label"][:20]] = eq_padded
-        st.line_chart(pd.DataFrame(eq_all), height=240)
-
-    with st.expander(f"Ver operaciones de '{best['label']}' ({len(best.get('trades',[]))} trades)", expanded=False):
-        raw = best.get("trades", [])
-        if raw:
-            td = pd.DataFrame(raw)
-            if "outcome" in td.columns:
-                td["Resultado"] = td["outcome"].map({"TP":"✅ TP","SL":"❌ SL","BE":"🔄 BE 0p","MAX":"⏱ MAX","OPEN":"🔄 Abierta"})
-            cols_s = [c for c in ["time","dir","Resultado","pips","pnl"] if c in td.columns]
-            st.dataframe(
-                td[cols_s].rename(columns={"time":"Entrada","dir":"Dirección","pips":"Pips","pnl":"P&L $"}),
-                use_container_width=True, hide_index=True
-            )
-
-    # Base de conocimiento histórica
-    kb = load_knowledge_base()
-    if kb.get("runs"):
-        _kb_total_runs = len(kb["runs"])
-        _kb_sig_stats  = kb.get("signal_stats", {})
-        with st.expander(f"📚 Base de conocimiento ({_kb_total_runs} backtests · señales evaluadas)", expanded=False):
-            _col_kb1, _col_kb2 = st.columns(2)
-            with _col_kb1:
-                if kb.get("strategy_wins"):
-                    st.markdown("**Ranking histórico de estrategias:**")
-                    for s, cnt in sorted(kb["strategy_wins"].items(), key=lambda x: -x[1]):
-                        meta = _STRATEGY_META.get(s, {})
-                        st.markdown(f"- **{meta.get('label', s)}**: nº1 en {cnt} backtest(s)")
-            with _col_kb2:
-                if _kb_sig_stats:
-                    st.markdown("**Aciertos de señal KB por estrategia:**")
-                    for s, ss in sorted(_kb_sig_stats.items(), key=lambda x: -(x[1].get("correct",0))):
-                        ok = ss.get("correct", 0); ko = ss.get("wrong", 0)
-                        acc = f"{ok/(ok+ko)*100:.0f}%" if (ok+ko) > 0 else "—"
-                        meta = _STRATEGY_META.get(s, {})
-                        st.markdown(f"- **{meta.get('label',s)}**: {ok}✅ {ko}❌ → {acc}")
-            hist_rows = []
-            for run in reversed(kb["runs"][-15:]):
-                hist_rows.append({
-                    "Fecha":    run.get("ts","?")[:10],
-                    "Ganadora": _STRATEGY_META.get(run.get("best",""), {}).get("label", run.get("best","?")),
-                    "PF":       run.get("pf","?"),
-                    "WR":       f"{run.get('wr','?')}%",
-                    "Ops":      run.get("total","?"),
-                    "NetPips":  run.get("net_pips","?"),
-                    "COT":      run.get("cot_bias") or "—",
-                    "Eventos":  run.get("events_high",0),
-                })
-            st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
-            # Mostrar el "por qué" del último backtest
-            _last_run = kb["runs"][-1]
-            if _last_run.get("market_ctx"):
-                st.markdown("**Contexto fundamental del último backtest:**")
-                for _rc in _last_run["market_ctx"]:
-                    st.markdown(f"  - {_rc}")
-else:
-    st.info("Pulsa **'Comparar 17 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
-
-# ════════════════════════════════════════════════════════════════════════════════
-# BACKTEST HISTÓRICO LARGO PLAZO — DESDE 2008 (DATOS DIARIOS)
-# ════════════════════════════════════════════════════════════════════════════════
-st.markdown('<div id="sec-backtest2008"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🌍 Backtest Histórico — Desde 2008 hasta Hoy (Datos Diarios)")
-st.caption(
-    "Descarga datos diarios EUR/USD desde 2008 (~4,000 velas) y ejecuta las 17 estrategias. "
-    "Los umbrales ATR se escalan automáticamente para barras diarias. "
-    "Resultado: cuál estrategia habría sido más rentable en 16+ años de mercado real."
-)
-
-if "lt_comparison" not in st.session_state:
-    _bt_disk2 = _load_bt_cache()
-    st.session_state.lt_comparison = _bt_disk2.get("lt")
-
-_lt_cols = st.columns([1, 2])
-with _lt_cols[0]:
-    _run_lt = st.button("🚀 Backtest 2008–Hoy (17 estrategias · datos diarios)",
-                        type="primary", key="run_lt")
-    if _run_lt:
-        with st.spinner("Descargando datos diarios EUR/USD desde 2008..."):
-            _lt_df = get_longterm_data_2008()
-        if _lt_df.empty:
-            st.error("No se pudieron descargar datos históricos. Verifica conexión a internet.")
-        else:
-            _lt_n = len(_lt_df)
-            _lt_years = round(_lt_n / 252)
-            with st.spinner(f"Ejecutando 17 estrategias sobre {_lt_n} días (~{_lt_years} años) — paralelo, ~15-30s..."):
-                _lt_cmp = run_longterm_comparison(_lt_df)
-            if not _lt_cmp:
-                st.warning("Sin operaciones válidas en datos históricos.")
-            else:
-                st.session_state.lt_comparison = _lt_cmp
-                st.session_state.lt_n_bars = _lt_n
-                # Persistir en disco para sobrevivir recargas de página
-                _save_bt_cache(st.session_state.get("strategy_comparison"), _lt_cmp)
-                st.success(
-                    f"✅ Completado — {_lt_n} barras diarias · Mejor estrategia: "
-                    f"**{_lt_cmp['best']['label']}** "
-                    f"(PF={_lt_cmp['best']['profit_factor']} · "
-                    f"WR={_lt_cmp['best']['winrate']}% · "
-                    f"{_lt_cmp['best']['net_pips']:+.0f} pips)"
-                )
-
-with _lt_cols[1]:
-    st.markdown(
-        "**Diferencias vs backtest de 1 año:**\n"
-        "- Datos diarios — cada barra = 1 día de trading\n"
-        "- ATR umbral escalado a ≥40 pips (vs 4p en 1h)\n"
-        "- Cooldown de 3 días entre entradas\n"
-        "- Sin filtro de horario (ventana London/NY)\n"
-        "- 16+ años incluyen: crisis 2008, COVID 2020, subidas Fed 2022-23"
+with _t_bt:
+    # ── BACKTEST + COMPARACIÓN DE ESTRATEGIAS + CONTEXTO DE MERCADO ───────────────
+    st.markdown('<div id="sec-backtest"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🧠 Backtest Inteligente — 4 Estrategias + Contexto Fundamental")
+    st.caption(
+        "Compara 4 estrategias sobre el mismo año de datos. La ganadora se guarda en la base de conocimiento. "
+        "El panel de contexto explica POR QUÉ el mercado está donde está (técnico + fundamental + institucional)."
     )
 
-_lt_cmp_result = st.session_state.get("lt_comparison")
-if _lt_cmp_result:
-    _lt_n_bars = st.session_state.get("lt_n_bars", 0)
-    _lt_years  = round(_lt_n_bars / 252) if _lt_n_bars else "?"
-    st.markdown(f"### 📊 Ranking Histórico 2008–Hoy ({_lt_n_bars} barras · ~{_lt_years} años)")
-
-    if "_RANK_EMOJI" not in globals():
-        _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
-    _lt_rows = []
-    for _i, _r in enumerate(_lt_cmp_result["results"]):
-        _rentable = _r.get("profit_factor", 0) >= 1.0
-        _be_n = _r.get("be_count", 0)
-        _lt_rows.append({
-            "Pos":           _RANK_EMOJI[_i] if _i < len(_RANK_EMOJI) else f"#{_i+1}",
-            "Estrategia":    _r.get("label", _r.get("strategy", "?")),
-            "Operaciones":   _r.get("total", 0),
-            "Win Rate":      f"{_r.get('winrate', 0)}%",
-            "BE (scratch)":  _be_n,
-            "Profit Factor": f"{_r.get('profit_factor', 0)}x",
-            "Net Pips":      f"{_r.get('net_pips', 0):+.0f}",
-            "Max DD":        f"{_r.get('max_dd', 0)}%",
-            "P&L $":         f"${_r.get('net_pnl', 0):+.2f}",
-            "Estado":        "✅ Rentable" if _rentable else "⚠️ Marginal",
-        })
-    st.dataframe(pd.DataFrame(_lt_rows), use_container_width=True, hide_index=True)
-
-    _lt_best = _lt_cmp_result["best"]
-    st.markdown(f"### 🏆 Mejor Estrategia Histórica (2008–Hoy): {_lt_best['label']}")
-    _ltc1, _ltc2, _ltc3, _ltc4, _ltc5 = st.columns(5)
-    _ltc1.metric("Operaciones", _lt_best.get("total", 0))
-    _ltc2.metric("Win Rate", f"{_lt_best.get('winrate', 0)}%")
-    _ltc3.metric("Profit Factor", f"{_lt_best.get('profit_factor', 0)}x")
-    _ltc4.metric("Net Pips", f"{_lt_best.get('net_pips', 0):+.0f}p")
-    _ltc5.metric("Max Drawdown", f"{_lt_best.get('max_dd', 0)}%")
-
-    st.info(
-        f"**Por qué funciona a largo plazo:** {_lt_best.get('why', '')}\n\n"
-        f"✅ **Ventajas:** {_lt_best.get('pros', '')}\n\n"
-        f"⚠️ **Limitaciones:** {_lt_best.get('cons', '')}"
-    )
-
-    # Curva de capital de la ganadora histórica
-    _lt_eq = _lt_best.get("equity", [])
-    if len(_lt_eq) > 2:
-        st.write(f"**Curva de capital 2008–Hoy — {_lt_best['label']} ($10,000 inicial · 0.01 lot):**")
-        st.line_chart(pd.DataFrame({"Capital ($)": _lt_eq}), height=260)
-
-    with st.expander("Ver curvas de todas las estrategias — largo plazo", expanded=False):
-        _lt_max_len = max(len(_r["equity"]) for _r in _lt_cmp_result["results"])
-        _lt_eq_all  = {}
-        for _r in _lt_cmp_result["results"]:
-            _eq_pad = _r["equity"] + [_r["equity"][-1]] * (_lt_max_len - len(_r["equity"]))
-            _lt_eq_all[_r["label"][:20]] = _eq_pad
-        st.line_chart(pd.DataFrame(_lt_eq_all), height=260)
-
-    with st.expander(
-        f"Ver operaciones de '{_lt_best['label']}' ({len(_lt_best.get('trades', []))} trades)",
-        expanded=False
-    ):
-        _lt_raw = _lt_best.get("trades", [])
-        if _lt_raw:
-            _lt_td = pd.DataFrame(_lt_raw)
-            if "outcome" in _lt_td.columns:
-                _lt_td["Resultado"] = _lt_td["outcome"].map(
-                    {"TP": "✅ TP", "SL": "❌ SL", "BE": "🔄 BE 0p", "OPEN": "🔄 Abierta"}
-                )
-            _lt_cols_s = [c for c in ["time", "dir", "Resultado", "pips", "pnl"] if c in _lt_td.columns]
-            st.dataframe(
-                _lt_td[_lt_cols_s].rename(
-                    columns={"time": "Fecha", "dir": "Dirección", "pips": "Pips (día)", "pnl": "P&L $"}
-                ),
-                use_container_width=True, hide_index=True,
-            )
-
-# ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
-st.markdown('<div id="sec-porq"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🔍 Por qué se mueve el EUR/USD — Análisis Técnico + Fundamental")
-ctx_reasons = st.session_state.get("market_context_reasons")
-if ctx_reasons:
-    for reason in ctx_reasons:
-        st.markdown(f"- {reason}")
-    st.caption("Fuentes: EMA técnico · RSI/MACD momentum · COT CFTC institucional · Calendario ForexFactory · RSS noticias")
-else:
-    st.info(
-        "Ejecuta primero el backtest (botón arriba) y asegúrate de tener datos COT y calendario cargados. "
-        "Este panel explicará en detalle POR QUÉ el mercado está donde está."
-    )
-
-# ── BOT AUTOMÁTICO (SIEMPRE VISIBLE) ───────────────────────────────────────────
-st.markdown('<div id="sec-bot"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🤖 Modo Bot Automático")
-
-# Información de diagnóstico MT5
-if sys.platform != "win32":
-    st.info(
-        "ℹ️ **Bot automático desactivado en servidor cloud.**  "
-        "MT5 requiere Windows. Las señales, alertas Telegram y el backtest "
-        "funcionan con normalidad — solo la ejecución de órdenes requiere la "
-        "versión local en PC con Windows."
-    )
-else:
-    st.write("**🔍 Diagnóstico MT5:**")
-    col_diag1, col_diag2, col_diag3 = st.columns(3)
-    with col_diag1:
-        if is_mt5_available():
-            st.success("✅ MT5 instalado")
-        else:
-            st.error("❌ MT5 no instalado")
-    with col_diag2:
-        if is_mt5_available():
-            connected_diag = mt5_connect()
-            if connected_diag:
-                st.success("✅ MT5 conectado")
+    bt_ctrl_l, bt_ctrl_r = st.columns([1, 2])
+    with bt_ctrl_l:
+        bt_use_windows = st.checkbox("Solo ventanas 7-12h / 15-20h", value=True, key="bt_windows")
+        run_bt_btn = st.button("🚀 Comparar 17 Estrategias (~1 año)", type="primary", key="run_bt")
+        if run_bt_btn:
+            with st.spinner("Descargando hasta 1 año de datos EURUSD 1h..."):
+                bt_df = get_backtest_data("1h")
+            if bt_df.empty:
+                st.error("Sin datos históricos — verifica conexión a internet.")
             else:
-                st.error("❌ MT5 no conectado")
-                err = get_mt5_error()
-                if err:
-                    st.warning(f"🛠️ Error: {err}")
-                st.info("💡 Abre MetaTrader 5 y verifica que esté funcionando")
-        else:
-            st.error("❌ No disponible")
-    with col_diag3:
-        if is_mt5_available() and mt5_connect():
-            terminal_info = mt5.terminal_info()
-            if terminal_info:
-                st.success(f"✅ Terminal: {terminal_info.name}")
-            else:
-                st.warning("⚠️ Terminal info no disponible")
-        else:
-            st.error("❌ No disponible")
-
-# Inicializar estado del bot en session_state
-if "bot_enabled" not in st.session_state:
-    st.session_state.bot_enabled = False
-if "bot_volume" not in st.session_state:
-    st.session_state.bot_volume = 0.01
-if "bot_last_signal" not in st.session_state:
-    st.session_state.bot_last_signal = None
-if "bot_just_activated" not in st.session_state:
-    st.session_state.bot_just_activated = False
-
-# Sincronizar variables globales con session_state
-BOT_ENABLED = st.session_state.bot_enabled
-BOT_VOLUME = st.session_state.bot_volume
-BOT_LAST_SIGNAL = st.session_state.bot_last_signal
-
-# ── Detectar fuente de conexión disponible ────────────────────────────────
-_svc_ok    = _mt5_service_available() and mt5_service_health().get("mt5") == "connected"
-_local_ok  = is_mt5_available() and mt5_connect()
-_any_conn  = _svc_ok or _local_ok
-
-if _svc_ok:
-    st.success("✅ OANDA conectado — trading automático disponible")
-elif _local_ok:
-    st.success("✅ MT5 local conectado — trading disponible")
-else:
-    st.info("📊 **Modo señales** — análisis, scoring y Telegram activos.\nEjecución automática de órdenes no configurada.")
-
-if _any_conn:
-    # Estado actual del bot
-    if st.session_state.bot_enabled:
-        st.success("🚀 **BOT ACTIVO** - Ejecutando señales automáticamente")
-    else:
-        st.info("⏸️ **BOT INACTIVO** - Modo manual")
-
-    # Estado del bot — solo lectura, corre automáticamente en el servidor
-    _bot_cols = st.columns([2, 1])
-    with _bot_cols[0]:
-        if st.session_state.bot_enabled:
-            st.success("🤖 **Bot ACTIVO** — analizando señales automáticamente 24/7")
-        else:
-            st.info("📊 **Modo señales** — acumulando datos y aprendiendo del mercado")
-    with _bot_cols[1]:
-        positions_mt5 = get_mt5_positions()
-        if positions_mt5:
-            st.warning(f"📊 {len(positions_mt5)} posiciones abiertas · cierre automático por TP/SL")
-        else:
-            st.caption("🎯 Sin posiciones abiertas")
-
-    # ── Panel de posiciones abiertas ──────────────────────────────────────────
-    _live_pos = get_mt5_positions()
-    if _live_pos:
-        st.markdown("#### 📊 Posiciones Abiertas")
-        for _p in _live_pos:
-            # Compatibilidad: dict (OANDA remoto) u objeto MT5 (local)
-            def _pv(attr, default=0):
-                return _p.get(attr, default) if isinstance(_p, dict) else getattr(_p, attr, default)
-            _ticket   = _pv("ticket", "—")
-            _open_p   = float(_pv("open_price") or _pv("price_open", 0))
-            _cur_p    = float(_pv("current_price") or _pv("price_current", _open_p))
-            _sl_p     = float(_pv("sl", 0))
-            _vol      = float(_pv("volume", 0))
-            _profit   = float(_pv("profit", 0))
-            _type_raw = _pv("type", "BUY")
-            _is_buy   = (_type_raw in (0, "BUY", "LONG")) if not isinstance(_type_raw, str) else _type_raw.upper() in ("BUY", "LONG")
-            _dir_lbl  = "LONG" if _is_buy else "SHORT"
-            _ppips    = (_cur_p - _open_p) / 0.0001 if _is_buy else (_open_p - _cur_p) / 0.0001
-            _be_icon  = "⚖️ BE" if (_sl_p >= _open_p if _is_buy else _sl_p <= _open_p) and _sl_p != 0 else "🎯"
-            st.markdown(
-                f"**#{_ticket}** {_dir_lbl} {_vol}L @ {_open_p:.5f} "
-                f"| Actual: {_cur_p:.5f} "
-                f"| {_be_icon} P&L: {_ppips:+.1f}p (${_profit:.2f})"
-            )
-    else:
-        st.info("🎯 Sin posiciones abiertas")
-
-    # ── Break-Even automático ─────────────────────────────────────────────────
-    if st.session_state.bot_enabled and _live_pos:
-        _be_msgs = manage_positions_be()
-        for _bm in _be_msgs:
-            st.success(f"⚖️ {_bm}")
-
-    # ── Información de riesgo y lógica del bot ────────────────────────────────
-    if st.session_state.bot_enabled:
-        st.warning("⚠️ **BOT ACTIVO** — Trading automático en curso")
-        st.info(f"💰 Volumen: {st.session_state.bot_volume} lotes | SL máx: {SCALP_SL_PIPS}p")
-
-        # Lógica del bot: ejecutar señal si condiciones se cumplen
-        _bot_score = score if st.session_state.analysis_executed else 0
-        _bot_signal = signal if st.session_state.analysis_executed else {}
-        _bot_liq = liq_levels if st.session_state.analysis_executed else []
-
-        if not st.session_state.analysis_executed:
-            st.info("🔄 Presiona 'ANALIZAR MERCADO' primero para activar el bot")
-        elif st.session_state.bot_just_activated:
-            st.info("🤖 Bot activado — esperando próxima señal de calidad...")
-            st.session_state.bot_just_activated = False
-        elif _bot_signal.get("direction") and _bot_score >= MIN_DEFINITIVE_SCORE:
-            # Solo ejecutar si no hay posiciones abiertas y la señal cambió
-            if _live_pos:
-                st.info(f"🔒 Posición abierta — bot monitorea BE y gestión automática")
-            elif st.session_state.bot_last_signal != _bot_signal.get("direction"):
-                _ok, _msg = auto_trade_signal(_bot_signal, st.session_state.bot_volume, liq_levels=_bot_liq)
-                if _ok:
-                    st.success(f"🚀 Bot ejecutó trade: {_msg}")
-                    st.session_state.bot_last_signal = _bot_signal.get("direction")
-                    # Persistir trade en DB con snapshot de mercado
+                n_c = len(bt_df)
+                with st.spinner(f"Comparando 17 estrategias sobre {n_c} velas ({n_c//24}d) — puede tardar 30-90s..."):
+                    cmp = run_strategy_comparison(bt_df, use_windows=bt_use_windows)
+                if not cmp:
+                    st.warning("Sin operaciones — pocos datos o mercado lateral extremo.")
+                else:
+                    st.session_state.strategy_comparison = cmp
+                    st.session_state.backtest_result = cmp["best"]
+                    # Persistir en DB + disco
+                    _save_bt_cache(cmp, st.session_state.get("lt_comparison"))
                     if _DB_OK:
                         try:
-                            _mkt_snap = {}
-                            if _AI_ENGINE_OK:
-                                _mkt_snap = _ai_engine.build_market_snapshot(
-                                    _bot_signal, _bot_score, session, dxy_dir,
-                                    vol_spikes, delta,
-                                    st.session_state.get("market_context_reasons"),
-                                    dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
-                                )
-                            _db.save_trade_with_snapshot(
-                                direction=_bot_signal.get("direction", ""),
-                                entry_price=float(_bot_signal.get("entry", price or 0)),
-                                sl_price=float(_bot_signal.get("stop_loss", 0) or 0),
-                                tp_price=float(_bot_signal.get("take_profit", 0) or 0),
-                                outcome="OPEN",
-                                pips=0.0,
-                                pnl=0.0,
-                                strategy=_bot_signal.get("strategy", ""),
-                                score=_bot_score,
-                                market_snapshot=_mkt_snap,
-                                dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
-                                user_id=current_user,
+                            _sig_snap = signal if isinstance(signal, dict) else {}
+                            _db.save_snapshot(
+                                price=price or 0,
+                                signal=_sig_snap.get("final_signal", "NEUTRAL"),
+                                score=score or 0,
+                                dxy_trend=dxy_trend or "",
+                                regime=_sig_snap.get("regime", ""),
+                                strategy=cmp["best"].get("strategy", ""),
+                                extra={"best_pf": cmp["best"].get("profit_factor", 0),
+                                       "best_wr": cmp["best"].get("winrate", 0)},
                             )
                         except Exception:
                             pass
-                    try:
-                        send_telegram_alert(_bot_signal, _bot_score, definitive=True, reason=f"Bot auto: {_msg}")
-                    except Exception:
-                        pass
+                    # Contexto de mercado sobre los mismos datos del backtest
+                    cot_snap  = st.session_state.get("cot_data")
+                    cal_snap  = st.session_state.get("economic_calendar") or get_economic_calendar()
+                    news_snap = st.session_state.get("current_news") or []
+                    ctx_snap  = explain_market_context(bt_df, cot=cot_snap, calendar=cal_snap, news=news_snap)
+                    st.session_state.market_context_reasons = ctx_snap
+                    # Guardar en base de conocimiento (incluye contexto fundamental)
+                    kb = update_kb(cmp, cot=cot_snap, calendar=cal_snap, market_ctx=ctx_snap)
+                    st.success(
+                        f"✅ Comparación completada. Mejor estrategia: **{cmp['best']['label']}** "
+                        f"(PF={cmp['best']['profit_factor']} · WR={cmp['best']['winrate']}%)"
+                    )
+
+    with bt_ctrl_r:
+        # Calendario económico — auto-cargado desde DB (background worker lo actualiza cada 6h)
+        st.caption("📅 **Calendario económico** — actualización automática cada 6h")
+        cal_data = []
+        try:
+            if _DB_OK:
+                _cal_rows = _db.get_metrics(name="economic_calendar", limit=1) or []
+                if _cal_rows:
+                    _cal_ts   = str(_cal_rows[0].get("created_at", ""))[:16]
+                    cal_data  = (_cal_rows[0].get("context") or {}).get("events", [])
+                    if cal_data:
+                        st.session_state.economic_calendar = cal_data
+        except Exception:
+            pass
+        if not cal_data:
+            cal_data = st.session_state.get("economic_calendar") or []
+        if cal_data:
+            _cal_ts_str = _cal_ts if "_cal_ts" in dir() else ""
+            if _cal_ts_str:
+                st.caption(f"Actualizado: {_cal_ts_str}")
+            high_ev = [e for e in cal_data if e.get("impact","").upper() == "HIGH"]
+            med_ev  = [e for e in cal_data if e.get("impact","").upper() == "MEDIUM"]
+            st.markdown(f"**Esta semana:** {len(high_ev)} eventos ALTO impacto · {len(med_ev)} MEDIO impacto")
+            for ev in high_ev[:5]:
+                st.markdown(
+                    f"🔴 **[{ev.get('currency','')}]** {ev.get('title','')} "
+                    f"— {str(ev.get('date',''))[:10]} "
+                    f"| Prev: {ev.get('previous','?')} | Fore: {ev.get('forecast','?')}"
+                )
+        else:
+            st.info("⏳ El servidor cargará el calendario automáticamente (cada 6h).")
+
+    # ── Comparación de estrategias ─────────────────────────────────────────────
+    cmp_result = st.session_state.get("strategy_comparison")
+    if cmp_result:
+        st.markdown("### 📊 Ranking de Estrategias")
+        best_name = cmp_result["best"]["strategy"]
+
+        if "_RANK_EMOJI" not in globals():
+            _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
+        # Tabla comparativa
+        rows = []
+        for i, r in enumerate(cmp_result["results"]):
+            rentable = r.get("profit_factor", 0) >= 1.0 and r.get("winrate", 0) >= r.get("be_winrate", 0)
+            be_n = r.get("be_count", 0)
+            rows.append({
+                "Pos":          _RANK_EMOJI[i] if i < len(_RANK_EMOJI) else f"#{i+1}",
+                "Estrategia":   r.get("label", r.get("strategy", "?")),
+                "Operaciones":  r.get("total", 0),
+                "Win Rate":     f"{r.get('winrate', 0)}%",
+                "BE (scratch)": be_n,
+                "WR sin BE":    f"{r.get('be_winrate', 0)}%",
+                "Profit Factor":f"{r.get('profit_factor', 0)}x",
+                "Net Pips":     f"{r.get('net_pips', 0):+.1f}",
+                "Max DD":       f"{r.get('max_dd', 0)}%",
+                "P&L $":        f"${r.get('net_pnl', 0):+.2f}",
+                "Estado":       "✅ Rentable" if rentable else "⚠️ Marginal",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # Ganadora detallada
+        best = cmp_result["best"]
+        st.markdown(f"### 🏆 Estrategia Ganadora: {best['label']}")
+        st.info(f"**Por qué funciona:** {best['why']}\n\n✅ **Ventajas:** {best['pros']}\n\n⚠️ **Limitaciones:** {best['cons']}")
+
+        mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+        mc1.metric("Operaciones", best["total"])
+        mc2.metric("Win Rate", f"{best['winrate']}%", delta=f"BE={best['be_winrate']}%")
+        mc3.metric("Profit Factor", f"{best['profit_factor']}x")
+        mc4.metric("Net Pips", f"{best['net_pips']:+.1f}p")
+        mc5.metric("Max Drawdown", f"{best['max_dd']}%")
+
+        # Curva de capital de la ganadora
+        eq_list = best.get("equity", [])
+        if len(eq_list) > 2:
+            st.write("**Curva de capital — estrategia ganadora ($10,000 capital inicial · 0.01 lot):**")
+            st.line_chart(pd.DataFrame({"Capital ($)": eq_list}), height=220)
+
+        # Tabs: curvas de todas + tabla de trades
+        with st.expander("Ver curvas de capital de todas las estrategias", expanded=False):
+            max_len = max(len(r["equity"]) for r in cmp_result["results"])
+            eq_all = {}
+            for r in cmp_result["results"]:
+                eq_padded = r["equity"] + [r["equity"][-1]] * (max_len - len(r["equity"]))
+                eq_all[r["label"][:20]] = eq_padded
+            st.line_chart(pd.DataFrame(eq_all), height=240)
+
+        with st.expander(f"Ver operaciones de '{best['label']}' ({len(best.get('trades',[]))} trades)", expanded=False):
+            raw = best.get("trades", [])
+            if raw:
+                td = pd.DataFrame(raw)
+                if "outcome" in td.columns:
+                    td["Resultado"] = td["outcome"].map({"TP":"✅ TP","SL":"❌ SL","BE":"🔄 BE 0p","MAX":"⏱ MAX","OPEN":"🔄 Abierta"})
+                cols_s = [c for c in ["time","dir","Resultado","pips","pnl"] if c in td.columns]
+                st.dataframe(
+                    td[cols_s].rename(columns={"time":"Entrada","dir":"Dirección","pips":"Pips","pnl":"P&L $"}),
+                    use_container_width=True, hide_index=True
+                )
+
+        # Base de conocimiento histórica
+        kb = load_knowledge_base()
+        if kb.get("runs"):
+            _kb_total_runs = len(kb["runs"])
+            _kb_sig_stats  = kb.get("signal_stats", {})
+            with st.expander(f"📚 Base de conocimiento ({_kb_total_runs} backtests · señales evaluadas)", expanded=False):
+                _col_kb1, _col_kb2 = st.columns(2)
+                with _col_kb1:
+                    if kb.get("strategy_wins"):
+                        st.markdown("**Ranking histórico de estrategias:**")
+                        for s, cnt in sorted(kb["strategy_wins"].items(), key=lambda x: -x[1]):
+                            meta = _STRATEGY_META.get(s, {})
+                            st.markdown(f"- **{meta.get('label', s)}**: nº1 en {cnt} backtest(s)")
+                with _col_kb2:
+                    if _kb_sig_stats:
+                        st.markdown("**Aciertos de señal KB por estrategia:**")
+                        for s, ss in sorted(_kb_sig_stats.items(), key=lambda x: -(x[1].get("correct",0))):
+                            ok = ss.get("correct", 0); ko = ss.get("wrong", 0)
+                            acc = f"{ok/(ok+ko)*100:.0f}%" if (ok+ko) > 0 else "—"
+                            meta = _STRATEGY_META.get(s, {})
+                            st.markdown(f"- **{meta.get('label',s)}**: {ok}✅ {ko}❌ → {acc}")
+                hist_rows = []
+                for run in reversed(kb["runs"][-15:]):
+                    hist_rows.append({
+                        "Fecha":    run.get("ts","?")[:10],
+                        "Ganadora": _STRATEGY_META.get(run.get("best",""), {}).get("label", run.get("best","?")),
+                        "PF":       run.get("pf","?"),
+                        "WR":       f"{run.get('wr','?')}%",
+                        "Ops":      run.get("total","?"),
+                        "NetPips":  run.get("net_pips","?"),
+                        "COT":      run.get("cot_bias") or "—",
+                        "Eventos":  run.get("events_high",0),
+                    })
+                st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+                # Mostrar el "por qué" del último backtest
+                _last_run = kb["runs"][-1]
+                if _last_run.get("market_ctx"):
+                    st.markdown("**Contexto fundamental del último backtest:**")
+                    for _rc in _last_run["market_ctx"]:
+                        st.markdown(f"  - {_rc}")
+    else:
+        st.info("Pulsa **'Comparar 17 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
+
+    # ════════════════════════════════════════════════════════════════════════════════
+    # BACKTEST HISTÓRICO LARGO PLAZO — DESDE 2008 (DATOS DIARIOS)
+    # ════════════════════════════════════════════════════════════════════════════════
+    st.markdown('<div id="sec-backtest2008"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🌍 Backtest Histórico — Desde 2008 hasta Hoy (Datos Diarios)")
+    st.caption(
+        "Descarga datos diarios EUR/USD desde 2008 (~4,000 velas) y ejecuta las 17 estrategias. "
+        "Los umbrales ATR se escalan automáticamente para barras diarias. "
+        "Resultado: cuál estrategia habría sido más rentable en 16+ años de mercado real."
+    )
+
+    if "lt_comparison" not in st.session_state:
+        _bt_disk2 = _load_bt_cache()
+        st.session_state.lt_comparison = _bt_disk2.get("lt")
+
+    _lt_cols = st.columns([1, 2])
+    with _lt_cols[0]:
+        _run_lt = st.button("🚀 Backtest 2008–Hoy (17 estrategias · datos diarios)",
+                            type="primary", key="run_lt")
+        if _run_lt:
+            with st.spinner("Descargando datos diarios EUR/USD desde 2008..."):
+                _lt_df = get_longterm_data_2008()
+            if _lt_df.empty:
+                st.error("No se pudieron descargar datos históricos. Verifica conexión a internet.")
+            else:
+                _lt_n = len(_lt_df)
+                _lt_years = round(_lt_n / 252)
+                with st.spinner(f"Ejecutando 17 estrategias sobre {_lt_n} días (~{_lt_years} años) — paralelo, ~15-30s..."):
+                    _lt_cmp = run_longterm_comparison(_lt_df)
+                if not _lt_cmp:
+                    st.warning("Sin operaciones válidas en datos históricos.")
                 else:
-                    st.error(f"❌ Error bot: {_msg}")
-            else:
-                st.info("🔄 Señal activa ya ejecutada — esperando nueva señal")
-        else:
-            _threshold_gap = MIN_DEFINITIVE_SCORE - _bot_score
-            if _threshold_gap > 0:
-                st.info(f"⏳ Score {_bot_score}/100 — faltan {_threshold_gap}p para ejecutar (mínimo {MIN_DEFINITIVE_SCORE})")
-            else:
-                st.info("⏳ Sin dirección clara — bot en espera")
+                    st.session_state.lt_comparison = _lt_cmp
+                    st.session_state.lt_n_bars = _lt_n
+                    # Persistir en disco para sobrevivir recargas de página
+                    _save_bt_cache(st.session_state.get("strategy_comparison"), _lt_cmp)
+                    st.success(
+                        f"✅ Completado — {_lt_n} barras diarias · Mejor estrategia: "
+                        f"**{_lt_cmp['best']['label']}** "
+                        f"(PF={_lt_cmp['best']['profit_factor']} · "
+                        f"WR={_lt_cmp['best']['winrate']}% · "
+                        f"{_lt_cmp['best']['net_pips']:+.0f} pips)"
+                    )
 
+    with _lt_cols[1]:
+        st.markdown(
+            "**Diferencias vs backtest de 1 año:**\n"
+            "- Datos diarios — cada barra = 1 día de trading\n"
+            "- ATR umbral escalado a ≥40 pips (vs 4p en 1h)\n"
+            "- Cooldown de 3 días entre entradas\n"
+            "- Sin filtro de horario (ventana London/NY)\n"
+            "- 16+ años incluyen: crisis 2008, COVID 2020, subidas Fed 2022-23"
+        )
 
-# Mostrar noticias si están disponibles
-news = signal.get("news", []) if 'signal' in dir() and signal else []
-if news:
-    for idx, a in enumerate(news[:20]):
-        title = a.get("title", "") or "Sin título"
-        src   = a.get("source", {}).get("name", "")
-        url   = a.get("url", ""); pub = (a.get("publishedAt") or "")[:10]
-        imp   = a.get("impact_score", 0); lbl = a.get("impact_label", "⚪ BAJO")
-        tb_cls = get_textblob()
-        if tb_cls and tb_cls is not False:
-            try:
-                pol = tb_cls(title).sentiment.polarity
-            except Exception:
-                pol = 0.0
-        else:
-            pol = 0.0
-        s_emoji = "🟢" if pol > 0.1 else ("🔴" if pol < -0.1 else "⚪")
+    _lt_cmp_result = st.session_state.get("lt_comparison")
+    if _lt_cmp_result:
+        _lt_n_bars = st.session_state.get("lt_n_bars", 0)
+        _lt_years  = round(_lt_n_bars / 252) if _lt_n_bars else "?"
+        st.markdown(f"### 📊 Ranking Histórico 2008–Hoy ({_lt_n_bars} barras · ~{_lt_years} años)")
+
+        if "_RANK_EMOJI" not in globals():
+            _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
+        _lt_rows = []
+        for _i, _r in enumerate(_lt_cmp_result["results"]):
+            _rentable = _r.get("profit_factor", 0) >= 1.0
+            _be_n = _r.get("be_count", 0)
+            _lt_rows.append({
+                "Pos":           _RANK_EMOJI[_i] if _i < len(_RANK_EMOJI) else f"#{_i+1}",
+                "Estrategia":    _r.get("label", _r.get("strategy", "?")),
+                "Operaciones":   _r.get("total", 0),
+                "Win Rate":      f"{_r.get('winrate', 0)}%",
+                "BE (scratch)":  _be_n,
+                "Profit Factor": f"{_r.get('profit_factor', 0)}x",
+                "Net Pips":      f"{_r.get('net_pips', 0):+.0f}",
+                "Max DD":        f"{_r.get('max_dd', 0)}%",
+                "P&L $":         f"${_r.get('net_pnl', 0):+.2f}",
+                "Estado":        "✅ Rentable" if _rentable else "⚠️ Marginal",
+            })
+        st.dataframe(pd.DataFrame(_lt_rows), use_container_width=True, hide_index=True)
+
+        _lt_best = _lt_cmp_result["best"]
+        st.markdown(f"### 🏆 Mejor Estrategia Histórica (2008–Hoy): {_lt_best['label']}")
+        _ltc1, _ltc2, _ltc3, _ltc4, _ltc5 = st.columns(5)
+        _ltc1.metric("Operaciones", _lt_best.get("total", 0))
+        _ltc2.metric("Win Rate", f"{_lt_best.get('winrate', 0)}%")
+        _ltc3.metric("Profit Factor", f"{_lt_best.get('profit_factor', 0)}x")
+        _ltc4.metric("Net Pips", f"{_lt_best.get('net_pips', 0):+.0f}p")
+        _ltc5.metric("Max Drawdown", f"{_lt_best.get('max_dd', 0)}%")
+
+        st.info(
+            f"**Por qué funciona a largo plazo:** {_lt_best.get('why', '')}\n\n"
+            f"✅ **Ventajas:** {_lt_best.get('pros', '')}\n\n"
+            f"⚠️ **Limitaciones:** {_lt_best.get('cons', '')}"
+        )
+
+        # Curva de capital de la ganadora histórica
+        _lt_eq = _lt_best.get("equity", [])
+        if len(_lt_eq) > 2:
+            st.write(f"**Curva de capital 2008–Hoy — {_lt_best['label']} ($10,000 inicial · 0.01 lot):**")
+            st.line_chart(pd.DataFrame({"Capital ($)": _lt_eq}), height=260)
+
+        with st.expander("Ver curvas de todas las estrategias — largo plazo", expanded=False):
+            _lt_max_len = max(len(_r["equity"]) for _r in _lt_cmp_result["results"])
+            _lt_eq_all  = {}
+            for _r in _lt_cmp_result["results"]:
+                _eq_pad = _r["equity"] + [_r["equity"][-1]] * (_lt_max_len - len(_r["equity"]))
+                _lt_eq_all[_r["label"][:20]] = _eq_pad
+            st.line_chart(pd.DataFrame(_lt_eq_all), height=260)
+
         with st.expander(
-            f"[{idx}] {lbl} {s_emoji} — {title[:80]}... | {imp:.0f}%",
+            f"Ver operaciones de '{_lt_best['label']}' ({len(_lt_best.get('trades', []))} trades)",
             expanded=False
         ):
-            n1, n2 = st.columns([3, 1])
-            with n1:
-                st.write(f"**{src}** | {pub}")
-                if url: st.write(f"[Leer →]({url})")
-            with n2:
-                st.metric("Impacto", f"{imp:.0f}%")
-            desc = a.get("description", "")
-            if desc: st.write(f"*{desc[:180]}...*")
-else:
-    st.info("Sin noticias disponibles.")
+            _lt_raw = _lt_best.get("trades", [])
+            if _lt_raw:
+                _lt_td = pd.DataFrame(_lt_raw)
+                if "outcome" in _lt_td.columns:
+                    _lt_td["Resultado"] = _lt_td["outcome"].map(
+                        {"TP": "✅ TP", "SL": "❌ SL", "BE": "🔄 BE 0p", "OPEN": "🔄 Abierta"}
+                    )
+                _lt_cols_s = [c for c in ["time", "dir", "Resultado", "pips", "pnl"] if c in _lt_td.columns]
+                st.dataframe(
+                    _lt_td[_lt_cols_s].rename(
+                        columns={"time": "Fecha", "dir": "Dirección", "pips": "Pips (día)", "pnl": "P&L $"}
+                    ),
+                    use_container_width=True, hide_index=True,
+                )
 
-# ── Dashboard final ───────────────────────────────────────────────────────
-st.markdown('<div id="sec-dashboard"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("📋 Dashboard Final — Resumen de Decisión")
-tech_sig = ("COMPRA" if signal.get("buy_signals", 0) > signal.get("sell_signals", 0)
-            else "VENTA" if signal.get("sell_signals", 0) > 0 else "NEUTRAL")
-fund_raw = consensus.get("consensus", "Neutral")
-fund_sig = ("COMPRA" if "Bullish" in fund_raw
-            else "VENTA" if "Bearish" in fund_raw else "NEUTRAL")
-ws       = consensus.get("weighted_sentiment", 0)
-news_sig = "COMPRA" if ws > 0.1 else ("VENTA" if ws < -0.1 else "NEUTRAL")
-delta_sig = "NEUTRAL"
-if delta:
-    if delta["delta"] > 0:   delta_sig = "🟢 COMPRADORES"
-    elif delta["delta"] < 0: delta_sig = "🔴 VENDEDORES"
-
-def sig_icon(s):
-    return "🟢" if s == "COMPRA" else ("🔴" if s == "VENTA" else "⚪")
-
-bt_result = "N/A"
-if direction and not df_1h.empty:
-    bt = run_backtest(df_1h, direction, SCALP_SL_PIPS, SCALP_TP_PIPS)
-    if bt:
-        bt_result = (f"{'✅' if bt['net_pips']>0 else '❌'} "
-                     f"{bt['winrate']}% WR | {bt['net_pips']}p netos")
-
-spread_result = (f"{tick['spread_pips']}p {'✅' if tick['spread_pips']<1.5 else '⚠️'}"
-                 if tick else "N/A (sin MT5)")
-poc_result    = f"`{poc['precio']:.5f}`" if poc else "N/A"
-
-# ── Niveles de DXY ────────────────────────────────────────────────────────
-st.markdown('<div id="sec-dxy"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("💱 Niveles de DXY (Índice del Dólar)")
-dxy_levels = {
-    "Precio Actual": dxy_price,
-    "Tendencia": dxy_trend or "N/A",
-    "Cambio": f"{dxy_chg:+.2f}%"
-}
-if dxy_price is not None:
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.metric("📊 Precio DXY", f"{dxy_levels['Precio Actual']:.2f}")
-    with col2:
-        st.metric("📈 Cambio", dxy_levels['Cambio'])
-    st.write(f"**Tendencia:** {dxy_levels['Tendencia']}")
-else:
-    st.info("📡 Actualizando niveles de DXY...")
-
-matrix = [
-    {"Análisis": "Técnico (TF + Indicadores)",
-     "Señal": f"{sig_icon(tech_sig)} {tech_sig}",
-     "Fuerza": f"{signal.get('buy_signals',0)+signal.get('sell_signals',0)} señales"},
-    {"Análisis": "Fundamental (Noticias)",
-     "Señal": f"{sig_icon(fund_sig)} {fund_sig}",
-     "Fuerza": f"{avg_impact:.0f}% impacto"},
-    {"Análisis": "Sentimiento de mercado",
-     "Señal": f"{sig_icon(news_sig)} {news_sig}",
-     "Fuerza": f"{total_sources} fuentes"},
-    {"Análisis": "DXY (Dólar)",
-     "Señal": f"{'🔴' if dxy_dir=='UP' else '🟢' if dxy_dir=='DOWN' else '⚪'} {dxy_dir}",
-     "Fuerza": f"{dxy_chg:+.2f}%"},
-    {"Análisis": "Spike de volumen",
-     "Señal": "⚡ Spike detectado" if vol_spikes else "⚪ Normal",
-     "Fuerza": f"{vol_spikes[0]['ratio']}x" if vol_spikes else "—"},
-    {"Análisis": "Delta de volumen",
-     "Señal": delta_sig,
-     "Fuerza": f"{delta['delta_pct']:+.1f}%" if delta else "—"},
-    {"Análisis": "POC (Volume Profile)",
-     "Señal": poc_result,
-     "Fuerza": f"{poc['volumen']:,} ticks" if poc else "—"},
-    {"Análisis": "Score de confluencia",
-     "Señal": label,
-     "Fuerza": f"{score}/100"},
-    {"Análisis": "Spread MT5",
-     "Señal": spread_result,
-     "Fuerza": "Tiempo real" if tick else "—"},
-    {"Análisis": "Backtesting 1h",
-     "Señal": bt_result,
-     "Fuerza": "Histórico"},
-]
-st.dataframe(pd.DataFrame(matrix), use_container_width=True, hide_index=True)
-
-st.markdown('<div id="sec-accion"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🎯 Resumen de Acción Recomendada")
-recomendacion = {
-    "Dirección": signal.get('final_signal', 'NEUTRAL'),
-    "Confianza": f"{score}/100 — {label}",
-    "Precio Entrada": f"{price:.5f}" if price else "N/A",
-    "Stop Loss": f"{signal.get('stop_loss', 'N/A')}",
-    "Take Profit": f"{signal.get('take_profit', 'N/A')}",
-    "Sesión Activa": session,
-    "Contexto DXY": f"{dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)",
-    "Acción": "✅ OPERABLE" if score >= MIN_DEFINITIVE_SCORE else "⏸️ ESPERAR"
-}
-for key, val in recomendacion.items():
-    st.write(f"**{key}:** {val}")
-
-final_signal = signal.get('final_signal', 'NEUTRAL')
-st.info(
-    f"**Señal:** {final_signal}  \n"
-    f"**Score:** {score}/100 — {label}  \n"
-    f"**Precio:** {f'{price:.5f}' if price else 'N/A'}  \n"
-    f"**Delta volumen:** {delta_sig}  \n"
-    f"**Sesión:** {session}  |  **DXY:** {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)"
-)
-
-
-# ── AUTO-MEJORA — Sistema autónomo de aprendizaje y corrección ────────────────
-st.markdown('<div id="sec-autoimprove"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🔬 Sistema de Auto-Mejora Autónoma")
-st.caption("El sistema monitoriza su propio rendimiento, detecta errores, y se corrige automáticamente cada hora usando IA.")
-
-_sim_col1, _sim_col2 = st.columns([1, 1])
-
-with _sim_col1:
-    # ── APIs activas / pendientes (solo en Railway) ───────────────────────────
-    if not _IS_LOCAL:
-        st.markdown("**🌐 APIs Gratuitas — Estado**")
-        if _SELF_IMPROVE_OK:
-            _api_status = _self_improve.get_configured_apis()
-            _api_missing = _self_improve.get_missing_apis()
-            for _api in _api_status:
-                _t = "🤖" if _api["type"] == "ai" else "📊"
-                st.success(f"{_t} **{_api['name']}** activo")
-            if _api_missing:
-                st.markdown("**➕ APIs gratuitas disponibles (sin configurar):**")
-                for _api in _api_missing:
-                    _t = "🤖" if _api["type"] == "ai" else "📊"
-                    st.info(f"{_t} {_api['name']} — Obtén key gratis: {_api['url']}\n`Railway → Variables → {_api['env']}`")
-        else:
-            st.warning("Módulo self_improve no disponible")
+    # ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
+    st.markdown('<div id="sec-porq"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🔍 Por qué se mueve el EUR/USD — Análisis Técnico + Fundamental")
+    ctx_reasons = st.session_state.get("market_context_reasons")
+    if ctx_reasons:
+        for reason in ctx_reasons:
+            st.markdown(f"- {reason}")
+        st.caption("Fuentes: EMA técnico · RSI/MACD momentum · COT CFTC institucional · Calendario ForexFactory · RSS noticias")
     else:
-        st.info(f"🌐 APIs configuradas en Railway · [Abrir panel completo →]({_RAILWAY_URL})")
+        st.info(
+            "Ejecuta primero el backtest (botón arriba) y asegúrate de tener datos COT y calendario cargados. "
+            "Este panel explicará en detalle POR QUÉ el mercado está donde está."
+        )
 
-    # ── Datos macro FRED ─────────────────────────────────────────────────────
-    _macro_ctx = st.session_state.get("macro_context") or {}
-    if _macro_ctx.get("fred"):
-        st.markdown("**🏦 Macro FRED (tiempo real)**")
-        _fred = _macro_ctx["fred"]
-        _fc1, _fc2 = st.columns(2)
-        if _fred.get("fed_rate"):
-            _fc1.metric("Tasa Fed", f"{_fred['fed_rate']['value']:.2f}%")
-        if _fred.get("unemployment"):
-            _fc2.metric("Desempleo", f"{_fred['unemployment']['value']:.1f}%")
-        if _fred.get("10y_yield"):
-            _fc1.metric("Bono 10Y", f"{_fred['10y_yield']['value']:.2f}%")
-        if _fred.get("2y_yield"):
-            _fc2.metric("Bono 2Y", f"{_fred['2y_yield']['value']:.2f}%")
-        _bias = _macro_ctx.get("macro_bias", "NEUTRAL")
-        _yc   = _macro_ctx.get("yield_curve", "?")
-        _bias_col = "🟢" if _bias == "BEARISH_USD" else "🔴" if _bias == "BULLISH_USD" else "⚪"
-        st.caption(f"{_bias_col} Sesgo USD: **{_bias}** | Yield curve: **{_yc}**")
-    elif _DATA_FEEDS_OK:
-        st.caption("🏦 FRED cargando — ejecuta un análisis para ver datos macro.")
+    # ── BOT AUTOMÁTICO (SIEMPRE VISIBLE) ───────────────────────────────────────────
 
-with _sim_col2:
-    # ── Último ciclo de auto-sanación ─────────────────────────────────────────
-    st.markdown("**🩺 Último Ciclo de Auto-Corrección**")
-    _heal = st.session_state.get("last_heal_result")
-    if _heal:
-        _hs = _heal.get("health_status", "?")
-        _hs_icon = "🟢" if _hs == "ok" else "🟡" if _hs == "warning" else "🔴"
-        st.markdown(f"{_hs_icon} Estado: **{_hs.upper()}**")
-        if _heal.get("summary"):
-            st.write(_heal["summary"])
-        if _heal.get("top_finding"):
-            st.info(f"💡 **Hallazgo:** {_heal['top_finding']}")
-        if _heal.get("applied_changes"):
-            st.success(f"✅ Parámetros ajustados: {list(_heal['applied_changes'].keys())}")
-        if _heal.get("dna_updated"):
-            _new_v = (_heal.get("new_dna") or {}).get("version", "?")
-            st.success(f"🧬 DNA auto-evolucionado a v{_new_v}")
-        st.caption(f"Ejecutado: {(_heal.get('ts') or '')[:16]}")
+with _t_bot:
+    st.markdown('<div id="sec-bot"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🤖 Modo Bot Automático")
+
+    # Información de diagnóstico MT5
+    if sys.platform != "win32":
+        st.info(
+            "ℹ️ **Bot automático desactivado en servidor cloud.**  "
+            "MT5 requiere Windows. Las señales, alertas Telegram y el backtest "
+            "funcionan con normalidad — solo la ejecución de órdenes requiere la "
+            "versión local en PC con Windows."
+        )
     else:
-        st.info("Esperando primer ciclo de auto-corrección (se ejecuta automáticamente cada hora al analizar)")
-
-    # ── Historial de mejoras ──────────────────────────────────────────────────
-    if _DB_OK:
-        try:
-            _improvements = _db.get_self_improvements(limit=20)
-            # Skip garbage entries: AI errors and raw <think> blocks
-            def _reason_ok(r: str) -> bool:
-                r = r.strip()
-                if not r or len(r) < 15:                         return False
-                if r.startswith("⚠️ Todos los proveedores"):     return False
-                if r.startswith("<think>"):                       return False
-                if r.startswith("{") or r.startswith("["):        return False  # raw JSON
-                if r.startswith("{ ") or '"health_status"' in r: return False  # JSON fragment
-                return True
-            _improvements = [
-                _i for _i in _improvements
-                if _reason_ok(str(_i.get("reason", "")))
-            ][:5]
-            if _improvements:
-                st.markdown("**📋 Últimas auto-mejoras aplicadas**")
-                for _imp in _improvements:
-                    _ic = "✅" if _imp.get("applied") else "📝"
-                    _ts = str(_imp.get("created_at", ""))[:16]
-                    st.caption(f"{_ic} {_ts} — {str(_imp.get('reason',''))[:80]}")
+        st.write("**🔍 Diagnóstico MT5:**")
+        col_diag1, col_diag2, col_diag3 = st.columns(3)
+        with col_diag1:
+            if is_mt5_available():
+                st.success("✅ MT5 instalado")
             else:
-                st.caption("Sin mejoras registradas aún.")
-        except Exception:
-            pass
+                st.error("❌ MT5 no instalado")
+        with col_diag2:
+            if is_mt5_available():
+                connected_diag = mt5_connect()
+                if connected_diag:
+                    st.success("✅ MT5 conectado")
+                else:
+                    st.error("❌ MT5 no conectado")
+                    err = get_mt5_error()
+                    if err:
+                        st.warning(f"🛠️ Error: {err}")
+                    st.info("💡 Abre MetaTrader 5 y verifica que esté funcionando")
+            else:
+                st.error("❌ No disponible")
+        with col_diag3:
+            if is_mt5_available() and mt5_connect():
+                terminal_info = mt5.terminal_info()
+                if terminal_info:
+                    st.success(f"✅ Terminal: {terminal_info.name}")
+                else:
+                    st.warning("⚠️ Terminal info no disponible")
+            else:
+                st.error("❌ No disponible")
 
-# ── Estrategia Maestra Adaptativa ─────────────────────────────────────────────
-try:
-    import strategy_learner as _sl_mod
-    _LEARNER_OK = True
-except ImportError:
-    _LEARNER_OK = False
+    # Inicializar estado del bot en session_state
+    if "bot_enabled" not in st.session_state:
+        st.session_state.bot_enabled = False
+    if "bot_volume" not in st.session_state:
+        st.session_state.bot_volume = 0.01
+    if "bot_last_signal" not in st.session_state:
+        st.session_state.bot_last_signal = None
+    if "bot_just_activated" not in st.session_state:
+        st.session_state.bot_just_activated = False
 
-if _LEARNER_OK:
-    with st.expander("🧬 Estrategia Maestra Adaptativa", expanded=True):
-        _master = None
+    # Sincronizar variables globales con session_state
+    BOT_ENABLED = st.session_state.bot_enabled
+    BOT_VOLUME = st.session_state.bot_volume
+    BOT_LAST_SIGNAL = st.session_state.bot_last_signal
+
+    # ── Detectar fuente de conexión disponible ────────────────────────────────
+    _svc_ok    = _mt5_service_available() and mt5_service_health().get("mt5") == "connected"
+    _local_ok  = is_mt5_available() and mt5_connect()
+    _any_conn  = _svc_ok or _local_ok
+
+    if _svc_ok:
+        st.success("✅ OANDA conectado — trading automático disponible")
+    elif _local_ok:
+        st.success("✅ MT5 local conectado — trading disponible")
+    else:
+        st.info("📊 **Modo señales** — análisis, scoring y Telegram activos.\nEjecución automática de órdenes no configurada.")
+
+    if _any_conn:
+        # Estado actual del bot
+        if st.session_state.bot_enabled:
+            st.success("🚀 **BOT ACTIVO** - Ejecutando señales automáticamente")
+        else:
+            st.info("⏸️ **BOT INACTIVO** - Modo manual")
+
+        # Estado del bot — solo lectura, corre automáticamente en el servidor
+        _bot_cols = st.columns([2, 1])
+        with _bot_cols[0]:
+            if st.session_state.bot_enabled:
+                st.success("🤖 **Bot ACTIVO** — analizando señales automáticamente 24/7")
+            else:
+                st.info("📊 **Modo señales** — acumulando datos y aprendiendo del mercado")
+        with _bot_cols[1]:
+            positions_mt5 = get_mt5_positions()
+            if positions_mt5:
+                st.warning(f"📊 {len(positions_mt5)} posiciones abiertas · cierre automático por TP/SL")
+            else:
+                st.caption("🎯 Sin posiciones abiertas")
+
+        # ── Panel de posiciones abiertas ──────────────────────────────────────────
+        _live_pos = get_mt5_positions()
+        if _live_pos:
+            st.markdown("#### 📊 Posiciones Abiertas")
+            for _p in _live_pos:
+                # Compatibilidad: dict (OANDA remoto) u objeto MT5 (local)
+                def _pv(attr, default=0):
+                    return _p.get(attr, default) if isinstance(_p, dict) else getattr(_p, attr, default)
+                _ticket   = _pv("ticket", "—")
+                _open_p   = float(_pv("open_price") or _pv("price_open", 0))
+                _cur_p    = float(_pv("current_price") or _pv("price_current", _open_p))
+                _sl_p     = float(_pv("sl", 0))
+                _vol      = float(_pv("volume", 0))
+                _profit   = float(_pv("profit", 0))
+                _type_raw = _pv("type", "BUY")
+                _is_buy   = (_type_raw in (0, "BUY", "LONG")) if not isinstance(_type_raw, str) else _type_raw.upper() in ("BUY", "LONG")
+                _dir_lbl  = "LONG" if _is_buy else "SHORT"
+                _ppips    = (_cur_p - _open_p) / 0.0001 if _is_buy else (_open_p - _cur_p) / 0.0001
+                _be_icon  = "⚖️ BE" if (_sl_p >= _open_p if _is_buy else _sl_p <= _open_p) and _sl_p != 0 else "🎯"
+                st.markdown(
+                    f"**#{_ticket}** {_dir_lbl} {_vol}L @ {_open_p:.5f} "
+                    f"| Actual: {_cur_p:.5f} "
+                    f"| {_be_icon} P&L: {_ppips:+.1f}p (${_profit:.2f})"
+                )
+        else:
+            st.info("🎯 Sin posiciones abiertas")
+
+        # ── Break-Even automático ─────────────────────────────────────────────────
+        if st.session_state.bot_enabled and _live_pos:
+            _be_msgs = manage_positions_be()
+            for _bm in _be_msgs:
+                st.success(f"⚖️ {_bm}")
+
+        # ── Información de riesgo y lógica del bot ────────────────────────────────
+        if st.session_state.bot_enabled:
+            st.warning("⚠️ **BOT ACTIVO** — Trading automático en curso")
+            st.info(f"💰 Volumen: {st.session_state.bot_volume} lotes | SL máx: {SCALP_SL_PIPS}p")
+
+            # Lógica del bot: ejecutar señal si condiciones se cumplen
+            _bot_score = score if st.session_state.analysis_executed else 0
+            _bot_signal = signal if st.session_state.analysis_executed else {}
+            _bot_liq = liq_levels if st.session_state.analysis_executed else []
+
+            if not st.session_state.analysis_executed:
+                st.info("🔄 Presiona 'ANALIZAR MERCADO' primero para activar el bot")
+            elif st.session_state.bot_just_activated:
+                st.info("🤖 Bot activado — esperando próxima señal de calidad...")
+                st.session_state.bot_just_activated = False
+            elif _bot_signal.get("direction") and _bot_score >= MIN_DEFINITIVE_SCORE:
+                # Solo ejecutar si no hay posiciones abiertas y la señal cambió
+                if _live_pos:
+                    st.info(f"🔒 Posición abierta — bot monitorea BE y gestión automática")
+                elif st.session_state.bot_last_signal != _bot_signal.get("direction"):
+                    _ok, _msg = auto_trade_signal(_bot_signal, st.session_state.bot_volume, liq_levels=_bot_liq)
+                    if _ok:
+                        st.success(f"🚀 Bot ejecutó trade: {_msg}")
+                        st.session_state.bot_last_signal = _bot_signal.get("direction")
+                        # Persistir trade en DB con snapshot de mercado
+                        if _DB_OK:
+                            try:
+                                _mkt_snap = {}
+                                if _AI_ENGINE_OK:
+                                    _mkt_snap = _ai_engine.build_market_snapshot(
+                                        _bot_signal, _bot_score, session, dxy_dir,
+                                        vol_spikes, delta,
+                                        st.session_state.get("market_context_reasons"),
+                                        dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
+                                    )
+                                _db.save_trade_with_snapshot(
+                                    direction=_bot_signal.get("direction", ""),
+                                    entry_price=float(_bot_signal.get("entry", price or 0)),
+                                    sl_price=float(_bot_signal.get("stop_loss", 0) or 0),
+                                    tp_price=float(_bot_signal.get("take_profit", 0) or 0),
+                                    outcome="OPEN",
+                                    pips=0.0,
+                                    pnl=0.0,
+                                    strategy=_bot_signal.get("strategy", ""),
+                                    score=_bot_score,
+                                    market_snapshot=_mkt_snap,
+                                    dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
+                                    user_id=current_user,
+                                )
+                            except Exception:
+                                pass
+                        try:
+                            send_telegram_alert(_bot_signal, _bot_score, definitive=True, reason=f"Bot auto: {_msg}")
+                        except Exception:
+                            pass
+                    else:
+                        st.error(f"❌ Error bot: {_msg}")
+                else:
+                    st.info("🔄 Señal activa ya ejecutada — esperando nueva señal")
+            else:
+                _threshold_gap = MIN_DEFINITIVE_SCORE - _bot_score
+                if _threshold_gap > 0:
+                    st.info(f"⏳ Score {_bot_score}/100 — faltan {_threshold_gap}p para ejecutar (mínimo {MIN_DEFINITIVE_SCORE})")
+                else:
+                    st.info("⏳ Sin dirección clara — bot en espera")
+
+
+    # Mostrar noticias si están disponibles
+    news = signal.get("news", []) if 'signal' in dir() and signal else []
+    if news:
+        for idx, a in enumerate(news[:20]):
+            title = a.get("title", "") or "Sin título"
+            src   = a.get("source", {}).get("name", "")
+            url   = a.get("url", ""); pub = (a.get("publishedAt") or "")[:10]
+            imp   = a.get("impact_score", 0); lbl = a.get("impact_label", "⚪ BAJO")
+            tb_cls = get_textblob()
+            if tb_cls and tb_cls is not False:
+                try:
+                    pol = tb_cls(title).sentiment.polarity
+                except Exception:
+                    pol = 0.0
+            else:
+                pol = 0.0
+            s_emoji = "🟢" if pol > 0.1 else ("🔴" if pol < -0.1 else "⚪")
+            with st.expander(
+                f"[{idx}] {lbl} {s_emoji} — {title[:80]}... | {imp:.0f}%",
+                expanded=False
+            ):
+                n1, n2 = st.columns([3, 1])
+                with n1:
+                    st.write(f"**{src}** | {pub}")
+                    if url: st.write(f"[Leer →]({url})")
+                with n2:
+                    st.metric("Impacto", f"{imp:.0f}%")
+                desc = a.get("description", "")
+                if desc: st.write(f"*{desc[:180]}...*")
+    else:
+        st.info("Sin noticias disponibles.")
+
+    # ── Dashboard final ───────────────────────────────────────────────────────
+    st.markdown('<div id="sec-dashboard"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("📋 Dashboard Final — Resumen de Decisión")
+    tech_sig = ("COMPRA" if signal.get("buy_signals", 0) > signal.get("sell_signals", 0)
+                else "VENTA" if signal.get("sell_signals", 0) > 0 else "NEUTRAL")
+    fund_raw = consensus.get("consensus", "Neutral")
+    fund_sig = ("COMPRA" if "Bullish" in fund_raw
+                else "VENTA" if "Bearish" in fund_raw else "NEUTRAL")
+    ws       = consensus.get("weighted_sentiment", 0)
+    news_sig = "COMPRA" if ws > 0.1 else ("VENTA" if ws < -0.1 else "NEUTRAL")
+    delta_sig = "NEUTRAL"
+    if delta:
+        if delta["delta"] > 0:   delta_sig = "🟢 COMPRADORES"
+        elif delta["delta"] < 0: delta_sig = "🔴 VENDEDORES"
+
+    def sig_icon(s):
+        return "🟢" if s == "COMPRA" else ("🔴" if s == "VENTA" else "⚪")
+
+    bt_result = "N/A"
+    if direction and not df_1h.empty:
+        bt = run_backtest(df_1h, direction, SCALP_SL_PIPS, SCALP_TP_PIPS)
+        if bt:
+            bt_result = (f"{'✅' if bt['net_pips']>0 else '❌'} "
+                         f"{bt['winrate']}% WR | {bt['net_pips']}p netos")
+
+    spread_result = (f"{tick['spread_pips']}p {'✅' if tick['spread_pips']<1.5 else '⚠️'}"
+                     if tick else "N/A (sin MT5)")
+    poc_result    = f"`{poc['precio']:.5f}`" if poc else "N/A"
+
+    # ── Niveles de DXY ────────────────────────────────────────────────────────
+    st.markdown('<div id="sec-dxy"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("💱 Niveles de DXY (Índice del Dólar)")
+    dxy_levels = {
+        "Precio Actual": dxy_price,
+        "Tendencia": dxy_trend or "N/A",
+        "Cambio": f"{dxy_chg:+.2f}%"
+    }
+    if dxy_price is not None:
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.metric("📊 Precio DXY", f"{dxy_levels['Precio Actual']:.2f}")
+        with col2:
+            st.metric("📈 Cambio", dxy_levels['Cambio'])
+        st.write(f"**Tendencia:** {dxy_levels['Tendencia']}")
+    else:
+        st.info("📡 Actualizando niveles de DXY...")
+
+    matrix = [
+        {"Análisis": "Técnico (TF + Indicadores)",
+         "Señal": f"{sig_icon(tech_sig)} {tech_sig}",
+         "Fuerza": f"{signal.get('buy_signals',0)+signal.get('sell_signals',0)} señales"},
+        {"Análisis": "Fundamental (Noticias)",
+         "Señal": f"{sig_icon(fund_sig)} {fund_sig}",
+         "Fuerza": f"{avg_impact:.0f}% impacto"},
+        {"Análisis": "Sentimiento de mercado",
+         "Señal": f"{sig_icon(news_sig)} {news_sig}",
+         "Fuerza": f"{total_sources} fuentes"},
+        {"Análisis": "DXY (Dólar)",
+         "Señal": f"{'🔴' if dxy_dir=='UP' else '🟢' if dxy_dir=='DOWN' else '⚪'} {dxy_dir}",
+         "Fuerza": f"{dxy_chg:+.2f}%"},
+        {"Análisis": "Spike de volumen",
+         "Señal": "⚡ Spike detectado" if vol_spikes else "⚪ Normal",
+         "Fuerza": f"{vol_spikes[0]['ratio']}x" if vol_spikes else "—"},
+        {"Análisis": "Delta de volumen",
+         "Señal": delta_sig,
+         "Fuerza": f"{delta['delta_pct']:+.1f}%" if delta else "—"},
+        {"Análisis": "POC (Volume Profile)",
+         "Señal": poc_result,
+         "Fuerza": f"{poc['volumen']:,} ticks" if poc else "—"},
+        {"Análisis": "Score de confluencia",
+         "Señal": label,
+         "Fuerza": f"{score}/100"},
+        {"Análisis": "Spread MT5",
+         "Señal": spread_result,
+         "Fuerza": "Tiempo real" if tick else "—"},
+        {"Análisis": "Backtesting 1h",
+         "Señal": bt_result,
+         "Fuerza": "Histórico"},
+    ]
+    st.dataframe(pd.DataFrame(matrix), use_container_width=True, hide_index=True)
+
+    st.markdown('<div id="sec-accion"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🎯 Resumen de Acción Recomendada")
+    recomendacion = {
+        "Dirección": signal.get('final_signal', 'NEUTRAL'),
+        "Confianza": f"{score}/100 — {label}",
+        "Precio Entrada": f"{price:.5f}" if price else "N/A",
+        "Stop Loss": f"{signal.get('stop_loss', 'N/A')}",
+        "Take Profit": f"{signal.get('take_profit', 'N/A')}",
+        "Sesión Activa": session,
+        "Contexto DXY": f"{dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)",
+        "Acción": "✅ OPERABLE" if score >= MIN_DEFINITIVE_SCORE else "⏸️ ESPERAR"
+    }
+    for key, val in recomendacion.items():
+        st.write(f"**{key}:** {val}")
+
+    final_signal = signal.get('final_signal', 'NEUTRAL')
+    st.info(
+        f"**Señal:** {final_signal}  \n"
+        f"**Score:** {score}/100 — {label}  \n"
+        f"**Precio:** {f'{price:.5f}' if price else 'N/A'}  \n"
+        f"**Delta volumen:** {delta_sig}  \n"
+        f"**Sesión:** {session}  |  **DXY:** {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)"
+    )
+
+
+    # ── AUTO-MEJORA — Sistema autónomo de aprendizaje y corrección ────────────────
+
+with _t_mejora:
+    st.markdown('<div id="sec-autoimprove"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🔬 Sistema de Auto-Mejora Autónoma")
+    st.caption("El sistema monitoriza su propio rendimiento, detecta errores, y se corrige automáticamente cada hora usando IA.")
+
+    _sim_col1, _sim_col2 = st.columns([1, 1])
+
+    with _sim_col1:
+        # ── APIs activas / pendientes (solo en Railway) ───────────────────────────
+        if not _IS_LOCAL:
+            st.markdown("**🌐 APIs Gratuitas — Estado**")
+            if _SELF_IMPROVE_OK:
+                _api_status = _self_improve.get_configured_apis()
+                _api_missing = _self_improve.get_missing_apis()
+                for _api in _api_status:
+                    _t = "🤖" if _api["type"] == "ai" else "📊"
+                    st.success(f"{_t} **{_api['name']}** activo")
+                if _api_missing:
+                    st.markdown("**➕ APIs gratuitas disponibles (sin configurar):**")
+                    for _api in _api_missing:
+                        _t = "🤖" if _api["type"] == "ai" else "📊"
+                        st.info(f"{_t} {_api['name']} — Obtén key gratis: {_api['url']}\n`Railway → Variables → {_api['env']}`")
+            else:
+                st.warning("Módulo self_improve no disponible")
+        else:
+            st.info(f"🌐 APIs configuradas en Railway · [Abrir panel completo →]({_RAILWAY_URL})")
+
+        # ── Datos macro FRED ─────────────────────────────────────────────────────
+        _macro_ctx = st.session_state.get("macro_context") or {}
+        if _macro_ctx.get("fred"):
+            st.markdown("**🏦 Macro FRED (tiempo real)**")
+            _fred = _macro_ctx["fred"]
+            _fc1, _fc2 = st.columns(2)
+            if _fred.get("fed_rate"):
+                _fc1.metric("Tasa Fed", f"{_fred['fed_rate']['value']:.2f}%")
+            if _fred.get("unemployment"):
+                _fc2.metric("Desempleo", f"{_fred['unemployment']['value']:.1f}%")
+            if _fred.get("10y_yield"):
+                _fc1.metric("Bono 10Y", f"{_fred['10y_yield']['value']:.2f}%")
+            if _fred.get("2y_yield"):
+                _fc2.metric("Bono 2Y", f"{_fred['2y_yield']['value']:.2f}%")
+            _bias = _macro_ctx.get("macro_bias", "NEUTRAL")
+            _yc   = _macro_ctx.get("yield_curve", "?")
+            _bias_col = "🟢" if _bias == "BEARISH_USD" else "🔴" if _bias == "BULLISH_USD" else "⚪"
+            st.caption(f"{_bias_col} Sesgo USD: **{_bias}** | Yield curve: **{_yc}**")
+        elif _DATA_FEEDS_OK:
+            st.caption("🏦 FRED cargando — ejecuta un análisis para ver datos macro.")
+
+    with _sim_col2:
+        # ── Último ciclo de auto-sanación ─────────────────────────────────────────
+        st.markdown("**🩺 Último Ciclo de Auto-Corrección**")
+        _heal = st.session_state.get("last_heal_result")
+        if _heal:
+            _hs = _heal.get("health_status", "?")
+            _hs_icon = "🟢" if _hs == "ok" else "🟡" if _hs == "warning" else "🔴"
+            st.markdown(f"{_hs_icon} Estado: **{_hs.upper()}**")
+            if _heal.get("summary"):
+                st.write(_heal["summary"])
+            if _heal.get("top_finding"):
+                st.info(f"💡 **Hallazgo:** {_heal['top_finding']}")
+            if _heal.get("applied_changes"):
+                st.success(f"✅ Parámetros ajustados: {list(_heal['applied_changes'].keys())}")
+            if _heal.get("dna_updated"):
+                _new_v = (_heal.get("new_dna") or {}).get("version", "?")
+                st.success(f"🧬 DNA auto-evolucionado a v{_new_v}")
+            st.caption(f"Ejecutado: {(_heal.get('ts') or '')[:16]}")
+        else:
+            st.info("Esperando primer ciclo de auto-corrección (se ejecuta automáticamente cada hora al analizar)")
+
+        # ── Historial de mejoras ──────────────────────────────────────────────────
         if _DB_OK:
             try:
-                _master = _db.load_active_strategy()
+                _improvements = _db.get_self_improvements(limit=20)
+                # Skip garbage entries: AI errors and raw <think> blocks
+                def _reason_ok(r: str) -> bool:
+                    r = r.strip()
+                    if not r or len(r) < 15:                         return False
+                    if r.startswith("⚠️ Todos los proveedores"):     return False
+                    if r.startswith("<think>"):                       return False
+                    if r.startswith("{") or r.startswith("["):        return False  # raw JSON
+                    if r.startswith("{ ") or '"health_status"' in r: return False  # JSON fragment
+                    return True
+                _improvements = [
+                    _i for _i in _improvements
+                    if _reason_ok(str(_i.get("reason", "")))
+                ][:5]
+                if _improvements:
+                    st.markdown("**📋 Últimas auto-mejoras aplicadas**")
+                    for _imp in _improvements:
+                        _ic = "✅" if _imp.get("applied") else "📝"
+                        _ts = str(_imp.get("created_at", ""))[:16]
+                        st.caption(f"{_ic} {_ts} — {str(_imp.get('reason',''))[:80]}")
+                else:
+                    st.caption("Sin mejoras registradas aún.")
             except Exception:
                 pass
 
-        if _master and _master.get("source") == "meta_learner":
-            _mv = _master.get("version", "?")
-            _mobs = _master.get("obs_analyzed", 0)
-            _mevolved = str(_master.get("evolved_at", ""))[:16]
-            _minsight = _master.get("ai_insight", "")
-            _mimprove = _master.get("improvement", "")
+    # ── Estrategia Maestra Adaptativa ─────────────────────────────────────────────
+    try:
+        import strategy_learner as _sl_mod
+        _LEARNER_OK = True
+    except ImportError:
+        _LEARNER_OK = False
 
-            st.success(f"🧬 **DNA Maestro v{_mv}** — {_mobs} observaciones analizadas")
-            if _minsight:
-                st.info(f"💡 **Insight IA:** {_minsight}")
-            if _mimprove:
-                st.caption(f"📈 Mejora vs anterior: {_mimprove}")
-
-            # Pesos de señal
-            _sw = _master.get("signal_weights") or {}
-            if _sw:
-                st.markdown("**⚖️ Pesos de señal aprendidos:**")
-                _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
-                _sc1.metric("Técnico",      f"{_sw.get('technical',0)*100:.0f}%")
-                _sc2.metric("DXY",          f"{_sw.get('dxy',0)*100:.0f}%")
-                _sc3.metric("Volumen",      f"{_sw.get('volume',0)*100:.0f}%")
-                _sc4.metric("Sentimiento",  f"{_sw.get('sentiment',0)*100:.0f}%")
-                _sc5.metric("Fundamental",  f"{_sw.get('fundamental',0)*100:.0f}%")
-
-            # Mejores condiciones
-            _bc = _master.get("best_conditions") or []
-            _ac = _master.get("avoid_conditions") or []
-            if _bc or _ac:
-                _cc1, _cc2 = st.columns(2)
-                if _bc:
-                    _cc1.markdown("**✅ Mejores condiciones:**")
-                    for _c in _bc:
-                        _cc1.caption(f"• {_c}")
-                if _ac:
-                    _cc2.markdown("**⛔ Evitar:**")
-                    for _c in _ac:
-                        _cc2.caption(f"• {_c}")
-
-            st.caption(f"Última evolución: {_mevolved} | Próxima en ~6h")
-
-        else:
-            _obs_count = 0
+    if _LEARNER_OK:
+        with st.expander("🧬 Estrategia Maestra Adaptativa", expanded=True):
+            _master = None
             if _DB_OK:
                 try:
-                    _obs_count = len(_db.get_metrics(name="market_observation", limit=200) or [])
+                    _master = _db.load_active_strategy()
                 except Exception:
                     pass
-            _needed = max(0, 20 - _obs_count)
-            if _needed > 0:
-                st.info(f"🔄 Acumulando datos... {_obs_count}/20 observaciones necesarias para el primer aprendizaje.\nEl sistema aprenderá automáticamente.")
+
+            if _master and _master.get("source") == "meta_learner":
+                _mv = _master.get("version", "?")
+                _mobs = _master.get("obs_analyzed", 0)
+                _mevolved = str(_master.get("evolved_at", ""))[:16]
+                _minsight = _master.get("ai_insight", "")
+                _mimprove = _master.get("improvement", "")
+
+                st.success(f"🧬 **DNA Maestro v{_mv}** — {_mobs} observaciones analizadas")
+                if _minsight:
+                    st.info(f"💡 **Insight IA:** {_minsight}")
+                if _mimprove:
+                    st.caption(f"📈 Mejora vs anterior: {_mimprove}")
+
+                # Pesos de señal
+                _sw = _master.get("signal_weights") or {}
+                if _sw:
+                    st.markdown("**⚖️ Pesos de señal aprendidos:**")
+                    _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
+                    _sc1.metric("Técnico",      f"{_sw.get('technical',0)*100:.0f}%")
+                    _sc2.metric("DXY",          f"{_sw.get('dxy',0)*100:.0f}%")
+                    _sc3.metric("Volumen",      f"{_sw.get('volume',0)*100:.0f}%")
+                    _sc4.metric("Sentimiento",  f"{_sw.get('sentiment',0)*100:.0f}%")
+                    _sc5.metric("Fundamental",  f"{_sw.get('fundamental',0)*100:.0f}%")
+
+                # Mejores condiciones
+                _bc = _master.get("best_conditions") or []
+                _ac = _master.get("avoid_conditions") or []
+                if _bc or _ac:
+                    _cc1, _cc2 = st.columns(2)
+                    if _bc:
+                        _cc1.markdown("**✅ Mejores condiciones:**")
+                        for _c in _bc:
+                            _cc1.caption(f"• {_c}")
+                    if _ac:
+                        _cc2.markdown("**⛔ Evitar:**")
+                        for _c in _ac:
+                            _cc2.caption(f"• {_c}")
+
+                st.caption(f"Última evolución: {_mevolved} | Próxima en ~6h")
+
             else:
-                st.info(f"✅ {_obs_count} observaciones acumuladas. El primer ciclo de aprendizaje se ejecutará en breve (cada 6h).")
-
-        # ── Ranking de estrategias ganadoras (auto-actualizado por el servidor) ─
-        st.markdown("---")
-        _rnk_h1, _rnk_h2 = st.columns([3, 1])
-        _rnk_h1.markdown("**🏆 Ranking de estrategias — Doble Filtro (60d + 2008)**")
-        try:
-            import strategy_selector as _ss_mod
-            _ranking = _ss_mod.get_latest_ranking()
-            if not _ranking:
-                _ranking = []
-
-            # Timestamps de última actualización
-            _ts_60d = None
-            _ts_lt  = None
-            try:
-                _rk_rows = _db.get_metrics(name="strategy_ranking", limit=1) or []
-                if _rk_rows:
-                    _rk_ts = (_rk_rows[0].get("context") or {}).get("ts", "")
-                    _ts_60d = _rk_ts[:16] if _rk_ts else None
-            except Exception:
-                pass
-            _rnk_h2.caption(f"🔄 Auto cada 8h\n{'Actualizado: ' + _ts_60d if _ts_60d else 'Calculando...'}")
-
-            if _ranking:
-                _n_cert = sum(1 for _r in _ranking if _r.get("is_certified") or _r.get("badge") == "🏆")
-                _n_60d  = sum(1 for _r in _ranking if (_r.get("is_winner_60d") or _r.get("is_winner")) and not (_r.get("is_certified") or _r.get("badge") == "🏆"))
-                _n_lt   = sum(1 for _r in _ranking if _r.get("is_winner_lt"))
-                _rk1, _rk2, _rk3 = st.columns(3)
-                _rk1.metric("🏆 Certificadas", _n_cert, help="Ganan en 60d 1H Y en 2008+ diario")
-                _rk2.metric("✅ Solo reciente", _n_60d, help="Ganan en 60d 1H pero no tienen datos 2008 aún")
-                _rk3.metric("📅 Ganan 2008+", _n_lt, help="Probadas rentables en datos históricos desde 2008")
-                st.markdown("")
-
-                _rank_cols = st.columns([3, 1, 1, 1, 1, 1])
-                _rank_cols[0].markdown("**Estrategia**")
-                _rank_cols[1].markdown("**WR 60d**")
-                _rank_cols[2].markdown("**PF 60d**")
-                _rank_cols[3].markdown("**WR 2008**")
-                _rank_cols[4].markdown("**PF 2008**")
-                _rank_cols[5].markdown("**Estado**")
-                for _ri, _r in enumerate(_ranking[:12]):
-                    _rc = st.columns([3, 1, 1, 1, 1, 1])
-                    if _r.get("badge"):
-                        _emoji = _r["badge"]
-                    elif _r.get("is_certified"):
-                        _emoji = "🏆"
-                    elif _r.get("is_winner_60d") or _r.get("is_winner"):
-                        _emoji = "✅"
-                    else:
-                        _emoji = "❌"
-                    _lbl = _r.get("label", _r.get("name", "?"))[:30]
-                    _pos = "🥇" if _ri==0 else "🥈" if _ri==1 else "🥉" if _ri==2 else f"{_ri+1}."
-                    _rc[0].caption(f"{_pos} {_lbl}")
-                    _wr  = _r.get("winrate", 0)
-                    _pf  = _r.get("profit_factor", 0)
-                    _lt_wr = _r.get("lt_winrate", 0)
-                    _lt_pf = _r.get("lt_profit_factor", 0)
-                    _rc[1].caption(f"{'🟢' if _wr >= 55 else '🟡' if _wr >= 52 else '🔴'} {_wr:.0f}%")
-                    _rc[2].caption(f"{_pf:.2f}")
-                    _rc[3].caption(f"{'🟢' if _lt_wr >= 55 else '🟡' if _lt_wr >= 52 else '—'} {_lt_wr:.0f}%" if _lt_wr > 0 else "—")
-                    _rc[4].caption(f"{_lt_pf:.2f}" if _lt_pf > 0 else "—")
-                    _rc[5].caption(_emoji)
-            else:
-                st.info("⏳ El servidor está calculando el ranking en background (primera vez puede tardar ~2 min). Se actualizará automáticamente.")
-        except Exception:
-            st.caption("Módulo strategy_selector cargando en background...")
-
-        # Estado del ciclo de aprendizaje
-        st.markdown("")
-        _learn_h1, _learn_h2 = st.columns([3, 1])
-        _learn_h1.caption("🧠 **Ciclo de aprendizaje IA** — corre automáticamente cada 6h")
-        try:
-            _last_learn = _db.get_setting("last_learn_ts") or ""
-            if _last_learn:
-                from datetime import datetime, timezone as _tz
-                _last_dt = datetime.fromisoformat(_last_learn)
-                if not _last_dt.tzinfo:
-                    _last_dt = _last_dt.replace(tzinfo=_tz.utc)
-                _hrs_ago = int((datetime.now(_tz.utc) - _last_dt).total_seconds() / 3600)
-                _nxt_hrs = max(0, 6 - _hrs_ago)
-                _learn_h2.caption(f"Último: hace {_hrs_ago}h · Próximo en ~{_nxt_hrs}h")
-            else:
-                _learn_h2.caption("Primera ejecución pendiente...")
-        except Exception:
-            pass
-
-# ── Patrones de mercado detectados (auto-actualizados cada 6h) ────────────────
-if _SELF_IMPROVE_OK and _DB_OK:
-    with st.expander("🔎 Patrones detectados por IA en observaciones históricas", expanded=False):
-        try:
-            _pat_rows = _db.get_metrics(name="pattern_report", limit=1) or []
-            if _pat_rows:
-                _pat_ctx = _pat_rows[0].get("context") or {}
-                _pat_rep = _pat_ctx.get("report", "")
-                _pat_ts  = str(_pat_rows[0].get("created_at", ""))[:16]
-                if _pat_rep:
-                    st.caption(f"🤖 Análisis automático · Última actualización: {_pat_ts} · Siguiente en ~6h")
-                    st.write(_pat_rep)
+                _obs_count = 0
+                if _DB_OK:
+                    try:
+                        _obs_count = len(_db.get_metrics(name="market_observation", limit=200) or [])
+                    except Exception:
+                        pass
+                _needed = max(0, 20 - _obs_count)
+                if _needed > 0:
+                    st.info(f"🔄 Acumulando datos... {_obs_count}/20 observaciones necesarias para el primer aprendizaje.\nEl sistema aprenderá automáticamente.")
                 else:
-                    st.info("⏳ El servidor está analizando patrones en background. Disponible en la próxima ejecución (~6h desde el inicio).")
-            else:
-                st.info("⏳ El servidor ejecutará el análisis de patrones automáticamente (cada 6h). Primera ejecución pendiente.")
-        except Exception:
-            st.caption("Patrones: cargando desde servidor...")
+                    st.info(f"✅ {_obs_count} observaciones acumuladas. El primer ciclo de aprendizaje se ejecutará en breve (cada 6h).")
 
-# ── Trading Advisor AI ────────────────────────────────────────────────────────
-st.markdown('<div id="sec-advisor"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader(f"🧠 Trading Advisor AI — Asesor Personal de {current_user_name}")
-st.caption(f"Hola {current_user_name}, cuéntame tu tesis. Analizo tu visión contra tus operaciones reales, los backtests históricos (2008–hoy), posicionamiento institucional, técnico y fundamental. Aprendo de cada conversación.")
+            # ── Ranking de estrategias ganadoras (auto-actualizado por el servidor) ─
+            st.markdown("---")
+            _rnk_h1, _rnk_h2 = st.columns([3, 1])
+            _rnk_h1.markdown("**🏆 Ranking de estrategias — Doble Filtro (60d + 2008)**")
+            try:
+                import strategy_selector as _ss_mod
+                _ranking = _ss_mod.get_latest_ranking()
+                if not _ranking:
+                    _ranking = []
 
-import os as _os
+                # Timestamps de última actualización
+                _ts_60d = None
+                _ts_lt  = None
+                try:
+                    _rk_rows = _db.get_metrics(name="strategy_ranking", limit=1) or []
+                    if _rk_rows:
+                        _rk_ts = (_rk_rows[0].get("context") or {}).get("ts", "")
+                        _ts_60d = _rk_ts[:16] if _rk_ts else None
+                except Exception:
+                    pass
+                _rnk_h2.caption(f"🔄 Auto cada 8h\n{'Actualizado: ' + _ts_60d if _ts_60d else 'Calculando...'}")
 
-# API key: env var (Railway) o input de sesión
-_ant_key = _os.environ.get("GROQ_API_KEY", "gsk_0r0JRGjnYIAsgkfey3UWwWGdyb3FYjGb4Q5RKJICkoPGHM4pdQRlY").strip()
+                if _ranking:
+                    _n_cert = sum(1 for _r in _ranking if _r.get("is_certified") or _r.get("badge") == "🏆")
+                    _n_60d  = sum(1 for _r in _ranking if (_r.get("is_winner_60d") or _r.get("is_winner")) and not (_r.get("is_certified") or _r.get("badge") == "🏆"))
+                    _n_lt   = sum(1 for _r in _ranking if _r.get("is_winner_lt"))
+                    _rk1, _rk2, _rk3 = st.columns(3)
+                    _rk1.metric("🏆 Certificadas", _n_cert, help="Ganan en 60d 1H Y en 2008+ diario")
+                    _rk2.metric("✅ Solo reciente", _n_60d, help="Ganan en 60d 1H pero no tienen datos 2008 aún")
+                    _rk3.metric("📅 Ganan 2008+", _n_lt, help="Probadas rentables en datos históricos desde 2008")
+                    st.markdown("")
 
-# Session_id estable por usuario (aislado entre David y Javi)
-_adv_sess_key = f"advisor_session_{current_user}"
-if _adv_sess_key not in st.session_state:
-    import uuid as _uuid
-    st.session_state[_adv_sess_key] = str(_uuid.uuid4())
-st.session_state.advisor_session_id = st.session_state[_adv_sess_key]
+                    _rank_cols = st.columns([3, 1, 1, 1, 1, 1])
+                    _rank_cols[0].markdown("**Estrategia**")
+                    _rank_cols[1].markdown("**WR 60d**")
+                    _rank_cols[2].markdown("**PF 60d**")
+                    _rank_cols[3].markdown("**WR 2008**")
+                    _rank_cols[4].markdown("**PF 2008**")
+                    _rank_cols[5].markdown("**Estado**")
+                    for _ri, _r in enumerate(_ranking[:12]):
+                        _rc = st.columns([3, 1, 1, 1, 1, 1])
+                        if _r.get("badge"):
+                            _emoji = _r["badge"]
+                        elif _r.get("is_certified"):
+                            _emoji = "🏆"
+                        elif _r.get("is_winner_60d") or _r.get("is_winner"):
+                            _emoji = "✅"
+                        else:
+                            _emoji = "❌"
+                        _lbl = _r.get("label", _r.get("name", "?"))[:30]
+                        _pos = "🥇" if _ri==0 else "🥈" if _ri==1 else "🥉" if _ri==2 else f"{_ri+1}."
+                        _rc[0].caption(f"{_pos} {_lbl}")
+                        _wr  = _r.get("winrate", 0)
+                        _pf  = _r.get("profit_factor", 0)
+                        _lt_wr = _r.get("lt_winrate", 0)
+                        _lt_pf = _r.get("lt_profit_factor", 0)
+                        _rc[1].caption(f"{'🟢' if _wr >= 55 else '🟡' if _wr >= 52 else '🔴'} {_wr:.0f}%")
+                        _rc[2].caption(f"{_pf:.2f}")
+                        _rc[3].caption(f"{'🟢' if _lt_wr >= 55 else '🟡' if _lt_wr >= 52 else '—'} {_lt_wr:.0f}%" if _lt_wr > 0 else "—")
+                        _rc[4].caption(f"{_lt_pf:.2f}" if _lt_pf > 0 else "—")
+                        _rc[5].caption(_emoji)
+                else:
+                    st.info("⏳ El servidor está calculando el ranking en background (primera vez puede tardar ~2 min). Se actualizará automáticamente.")
+            except Exception:
+                st.caption("Módulo strategy_selector cargando en background...")
 
-# Historial de chat: cargar desde DB filtrado por usuario
-_adv_chat_key = f"advisor_chat_{current_user}"
-if _adv_chat_key not in st.session_state:
-    if _DB_OK:
-        try:
-            st.session_state[_adv_chat_key] = _db.load_chat_history(
-                st.session_state.advisor_session_id, user_id=current_user
-            )
-        except Exception:
+            # Estado del ciclo de aprendizaje
+            st.markdown("")
+            _learn_h1, _learn_h2 = st.columns([3, 1])
+            _learn_h1.caption("🧠 **Ciclo de aprendizaje IA** — corre automáticamente cada 6h")
+            try:
+                _last_learn = _db.get_setting("last_learn_ts") or ""
+                if _last_learn:
+                    from datetime import datetime, timezone as _tz
+                    _last_dt = datetime.fromisoformat(_last_learn)
+                    if not _last_dt.tzinfo:
+                        _last_dt = _last_dt.replace(tzinfo=_tz.utc)
+                    _hrs_ago = int((datetime.now(_tz.utc) - _last_dt).total_seconds() / 3600)
+                    _nxt_hrs = max(0, 6 - _hrs_ago)
+                    _learn_h2.caption(f"Último: hace {_hrs_ago}h · Próximo en ~{_nxt_hrs}h")
+                else:
+                    _learn_h2.caption("Primera ejecución pendiente...")
+            except Exception:
+                pass
+
+    # ── Patrones de mercado detectados (auto-actualizados cada 6h) ────────────────
+    if _SELF_IMPROVE_OK and _DB_OK:
+        with st.expander("🔎 Patrones detectados por IA en observaciones históricas", expanded=False):
+            try:
+                _pat_rows = _db.get_metrics(name="pattern_report", limit=1) or []
+                if _pat_rows:
+                    _pat_ctx = _pat_rows[0].get("context") or {}
+                    _pat_rep = _pat_ctx.get("report", "")
+                    _pat_ts  = str(_pat_rows[0].get("created_at", ""))[:16]
+                    if _pat_rep:
+                        st.caption(f"🤖 Análisis automático · Última actualización: {_pat_ts} · Siguiente en ~6h")
+                        st.write(_pat_rep)
+                    else:
+                        st.info("⏳ El servidor está analizando patrones en background. Disponible en la próxima ejecución (~6h desde el inicio).")
+                else:
+                    st.info("⏳ El servidor ejecutará el análisis de patrones automáticamente (cada 6h). Primera ejecución pendiente.")
+            except Exception:
+                st.caption("Patrones: cargando desde servidor...")
+
+    # ── Trading Advisor AI ────────────────────────────────────────────────────────
+
+with _t_ia:
+    st.markdown('<div id="sec-advisor"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader(f"🧠 Trading Advisor AI — Asesor Personal de {current_user_name}")
+    st.caption(f"Hola {current_user_name}, cuéntame tu tesis. Analizo tu visión contra tus operaciones reales, los backtests históricos (2008–hoy), posicionamiento institucional, técnico y fundamental. Aprendo de cada conversación.")
+
+    import os as _os
+
+    # API key: env var (Railway) o input de sesión
+    _ant_key = _os.environ.get("GROQ_API_KEY", "gsk_0r0JRGjnYIAsgkfey3UWwWGdyb3FYjGb4Q5RKJICkoPGHM4pdQRlY").strip()
+
+    # Session_id estable por usuario (aislado entre David y Javi)
+    _adv_sess_key = f"advisor_session_{current_user}"
+    if _adv_sess_key not in st.session_state:
+        import uuid as _uuid
+        st.session_state[_adv_sess_key] = str(_uuid.uuid4())
+    st.session_state.advisor_session_id = st.session_state[_adv_sess_key]
+
+    # Historial de chat: cargar desde DB filtrado por usuario
+    _adv_chat_key = f"advisor_chat_{current_user}"
+    if _adv_chat_key not in st.session_state:
+        if _DB_OK:
+            try:
+                st.session_state[_adv_chat_key] = _db.load_chat_history(
+                    st.session_state.advisor_session_id, user_id=current_user
+                )
+            except Exception:
+                st.session_state[_adv_chat_key] = []
+        else:
             st.session_state[_adv_chat_key] = []
-    else:
-        st.session_state[_adv_chat_key] = []
-# Alias genérico usado en el resto del código
-st.session_state.advisor_chat = st.session_state[_adv_chat_key]
+    # Alias genérico usado en el resto del código
+    st.session_state.advisor_chat = st.session_state[_adv_chat_key]
 
 
-def _advisor_context() -> str:
-    """Builds a rich snapshot of current app data for the AI system prompt."""
-    _lines = []
-    _s = signal if isinstance(signal, dict) else {}
+    def _advisor_context() -> str:
+        """Builds a rich snapshot of current app data for the AI system prompt."""
+        _lines = []
+        _s = signal if isinstance(signal, dict) else {}
 
-    _lines.append("=== DATOS EN TIEMPO REAL DE LA APP ===")
-    _lines.append(f"Par: EUR/USD")
-    _lines.append(f"Precio actual: {f'{price:.5f}' if price else 'N/A'}")
-    _lines.append(f"Señal: {_s.get('final_signal', 'NEUTRAL')} | Score: {score}/100 ({label})")
-    _lines.append(f"Señales alcistas: {_s.get('buy_signals', 0)} | Bajistas: {_s.get('sell_signals', 0)}")
-    if _s.get('entry'):
-        _lines.append(f"Setup sugerido: Entrada {_s.get('entry','?')} | SL {_s.get('stop_loss','?')} | TP {_s.get('take_profit','?')}")
-    if _s.get('regime'):
-        _lines.append(f"Régimen detectado: {_s.get('regime')}")
-    if _s.get('strategy'):
-        _lines.append(f"Estrategia activa: {_s.get('strategy')}")
-    _lines.append(f"Sesión activa: {session}")
-    _lines.append(f"DXY: {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%) — {'DXY sube → presión bajista EUR' if dxy_dir == 'UP' else 'DXY baja → presión alcista EUR' if dxy_dir == 'DOWN' else 'DXY neutro'}")
+        _lines.append("=== DATOS EN TIEMPO REAL DE LA APP ===")
+        _lines.append(f"Par: EUR/USD")
+        _lines.append(f"Precio actual: {f'{price:.5f}' if price else 'N/A'}")
+        _lines.append(f"Señal: {_s.get('final_signal', 'NEUTRAL')} | Score: {score}/100 ({label})")
+        _lines.append(f"Señales alcistas: {_s.get('buy_signals', 0)} | Bajistas: {_s.get('sell_signals', 0)}")
+        if _s.get('entry'):
+            _lines.append(f"Setup sugerido: Entrada {_s.get('entry','?')} | SL {_s.get('stop_loss','?')} | TP {_s.get('take_profit','?')}")
+        if _s.get('regime'):
+            _lines.append(f"Régimen detectado: {_s.get('regime')}")
+        if _s.get('strategy'):
+            _lines.append(f"Estrategia activa: {_s.get('strategy')}")
+        _lines.append(f"Sesión activa: {session}")
+        _lines.append(f"DXY: {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%) — {'DXY sube → presión bajista EUR' if dxy_dir == 'UP' else 'DXY baja → presión alcista EUR' if dxy_dir == 'DOWN' else 'DXY neutro'}")
 
-    if delta:
-        _dir_d = "compradores dominan" if delta.get("delta", 0) > 0 else "vendedores dominan"
-        _lines.append(f"Delta de volumen: {delta.get('delta_pct', 0):+.1f}% ({_dir_d})")
-    if vol_spikes:
-        _lines.append(f"Spike de volumen: {vol_spikes[0].get('ratio', 0):.1f}x — posible movimiento institucional")
-    if poc:
-        _lines.append(f"POC (Volume Profile): {poc['precio']:.5f} — nivel de mayor liquidez")
+        if delta:
+            _dir_d = "compradores dominan" if delta.get("delta", 0) > 0 else "vendedores dominan"
+            _lines.append(f"Delta de volumen: {delta.get('delta_pct', 0):+.1f}% ({_dir_d})")
+        if vol_spikes:
+            _lines.append(f"Spike de volumen: {vol_spikes[0].get('ratio', 0):.1f}x — posible movimiento institucional")
+        if poc:
+            _lines.append(f"POC (Volume Profile): {poc['precio']:.5f} — nivel de mayor liquidez")
 
-    # Fundamental
-    _c = consensus if isinstance(consensus, dict) else {}
-    if _c:
-        _lines.append(f"\n=== FUNDAMENTAL ===")
-        _lines.append(f"Consenso: {_c.get('consensus', 'N/A')} | Sentimiento ponderado: {_c.get('weighted_sentiment', 0):+.3f}")
-        _lines.append(f"Impacto medio noticias: {avg_impact:.0f}% | Fuentes procesadas: {total_sources}")
+        # Fundamental
+        _c = consensus if isinstance(consensus, dict) else {}
+        if _c:
+            _lines.append(f"\n=== FUNDAMENTAL ===")
+            _lines.append(f"Consenso: {_c.get('consensus', 'N/A')} | Sentimiento ponderado: {_c.get('weighted_sentiment', 0):+.3f}")
+            _lines.append(f"Impacto medio noticias: {avg_impact:.0f}% | Fuentes procesadas: {total_sources}")
 
-    # Market context reasons
-    _reasons = st.session_state.get("market_context_reasons", [])
-    if _reasons:
-        _lines.append(f"\n=== RAZONES DETECTADAS POR LA APP ===")
-        for _r in _reasons[:10]:
-            _lines.append(f"  • {_r}")
+        # Market context reasons
+        _reasons = st.session_state.get("market_context_reasons", [])
+        if _reasons:
+            _lines.append(f"\n=== RAZONES DETECTADAS POR LA APP ===")
+            for _r in _reasons[:10]:
+                _lines.append(f"  • {_r}")
 
-    # 1-year backtest
-    _cmp = st.session_state.get("strategy_comparison")
-    if _cmp:
-        _b = _cmp.get("best", {})
-        _lines.append(f"\n=== BACKTEST 1 AÑO ===")
-        _lines.append(f"Mejor estrategia: {_b.get('label', 'N/A')}")
-        _lines.append(f"  WR: {_b.get('winrate', 0)}% | PF: {_b.get('profit_factor', 0)}x | Pips netos: {_b.get('net_pips', 0):+.1f} | Max DD: {_b.get('max_dd', 0)}%")
-        _lines.append(f"  Operaciones: {_b.get('total', 0)} | Por qué funciona: {_b.get('why', 'N/A')}")
-        _lines.append(f"  Ventajas: {_b.get('pros', 'N/A')}")
-        _lines.append(f"  Limitaciones: {_b.get('cons', 'N/A')}")
-        _rs = _cmp.get("results", [])
-        if _rs:
-            _lines.append("  Ranking completo (1 año):")
-            for _ri, _r in enumerate(_rs[:6]):
-                _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
-                _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p netos | DD {_r.get('max_dd',0)}%")
+        # 1-year backtest
+        _cmp = st.session_state.get("strategy_comparison")
+        if _cmp:
+            _b = _cmp.get("best", {})
+            _lines.append(f"\n=== BACKTEST 1 AÑO ===")
+            _lines.append(f"Mejor estrategia: {_b.get('label', 'N/A')}")
+            _lines.append(f"  WR: {_b.get('winrate', 0)}% | PF: {_b.get('profit_factor', 0)}x | Pips netos: {_b.get('net_pips', 0):+.1f} | Max DD: {_b.get('max_dd', 0)}%")
+            _lines.append(f"  Operaciones: {_b.get('total', 0)} | Por qué funciona: {_b.get('why', 'N/A')}")
+            _lines.append(f"  Ventajas: {_b.get('pros', 'N/A')}")
+            _lines.append(f"  Limitaciones: {_b.get('cons', 'N/A')}")
+            _rs = _cmp.get("results", [])
+            if _rs:
+                _lines.append("  Ranking completo (1 año):")
+                for _ri, _r in enumerate(_rs[:6]):
+                    _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
+                    _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p netos | DD {_r.get('max_dd',0)}%")
 
-    # 2008 historical backtest
-    _lt = st.session_state.get("lt_comparison")
-    if _lt:
-        _b2 = _lt.get("best", {})
-        _lines.append(f"\n=== BACKTEST HISTÓRICO 2008–HOY (18+ AÑOS) ===")
-        _lines.append(f"Mejor estrategia histórica: {_b2.get('label', 'N/A')}")
-        _lines.append(f"  WR: {_b2.get('winrate', 0)}% | PF: {_b2.get('profit_factor', 0)}x | Pips netos: {_b2.get('net_pips', 0):+.1f} | Max DD: {_b2.get('max_dd', 0)}%")
-        _lines.append(f"  Operaciones en 18 años: {_b2.get('total', 0)} (incluye: crisis 2008, flash crash 2015, Brexit 2016, COVID 2020, subidas Fed 2022-23)")
-        _lt_rs = _lt.get("results", [])
-        if _lt_rs:
-            _lines.append("  Ranking histórico (todas las estrategias):")
-            for _ri, _r in enumerate(_lt_rs):
-                _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
-                _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p | DD {_r.get('max_dd',0)}%")
+        # 2008 historical backtest
+        _lt = st.session_state.get("lt_comparison")
+        if _lt:
+            _b2 = _lt.get("best", {})
+            _lines.append(f"\n=== BACKTEST HISTÓRICO 2008–HOY (18+ AÑOS) ===")
+            _lines.append(f"Mejor estrategia histórica: {_b2.get('label', 'N/A')}")
+            _lines.append(f"  WR: {_b2.get('winrate', 0)}% | PF: {_b2.get('profit_factor', 0)}x | Pips netos: {_b2.get('net_pips', 0):+.1f} | Max DD: {_b2.get('max_dd', 0)}%")
+            _lines.append(f"  Operaciones en 18 años: {_b2.get('total', 0)} (incluye: crisis 2008, flash crash 2015, Brexit 2016, COVID 2020, subidas Fed 2022-23)")
+            _lt_rs = _lt.get("results", [])
+            if _lt_rs:
+                _lines.append("  Ranking histórico (todas las estrategias):")
+                for _ri, _r in enumerate(_lt_rs):
+                    _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
+                    _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p | DD {_r.get('max_dd',0)}%")
 
-    # ── Patrones de trading del usuario ──────────────────────────────────────
-    if _DB_OK:
+        # ── Patrones de trading del usuario ──────────────────────────────────────
+        if _DB_OK:
+            try:
+                _pats = _db.get_user_trade_patterns(current_user)
+                if _pats and _pats.get("total"):
+                    _lines.append(f"\n=== HISTORIAL REAL DE {current_user_name.upper()} EN ESTA APP ===")
+                    _lines.append(f"Total operaciones: {_pats.get('total', 0)} | Win Rate: {float(_pats.get('winrate') or 0):.1f}%")
+                    _lines.append(f"Net pips acumulados: {float(_pats.get('net_pips') or 0):+.1f} | P&L neto: ${float(_pats.get('net_pnl') or 0):+.2f}")
+                    if _pats.get("by_strategy"):
+                        _lines.append("  Rendimiento por estrategia:")
+                        for _s in _pats["by_strategy"][:5]:
+                            _lines.append(f"    • {_s.get('strategy','?')}: {_s.get('total',0)} ops | {float(_s.get('winrate') or 0):.0f}% WR | {float(_s.get('net_pips') or 0):+.1f}p")
+                    if _pats.get("recent_streak"):
+                        _lines.append(f"  Racha reciente: {_pats['recent_streak']}")
+            except Exception:
+                pass
+
+        # ── Memorias del Advisor (aprendizajes acumulados) ────────────────────────
+        if _DB_OK:
+            try:
+                _mems = _db.load_ai_memories(current_user, limit=12)
+                if _mems:
+                    _lines.append(f"\n=== LO QUE HE APRENDIDO DE {current_user_name.upper()} ===")
+                    for _m in _mems:
+                        _ct = _m.get("content", "")
+                        if _ct:
+                            _lines.append(f"  [{_m.get('memory_type','insight')}] {_ct}")
+            except Exception:
+                pass
+
+        return "\n".join(_lines)
+
+
+    def _extract_lesson(user_msg: str, ai_response: str, api_key: str) -> str | None:
+        """Extract a 1-sentence learning from a conversation. Returns None if nothing new."""
         try:
-            _pats = _db.get_user_trade_patterns(current_user)
-            if _pats and _pats.get("total"):
-                _lines.append(f"\n=== HISTORIAL REAL DE {current_user_name.upper()} EN ESTA APP ===")
-                _lines.append(f"Total operaciones: {_pats.get('total', 0)} | Win Rate: {float(_pats.get('winrate') or 0):.1f}%")
-                _lines.append(f"Net pips acumulados: {float(_pats.get('net_pips') or 0):+.1f} | P&L neto: ${float(_pats.get('net_pnl') or 0):+.2f}")
-                if _pats.get("by_strategy"):
-                    _lines.append("  Rendimiento por estrategia:")
-                    for _s in _pats["by_strategy"][:5]:
-                        _lines.append(f"    • {_s.get('strategy','?')}: {_s.get('total',0)} ops | {float(_s.get('winrate') or 0):.0f}% WR | {float(_s.get('net_pips') or 0):+.1f}p")
-                if _pats.get("recent_streak"):
-                    _lines.append(f"  Racha reciente: {_pats['recent_streak']}")
+            from ai_engine import call_ai as _call_ai
+            _prompt = (
+                f"Conversación de trading EUR/USD:\n"
+                f"USUARIO: {user_msg[:250]}\n"
+                f"ADVISOR: {ai_response[:400]}\n\n"
+                f"En UNA frase corta (máx 120 caracteres), extrae el insight o patrón de trading "
+                f"más importante que el ADVISOR ha identificado sobre este usuario o mercado. "
+                f"Si no hay nada nuevo o relevante que aprender, responde exactamente: NONE"
+            )
+            _r = _call_ai([{"role": "user", "content": _prompt}],
+                          max_tokens=160, temperature=0.2).strip()
+            return None if _r.startswith("⚠️") or _r.upper().startswith("NONE") or len(_r) < 12 else _r
         except Exception:
-            pass
-
-    # ── Memorias del Advisor (aprendizajes acumulados) ────────────────────────
-    if _DB_OK:
-        try:
-            _mems = _db.load_ai_memories(current_user, limit=12)
-            if _mems:
-                _lines.append(f"\n=== LO QUE HE APRENDIDO DE {current_user_name.upper()} ===")
-                for _m in _mems:
-                    _ct = _m.get("content", "")
-                    if _ct:
-                        _lines.append(f"  [{_m.get('memory_type','insight')}] {_ct}")
-        except Exception:
-            pass
-
-    return "\n".join(_lines)
+            return None
 
 
-def _extract_lesson(user_msg: str, ai_response: str, api_key: str) -> str | None:
-    """Extract a 1-sentence learning from a conversation. Returns None if nothing new."""
-    try:
+    def _advisor_call(user_msg: str, history: list, context: str) -> str:
+        """
+        Send user message to the best available AI provider (Groq → Cerebras → Zhipu → Claude).
+        Falls back to Claude (Anthropic) automatically if the free providers fail.
+        """
         from ai_engine import call_ai as _call_ai
-        _prompt = (
-            f"Conversación de trading EUR/USD:\n"
-            f"USUARIO: {user_msg[:250]}\n"
-            f"ADVISOR: {ai_response[:400]}\n\n"
-            f"En UNA frase corta (máx 120 caracteres), extrae el insight o patrón de trading "
-            f"más importante que el ADVISOR ha identificado sobre este usuario o mercado. "
-            f"Si no hay nada nuevo o relevante que aprender, responde exactamente: NONE"
-        )
-        _r = _call_ai([{"role": "user", "content": _prompt}],
-                      max_tokens=160, temperature=0.2).strip()
-        return None if _r.startswith("⚠️") or _r.upper().startswith("NONE") or len(_r) < 12 else _r
-    except Exception:
-        return None
+
+        _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamiento, y los aprendizajes acumulados de todas vuestras conversaciones anteriores.
+
+    Tu objetivo no es solo analizar — es convertirte en el mejor consejero posible para {current_user_name} adaptándote a su estilo, sus errores pasados y sus puntos fuertes.
+
+    {context}
+
+    INSTRUCCIONES:
+    {current_user_name} compartirá su visión/tesis. Analízala contra los datos de la app y su historial personal. Responde SIEMPRE con esta estructura:
+
+    📊 **TU VISIÓN ENTENDIDA**
+    Resumir lo que propone {current_user_name} en 1-2 frases.
+
+    ✅ **POR QUÉ SÍ** (confluencias a favor)
+    Argumentos que respaldan la visión: backtest histórico (18+ años), señal actual de la app, técnico (EMA/RSI/MACD), fundamental (BCE/Fed/macro), patrones del usuario si aplican. Cita profit factors y win rates.
+
+    ❌ **POR QUÉ NO** (riesgos y contradicciones)
+    Argumentos en contra: estrategias que fallen en este contexto, drawdowns históricos, alertas de la app, errores pasados de {current_user_name} si los hay en su historial.
+
+    🎯 **VEREDICTO**
+    Conclusión directa con nivel de convicción (ALTA/MEDIA/BAJA) y ajustes concretos (entrada, SL, TP, timing). Si detectas un patrón recurrente en {current_user_name}, menciónalo.
+
+    🧠 **APRENDIZAJE** (solo si hay algo nuevo)
+    En 1 frase: qué nuevo insight has extraído de esta conversación sobre el mercado o sobre {current_user_name}.
+
+    REGLAS:
+    - Responde en español, tutea a {current_user_name}
+    - Sé cuantitativo — cita datos concretos del backtest como evidencia
+    - Usa el historial real del usuario cuando sea relevante
+    - Máximo 450 palabras en total
+    - Si los datos de la app aún no están cargados (N/A), indícalo y razona con lo que tengas"""
+
+        _messages = [{"role": "system", "content": _system}]
+        for _h in history[-8:]:
+            _messages.append({"role": _h["role"], "content": _h["content"]})
+        _messages.append({"role": "user", "content": user_msg})
+
+        return _call_ai(_messages, max_tokens=1200, temperature=0.4, prefer_quality=True)
 
 
-def _advisor_call(user_msg: str, history: list, context: str) -> str:
-    """
-    Send user message to the best available AI provider (Groq → Cerebras → Zhipu → Claude).
-    Falls back to Claude (Anthropic) automatically if the free providers fail.
-    """
-    from ai_engine import call_ai as _call_ai
+    # Mostrar historial de conversación
+    for _msg in st.session_state.advisor_chat:
+        _av = "👤" if _msg["role"] == "user" else "🧠"
+        with st.chat_message(_msg["role"], avatar=_av):
+            st.markdown(_msg["content"])
 
-    _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamiento, y los aprendizajes acumulados de todas vuestras conversaciones anteriores.
-
-Tu objetivo no es solo analizar — es convertirte en el mejor consejero posible para {current_user_name} adaptándote a su estilo, sus errores pasados y sus puntos fuertes.
-
-{context}
-
-INSTRUCCIONES:
-{current_user_name} compartirá su visión/tesis. Analízala contra los datos de la app y su historial personal. Responde SIEMPRE con esta estructura:
-
-📊 **TU VISIÓN ENTENDIDA**
-Resumir lo que propone {current_user_name} en 1-2 frases.
-
-✅ **POR QUÉ SÍ** (confluencias a favor)
-Argumentos que respaldan la visión: backtest histórico (18+ años), señal actual de la app, técnico (EMA/RSI/MACD), fundamental (BCE/Fed/macro), patrones del usuario si aplican. Cita profit factors y win rates.
-
-❌ **POR QUÉ NO** (riesgos y contradicciones)
-Argumentos en contra: estrategias que fallen en este contexto, drawdowns históricos, alertas de la app, errores pasados de {current_user_name} si los hay en su historial.
-
-🎯 **VEREDICTO**
-Conclusión directa con nivel de convicción (ALTA/MEDIA/BAJA) y ajustes concretos (entrada, SL, TP, timing). Si detectas un patrón recurrente en {current_user_name}, menciónalo.
-
-🧠 **APRENDIZAJE** (solo si hay algo nuevo)
-En 1 frase: qué nuevo insight has extraído de esta conversación sobre el mercado o sobre {current_user_name}.
-
-REGLAS:
-- Responde en español, tutea a {current_user_name}
-- Sé cuantitativo — cita datos concretos del backtest como evidencia
-- Usa el historial real del usuario cuando sea relevante
-- Máximo 450 palabras en total
-- Si los datos de la app aún no están cargados (N/A), indícalo y razona con lo que tengas"""
-
-    _messages = [{"role": "system", "content": _system}]
-    for _h in history[-8:]:
-        _messages.append({"role": _h["role"], "content": _h["content"]})
-    _messages.append({"role": "user", "content": user_msg})
-
-    return _call_ai(_messages, max_tokens=1200, temperature=0.4, prefer_quality=True)
-
-
-# Mostrar historial de conversación
-for _msg in st.session_state.advisor_chat:
-    _av = "👤" if _msg["role"] == "user" else "🧠"
-    with st.chat_message(_msg["role"], avatar=_av):
-        st.markdown(_msg["content"])
-
-# Input del chat
-_chat_prompt = st.chat_input(
-    "Ej: Creo que el EUR/USD va a subir porque el BCE está hawkish y el DXY está cayendo..."
-)
-if _chat_prompt:
-    if not _ant_key:
-        st.error("⚠️ Configura la GROQ_API_KEY primero (ver configuración arriba).")
-    else:
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(_chat_prompt)
-        st.session_state.advisor_chat.append({"role": "user", "content": _chat_prompt})
-        if _DB_OK:
-            try:
-                _db.save_chat_message(
-                    st.session_state.advisor_session_id, "user",
-                    _chat_prompt, user_id=current_user
-                )
-            except Exception:
-                pass
-
-        with st.chat_message("assistant", avatar="🧠"):
-            with st.spinner(f"Analizando tu visión, {current_user_name}..."):
-                _ctx_snap  = _advisor_context()
-                _ai_answer = _advisor_call(
-                    _chat_prompt,
-                    st.session_state.advisor_chat[:-1],
-                    _ctx_snap,
-                )
-            st.markdown(_ai_answer)
-        st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})
-        if _DB_OK:
-            try:
-                _db.save_chat_message(
-                    st.session_state.advisor_session_id, "assistant",
-                    _ai_answer, user_id=current_user
-                )
-            except Exception:
-                pass
-        # Auto-aprendizaje: extraer insight y guardar en ai_memory
-        if _DB_OK and _ant_key:
-            try:
-                _lesson = _extract_lesson(_chat_prompt, _ai_answer, _ant_key)
-                if _lesson:
-                    _db.save_ai_memory(
-                        current_user, "insight",
-                        f"Chat {datetime.now().strftime('%Y-%m-%d')}",
-                        _lesson, 0.7, "chat",
+    # Input del chat
+    _chat_prompt = st.chat_input(
+        "Ej: Creo que el EUR/USD va a subir porque el BCE está hawkish y el DXY está cayendo..."
+    )
+    if _chat_prompt:
+        if not _ant_key:
+            st.error("⚠️ Configura la GROQ_API_KEY primero (ver configuración arriba).")
+        else:
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(_chat_prompt)
+            st.session_state.advisor_chat.append({"role": "user", "content": _chat_prompt})
+            if _DB_OK:
+                try:
+                    _db.save_chat_message(
+                        st.session_state.advisor_session_id, "user",
+                        _chat_prompt, user_id=current_user
                     )
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
-    # Historial del Advisor — se muestra automáticamente, sin botón de limpiar
+            with st.chat_message("assistant", avatar="🧠"):
+                with st.spinner(f"Analizando tu visión, {current_user_name}..."):
+                    _ctx_snap  = _advisor_context()
+                    _ai_answer = _advisor_call(
+                        _chat_prompt,
+                        st.session_state.advisor_chat[:-1],
+                        _ctx_snap,
+                    )
+                st.markdown(_ai_answer)
+            st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})
+            if _DB_OK:
+                try:
+                    _db.save_chat_message(
+                        st.session_state.advisor_session_id, "assistant",
+                        _ai_answer, user_id=current_user
+                    )
+                except Exception:
+                    pass
+            # Auto-aprendizaje: extraer insight y guardar en ai_memory
+            if _DB_OK and _ant_key:
+                try:
+                    _lesson = _extract_lesson(_chat_prompt, _ai_answer, _ant_key)
+                    if _lesson:
+                        _db.save_ai_memory(
+                            current_user, "insight",
+                            f"Chat {datetime.now().strftime('%Y-%m-%d')}",
+                            _lesson, 0.7, "chat",
+                        )
+                except Exception:
+                    pass
 
-st.markdown("---")
+        # Historial del Advisor — se muestra automáticamente, sin botón de limpiar
+
+    st.markdown("---")
+
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
 # ── Auto-rerun invisible cada 3 minutos ───────────────────────────────────────
