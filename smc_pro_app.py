@@ -5874,28 +5874,44 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
     # ── BACKTEST PREMIUM desde 2020 ──────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### 📊 Backtest del filtro premium (EUR/USD 1H — desde 2020)")
+    st.markdown("### 📊 Backtest del filtro premium (EUR/USD Diario — desde 2020)")
 
     @st.cache_data(ttl=86400, show_spinner=False)
     def _run_premium_backtest_2020():
-        """Simula el filtro 7 capas sobre datos históricos desde 2020."""
+        """Simula el filtro 7 capas sobre velas diarias EUR/USD desde 2020."""
         import yfinance as _yf
         import numpy as _np
         import pandas as _pd
 
-        _df = _yf.download("EURUSD=X", start="2020-01-01", interval="1h",
-                           auto_adjust=True, progress=False)
-        if _df is None or _df.empty or len(_df) < 200:
-            return None, None, {}
+        try:
+            _df = _yf.download(
+                "EURUSD=X", start="2020-01-01", interval="1d",
+                auto_adjust=True, progress=False, timeout=20,
+            )
+        except Exception as _e:
+            return None, None, {}, str(_e)
+
+        if _df is None or _df.empty or len(_df) < 100:
+            return None, None, {}, "datos insuficientes"
 
         if isinstance(_df.columns, _pd.MultiIndex):
             _df.columns = _df.columns.get_level_values(0)
-        _df = _df.rename(columns={"Open": "Open", "High": "High",
-                                   "Low": "Low", "Close": "Close", "Volume": "Volume"})
-        _df = _df.dropna(subset=["Close"])
 
-        c = _df["Close"]
-        h = _df["High"]
+        # Normalizar nombres de columnas
+        _df.columns = [str(c).strip().capitalize() for c in _df.columns]
+        _needed = [col for col in ["Open", "High", "Low", "Close"] if col in _df.columns]
+        if len(_needed) < 4:
+            return None, None, {}, "columnas OHLC no encontradas"
+
+        _df = _df[_needed].copy()
+        _df = _df.dropna()
+
+        # Quitar tz para evitar problemas de comparación
+        if _df.index.tz is not None:
+            _df.index = _df.index.tz_localize(None)
+
+        c  = _df["Close"]
+        h  = _df["High"]
         lo = _df["Low"]
 
         # EMAs
@@ -5904,12 +5920,12 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         _df["ema20"] = c.ewm(span=20, adjust=False).mean()
         _df["ema50"] = c.ewm(span=50, adjust=False).mean()
 
-        # ATR(14)
+        # ATR(14) — en velas diarias EUR/USD suele ser 60-120 pips
         _prev_c = c.shift(1)
         _tr = _pd.concat([
             h - lo,
             (h - _prev_c).abs(),
-            (lo - _prev_c).abs()
+            (lo - _prev_c).abs(),
         ], axis=1).max(axis=1)
         _df["atr"] = _tr.ewm(span=14, adjust=False).mean()
 
@@ -5926,89 +5942,71 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         _ema12 = c.ewm(span=12, adjust=False).mean()
         _ema26 = c.ewm(span=26, adjust=False).mean()
         _macd  = _ema12 - _ema26
-        _sig   = _macd.ewm(span=9, adjust=False).mean()
-        _df["macd_hist"] = _macd - _sig
+        _df["macd_hist"] = _macd - _macd.ewm(span=9, adjust=False).mean()
 
         _df = _df.dropna()
 
-        # ── Señales direccionales ─────────────────────────────────────────────
-        _bull_align = (_df["ema5"] > _df["ema10"]) & (_df["ema10"] > _df["ema20"]) & \
-                      (_df["ema20"] > _df["ema50"])
-        _bear_align = (_df["ema5"] < _df["ema10"]) & (_df["ema10"] < _df["ema20"]) & \
-                      (_df["ema20"] < _df["ema50"])
+        # ── Filtros vectorizados ──────────────────────────────────────────────
+        _bull_align  = (_df["ema5"] > _df["ema10"]) & \
+                       (_df["ema10"] > _df["ema20"]) & \
+                       (_df["ema20"] > _df["ema50"])
+        _bear_align  = (_df["ema5"] < _df["ema10"]) & \
+                       (_df["ema10"] < _df["ema20"]) & \
+                       (_df["ema20"] < _df["ema50"])
 
-        _atr_ok   = _df["atr"] >= 0.0005   # ≥5 pips
-        _rsi_long  = (_df["rsi"] >= 45) & (_df["rsi"] <= 68)
-        _rsi_short = (_df["rsi"] >= 32) & (_df["rsi"] <= 55)
+        # ATR diario ≥ 40 pips  (escala daily: ~0.0040)
+        _atr_ok      = _df["atr"] >= 0.0040
 
-        # Sesión London/NY: horas 7-17 UTC
-        try:
-            _hours = _df.index.tz_localize(None).hour if _df.index.tz is None else \
-                     _df.index.tz_convert("UTC").hour
-        except Exception:
-            _hours = _df.index.hour
-        _session = (_hours >= 7) & (_hours <= 17)
+        _rsi_long    = (_df["rsi"] >= 45) & (_df["rsi"] <= 68)
+        _rsi_short   = (_df["rsi"] >= 32) & (_df["rsi"] <= 55)
 
-        # Consenso simple: contar condiciones técnicas que confirman
-        _macd_bull = _df["macd_hist"] > 0
-        _macd_bear = _df["macd_hist"] < 0
+        _macd_bull   = _df["macd_hist"] > 0
+        _macd_bear   = _df["macd_hist"] < 0
         _above_ema50 = c > _df["ema50"]
         _below_ema50 = c < _df["ema50"]
 
-        # Score ponderado (0-100)
+        # Score 0-90 (sin filtro sesión en daily; 6 condiciones × peso)
         _score_l = (
-            _bull_align.astype(int) * 25 +
-            _atr_ok.astype(int)    * 15 +
-            _rsi_long.astype(int)  * 20 +
-            _macd_bull.astype(int) * 20 +
-            _above_ema50.astype(int) * 10 +
-            _session.astype(int)   * 10
+            _bull_align.astype(int)  * 25 +
+            _atr_ok.astype(int)      * 15 +
+            _rsi_long.astype(int)    * 20 +
+            _macd_bull.astype(int)   * 20 +
+            _above_ema50.astype(int) * 10
         )
         _score_s = (
-            _bear_align.astype(int) * 25 +
-            _atr_ok.astype(int)    * 15 +
-            _rsi_short.astype(int) * 20 +
-            _macd_bear.astype(int) * 20 +
-            _below_ema50.astype(int) * 10 +
-            _session.astype(int)   * 10
+            _bear_align.astype(int)  * 25 +
+            _atr_ok.astype(int)      * 15 +
+            _rsi_short.astype(int)   * 20 +
+            _macd_bear.astype(int)   * 20 +
+            _below_ema50.astype(int) * 10
         )
 
-        # Consenso (aprox. número de estrategias, sobre 8)
-        _cons_l = (
-            _bull_align.astype(int) +
-            _rsi_long.astype(int)  +
-            _macd_bull.astype(int) +
-            _above_ema50.astype(int) +
-            _atr_ok.astype(int)    +
-            _session.astype(int)
-        )
-        _cons_s = (
-            _bear_align.astype(int) +
-            _rsi_short.astype(int) +
-            _macd_bear.astype(int) +
-            _below_ema50.astype(int) +
-            _atr_ok.astype(int)    +
-            _session.astype(int)
-        )
+        _cons_l = (_bull_align.astype(int) + _rsi_long.astype(int) +
+                   _macd_bull.astype(int)  + _above_ema50.astype(int) +
+                   _atr_ok.astype(int))
+        _cons_s = (_bear_align.astype(int) + _rsi_short.astype(int) +
+                   _macd_bear.astype(int)  + _below_ema50.astype(int) +
+                   _atr_ok.astype(int))
 
-        # Señal final: score ≥78 equivale a ≥5 de 6 condiciones (83%) → ≥5 consenso
-        _long_signal  = (_score_l >= 78) & (_cons_l >= 5) & _session
-        _short_signal = (_score_s >= 78) & (_cons_s >= 5) & _session
+        # Umbral equivalente: score ≥ 70 con daily (5 condiciones disponibles)
+        _long_signal  = (_score_l >= 70) & (_cons_l >= 4)
+        _short_signal = (_score_s >= 70) & (_cons_s >= 4)
 
         # ── Simulación de operaciones ─────────────────────────────────────────
         _trades = []
-        _cooldown_bars = 4          # 4h cooldown entre señales
-        _last_trade_bar = -_cooldown_bars
+        _cooldown_bars = 3      # 3 días entre señales
+        _exit_window   = 10     # max 10 días para cerrar
+        _last_bar      = -_cooldown_bars
 
         for _i in range(50, len(_df)):
-            if _i - _last_trade_bar < _cooldown_bars:
+            if _i - _last_bar < _cooldown_bars:
                 continue
 
             _row   = _df.iloc[_i]
             _entry = float(_row["Close"])
             _atr_v = float(_row["atr"])
-            _sl_d  = _atr_v * 1.5         # SL = 1.5 × ATR
-            _tp_d  = _atr_v * 2.5         # TP principal = 2.5 × ATR  (R:R ~1:1.67)
+            _sl_d  = _atr_v * 1.5
+            _tp_d  = _atr_v * 2.5
 
             if _long_signal.iloc[_i]:
                 _dir = "LONG"
@@ -6021,116 +6019,102 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
             else:
                 continue
 
-            # Buscar desenlace en las siguientes 48 velas (48h máx)
             _hit = False
-            for _j in range(_i + 1, min(_i + 49, len(_df))):
+            for _j in range(_i + 1, min(_i + _exit_window + 1, len(_df))):
                 _fh = float(_df["High"].iloc[_j])
                 _fl = float(_df["Low"].iloc[_j])
                 if _dir == "LONG":
                     if _fl <= _sl:
-                        _pips = -_sl_d / 0.0001
-                        _hit = True; break
+                        _pips = -_sl_d / 0.0001; _hit = True; break
                     if _fh >= _tp:
-                        _pips = _tp_d / 0.0001
-                        _hit = True; break
+                        _pips =  _tp_d / 0.0001; _hit = True; break
                 else:
                     if _fh >= _sl:
-                        _pips = -_sl_d / 0.0001
-                        _hit = True; break
+                        _pips = -_sl_d / 0.0001; _hit = True; break
                     if _fl <= _tp:
-                        _pips = _tp_d / 0.0001
-                        _hit = True; break
+                        _pips =  _tp_d / 0.0001; _hit = True; break
 
             if not _hit:
-                # Timeout: cerrar al precio de la vela 48
-                _close48 = float(_df["Close"].iloc[min(_i + 48, len(_df) - 1)])
-                _pips = ((_close48 - _entry) if _dir == "LONG" else (_entry - _close48)) / 0.0001
+                _close_x = float(_df["Close"].iloc[min(_i + _exit_window, len(_df) - 1)])
+                _pips = ((_close_x - _entry) if _dir == "LONG" else
+                         (_entry - _close_x)) / 0.0001
 
             _trades.append({
-                "date":      _df.index[_i],
-                "dir":       _dir,
-                "entry":     _entry,
-                "sl":        _sl,
-                "tp":        _tp,
-                "pips":      round(_pips, 1),
-                "win":       _pips > 0,
-                "score_l":   int(_score_l.iloc[_i]),
-                "score_s":   int(_score_s.iloc[_i]),
+                "date":  _df.index[_i],
+                "dir":   _dir,
+                "entry": _entry,
+                "sl":    round(_sl, 5),
+                "tp":    round(_tp, 5),
+                "pips":  round(_pips, 1),
+                "win":   _pips > 0,
             })
-            _last_trade_bar = _i
+            _last_bar = _i
 
         if not _trades:
-            return None, None, {}
+            return None, None, {}, "sin señales"
 
         _tdf = _pd.DataFrame(_trades)
         _tdf["equity"] = _tdf["pips"].cumsum()
 
-        # Estadísticas
-        _n        = len(_tdf)
-        _wins     = int(_tdf["win"].sum())
-        _wr       = _wins / _n * 100
-        _net      = float(_tdf["pips"].sum())
-        _avg_win  = float(_tdf.loc[_tdf["win"],  "pips"].mean()) if _wins > 0 else 0
-        _avg_loss = float(_tdf.loc[~_tdf["win"], "pips"].mean()) if (_n - _wins) > 0 else 0
-        _gross_p  = _tdf.loc[_tdf["win"],  "pips"].sum()
-        _gross_l  = abs(_tdf.loc[~_tdf["win"], "pips"].sum())
-        _pf       = (_gross_p / _gross_l) if _gross_l > 0 else 999.0
+        _n       = len(_tdf)
+        _wins    = int(_tdf["win"].sum())
+        _wr      = _wins / _n * 100
+        _net     = float(_tdf["pips"].sum())
+        _avg_w   = float(_tdf.loc[_tdf["win"],  "pips"].mean()) if _wins > 0 else 0
+        _avg_l   = float(_tdf.loc[~_tdf["win"], "pips"].mean()) if (_n - _wins) > 0 else 0
+        _gross_p = _tdf.loc[_tdf["win"],  "pips"].sum()
+        _gross_l = abs(_tdf.loc[~_tdf["win"], "pips"].sum())
+        _pf      = round((_gross_p / _gross_l) if _gross_l > 0 else 999.0, 2)
 
-        # Drawdown máximo
-        _peak  = _tdf["equity"].cummax()
-        _dd    = _tdf["equity"] - _peak
-        _max_dd = float(_dd.min())
+        _peak   = _tdf["equity"].cummax()
+        _max_dd = float((_tdf["equity"] - _peak).min())
 
-        # Señales por semana
-        _weeks = max(1, (_tdf["date"].iloc[-1] - _tdf["date"].iloc[0]).days / 7)
-        _per_wk = _n / _weeks
+        _days  = (_tdf["date"].iloc[-1] - _tdf["date"].iloc[0]).days
+        _weeks = max(1, _days / 7)
 
         _stats = {
             "total": _n, "wins": _wins, "winrate": round(_wr, 1),
-            "net_pips": round(_net, 1), "profit_factor": round(_pf, 2),
-            "avg_win": round(_avg_win, 1), "avg_loss": round(_avg_loss, 1),
-            "max_dd": round(_max_dd, 1), "per_week": round(_per_wk, 1),
+            "net_pips": round(_net, 1), "profit_factor": _pf,
+            "avg_win": round(_avg_w, 1), "avg_loss": round(_avg_l, 1),
+            "max_dd": round(_max_dd, 1), "per_week": round(_n / _weeks, 1),
             "years": round(_weeks / 52, 1),
         }
-        return _tdf, _df, _stats
+        return _tdf, _df, _stats, "ok"
 
-    with st.spinner("Cargando backtest 2020-2025 (puede tardar ~20 segundos la primera vez)..."):
-        _bt_trades, _bt_df_raw, _bt_stats = _run_premium_backtest_2020()
+    with st.spinner("Cargando backtest 2020-2025 (primera carga ~10 s)..."):
+        _bt_result = _run_premium_backtest_2020()
+
+    _bt_trades, _bt_df_raw, _bt_stats, _bt_err = _bt_result
 
     if _bt_trades is not None and _bt_stats:
         import plotly.graph_objects as _go_bt
 
-        # Métricas principales
         _bc1, _bc2, _bc3, _bc4, _bc5, _bc6 = st.columns(6)
-        _bc1.metric("Operaciones", _bt_stats["total"])
-        _bc2.metric("Win Rate",    f"{_bt_stats['winrate']}%",
+        _bc1.metric("Operaciones",   _bt_stats["total"])
+        _bc2.metric("Win Rate",      f"{_bt_stats['winrate']}%",
                     delta="bueno" if _bt_stats['winrate'] >= 55 else "mejorable")
-        _bc3.metric("Pips netos",  f"{_bt_stats['net_pips']:+.0f}")
+        _bc3.metric("Pips netos",    f"{_bt_stats['net_pips']:+.0f}")
         _bc4.metric("Profit Factor", f"{_bt_stats['profit_factor']:.2f}",
                     delta="solido" if _bt_stats['profit_factor'] >= 1.5 else "bajo")
-        _bc5.metric("Max Drawdown", f"{_bt_stats['max_dd']:.0f} pips")
-        _bc6.metric("Señales/sem",  f"{_bt_stats['per_week']:.1f}")
+        _bc5.metric("Max Drawdown",  f"{_bt_stats['max_dd']:.0f} pips")
+        _bc6.metric("Señales/sem",   f"{_bt_stats['per_week']:.1f}")
 
         _bca, _bcb = st.columns(2)
         _bca.metric("Avg ganancia", f"{_bt_stats['avg_win']:+.1f} pips")
         _bcb.metric("Avg pérdida",  f"{_bt_stats['avg_loss']:+.1f} pips")
 
         # Curva de equity
+        _clr_eq = "limegreen" if _bt_stats["net_pips"] > 0 else "tomato"
+        _fill_eq = "rgba(50,205,50,0.08)" if _bt_stats["net_pips"] > 0 else "rgba(255,99,71,0.08)"
         _fig_eq = _go_bt.Figure()
         _fig_eq.add_trace(_go_bt.Scatter(
-            x=_bt_trades["date"],
-            y=_bt_trades["equity"],
-            mode="lines",
-            name="Equity (pips acum.)",
-            line=dict(
-                color="limegreen" if _bt_stats["net_pips"] > 0 else "tomato",
-                width=2,
-            ),
-            fill="tozeroy",
-            fillcolor="rgba(50,205,50,0.08)" if _bt_stats["net_pips"] > 0 else "rgba(255,99,71,0.08)",
+            x=_bt_trades["date"], y=_bt_trades["equity"],
+            mode="lines", name="Equity (pips acum.)",
+            line=dict(color=_clr_eq, width=2),
+            fill="tozeroy", fillcolor=_fill_eq,
         ))
         _fig_eq.update_layout(
-            title="Curva de Equity — Filtro Premium 7 Capas (EUR/USD 1H, desde 2020)",
+            title="Curva de Equity — Filtro Premium (EUR/USD Diario, 2020-hoy)",
             xaxis_title="Fecha", yaxis_title="Pips acumulados",
             template="plotly_dark", height=380,
             margin=dict(l=40, r=20, t=50, b=40),
@@ -6140,11 +6124,13 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         # Distribución LONG vs SHORT
         _bt_long  = _bt_trades[_bt_trades["dir"] == "LONG"]
         _bt_short = _bt_trades[_bt_trades["dir"] == "SHORT"]
-        _fig_dir = _go_bt.Figure(data=[
-            _go_bt.Bar(name="LONG",  x=["Ganadas", "Perdidas"],
-                       y=[int(_bt_long["win"].sum()),  int((~_bt_long["win"]).sum())],
+        _fig_dir  = _go_bt.Figure(data=[
+            _go_bt.Bar(name="LONG",
+                       x=["Ganadas", "Perdidas"],
+                       y=[int(_bt_long["win"].sum()), int((~_bt_long["win"]).sum())],
                        marker_color=["limegreen", "tomato"]),
-            _go_bt.Bar(name="SHORT", x=["Ganadas", "Perdidas"],
+            _go_bt.Bar(name="SHORT",
+                       x=["Ganadas", "Perdidas"],
                        y=[int(_bt_short["win"].sum()), int((~_bt_short["win"]).sum())],
                        marker_color=["cyan", "orange"]),
         ])
@@ -6158,7 +6144,7 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         # Tabla últimas 20 operaciones
         with st.expander("📋 Últimas 20 operaciones del backtest", expanded=False):
             _bt_show = _bt_trades[["date", "dir", "entry", "pips", "win"]].tail(20).copy()
-            _bt_show["date"]  = _bt_show["date"].dt.strftime("%Y-%m-%d %H:%M")
+            _bt_show["date"]  = _bt_show["date"].dt.strftime("%Y-%m-%d")
             _bt_show["entry"] = _bt_show["entry"].map("{:.5f}".format)
             _bt_show["pips"]  = _bt_show["pips"].map("{:+.1f}".format)
             _bt_show["win"]   = _bt_show["win"].map({True: "✅", False: "❌"})
@@ -6166,13 +6152,17 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
             st.dataframe(_bt_show, use_container_width=True, hide_index=True)
 
         st.caption(
-            f"Backtest sobre {_bt_stats['years']} años · "
-            f"Solo datos históricos 1H con los mismos 7 filtros del panel superior · "
-            f"Sin slippage ni comisiones (forex interbancario EUR/USD ≈0 spread en horas activas) · "
-            f"Resultados pasados no garantizan resultados futuros."
+            f"Backtest sobre {_bt_stats['years']} años · velas diarias EUR/USD · "
+            f"mismos 7 filtros del panel (adaptados a escala diaria) · "
+            f"SL=1.5×ATR, TP=2.5×ATR, cierre max 10 días · "
+            f"Sin slippage ni comisiones · Resultados pasados no garantizan resultados futuros."
         )
     else:
-        st.warning("No se pudo cargar el backtest histórico. Comprueba la conexión a internet.")
+        st.warning(
+            f"No se pudo cargar el backtest histórico ({_bt_err}). "
+            "Railway puede bloquear descargas de Yahoo Finance en el primer arranque — "
+            "recarga la página en 30 segundos."
+        )
 
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
