@@ -546,6 +546,11 @@ def get_tv_data(symbol: str = "EURUSD", tf: str = "1h") -> dict:
             "buy":          a.summary.get("BUY", 0),
             "sell":         a.summary.get("SELL", 0),
             "neutral":      a.summary.get("NEUTRAL", 0),
+            # Volume-derived indicators from TradingView
+            "tv_volume":    ind.get("volume"),           # tick volume del bar actual
+            "tv_obv":       ind.get("OBV"),              # On Balance Volume
+            "tv_cmf":       ind.get("CMF"),              # Chaikin Money Flow (-1..1)
+            "tv_vwma":      ind.get("VWMA"),             # Volume-Weighted MA
             "source":       "TradingView",
         }
         _TV_CACHE[cache_key] = (datetime.now(), result)
@@ -1322,6 +1327,71 @@ def get_eurusd_data(tf="1h", extended=False):
         except Exception as e:
             logging.warning(f"yfinance ({'extended ' if extended else ''}{tf}): {e}")
     return pd.DataFrame()
+
+def _enrich_df_volume(df: pd.DataFrame, symbol: str = "EURUSD", tf: str = "1h") -> pd.DataFrame:
+    """
+    Enriquece df["Volume"] con las mejores fuentes disponibles en orden de prioridad:
+      1. OANDA tick volume real  (vía servicio remoto)
+      2. TradingView volume      (vía tradingview-ta)
+      3. Composite sintético     (ya gestionado en _ensure_volume de indicators.py)
+
+    Almacena el resultado en df["Volume_oanda"] para que _ensure_volume lo tome.
+    También añade df["tv_cmf"] y df["tv_obv"] si están disponibles.
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    # ── Fuente 1: OANDA tick count via servicio remoto ───────────────────────
+    try:
+        if _mt5_service_available():
+            _svc = os.getenv("MT5_SERVICE_URL", "").rstrip("/")
+            import requests as _req
+            _tf_q = tf.replace("m", "m")  # ya está en formato correcto
+            _r = _req.get(
+                f"{_svc}/candles/{symbol}",
+                params={"tf": tf, "count": min(len(df) + 10, 300)},
+                timeout=6,
+            )
+            if _r.status_code == 200:
+                _cdata = _r.json().get("candles", [])
+                if _cdata:
+                    import pandas as _pd_vol
+                    _cvol = _pd_vol.DataFrame(_cdata)
+                    _cvol["time"] = _pd_vol.to_datetime(_cvol["time"], utc=True) \
+                                              .dt.tz_localize(None)
+                    _cvol = _cvol.set_index("time")["volume"].rename("Volume_oanda")
+                    # Alinear por índice (ambos en UTC naive)
+                    _idx = df.index
+                    if _idx.tz is not None:
+                        _idx = _idx.tz_localize(None)
+                    _merged = _pd_vol.Series(_cvol, name="Volume_oanda").reindex(_idx)
+                    if _merged.sum() > 0:
+                        df["Volume_oanda"] = _merged.values
+    except Exception as _e:
+        logging.debug(f"OANDA volume enrich: {_e}")
+
+    # ── Fuente 2: TradingView volume (último bar) ────────────────────────────
+    try:
+        _tv = get_tv_data(symbol.replace("m", ""), tf)
+        _tv_vol = _tv.get("tv_volume")
+        if _tv_vol and _tv_vol > 0 and "Volume_oanda" not in df.columns:
+            # Solo el último valor disponible
+            _arr = [float(_tv_vol)] * len(df)
+            df["Volume_oanda"] = _arr          # imperfecto pero mejor que nada
+        # Añadir CMF y OBV como columnas auxiliares (último valor broadcast)
+        _cmf = _tv.get("tv_cmf")
+        _obv = _tv.get("tv_obv")
+        if _cmf is not None:
+            df["tv_cmf"] = float(_cmf)
+        if _obv is not None:
+            df["tv_obv"] = float(_obv)
+    except Exception as _e:
+        logging.debug(f"TV volume enrich: {_e}")
+
+    return df
+
 
 def get_multiple_timeframes():
     out = {}
@@ -3181,6 +3251,8 @@ if st.session_state.analysis_executed:
             tick     = get_mt5_tick(SYMBOL) if connected else None
             df_1h    = get_eurusd_data("1h")
             df_15    = get_eurusd_data("15m")
+            # Enriquecer volumen con OANDA tick data + TradingView
+            df_1h = _enrich_df_volume(df_1h, SYMBOL, "1h")
 
         # Análisis de volumen completo
         vol_spikes   = detect_volume_spikes(df_1h)

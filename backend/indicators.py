@@ -97,19 +97,60 @@ def interpret_cot_for_signal(cot):
 
 def _ensure_volume(df: pd.DataFrame) -> pd.Series:
     """
-    Devuelve la serie de volumen del df.
-    Si Volume no existe o es todo ceros/NaN (caso típico de EUR/USD en yfinance),
-    genera un volumen sintético proporcional al rango de vela (H-L en pips).
-    Este proxy captura actividad institucional real: velas grandes = más actividad.
-    """
-    if "Volume" in df.columns:
-        vol = df["Volume"].fillna(0)
-        if vol.sum() > 0:
-            return vol.astype(float)
+    Composite multi-fuente de volumen para forex.
 
-    # Volumen sintético: rango de vela en pips × 1000 (escala parecida a tick volume)
-    synthetic = ((df["High"] - df["Low"]) / 0.0001 * 1000).round().astype(float)
-    return synthetic.clip(lower=1)
+    Prioridad de fuentes:
+      1. Volume_oanda  — tick count real de OANDA (mejor para forex)
+      2. Volume        — columna real si sum > 0 (MT5 tick volume)
+      3. Composite sintético de 3 proxies técnicos ponderados:
+           a) Rango H-L en pips  (mide actividad bruta)
+           b) Body efficiency    (rango × conviction direccional)
+           c) ATR-normalizado    (rango relativo a volatilidad media)
+
+    Todos se normalizan [0,1] antes de combinar y se re-escalan al
+    rango del proxy de rango para mantener unidades comparables.
+    """
+    # ── Fuente 1: OANDA tick volume (la más precisa para forex) ──────────────
+    if "Volume_oanda" in df.columns:
+        v = df["Volume_oanda"].fillna(0).astype(float)
+        if v.sum() > 0:
+            return v
+
+    # ── Fuente 2: volumen real si existe y es no-cero ─────────────────────────
+    if "Volume" in df.columns:
+        v = df["Volume"].fillna(0).astype(float)
+        if v.sum() > 0:
+            return v
+
+    # ── Fuente 3: composite sintético 3 proxies ───────────────────────────────
+    rng  = (df["High"] - df["Low"]).clip(lower=1e-7)
+    body = (df["Close"] - df["Open"]).abs()
+
+    # a) Rango de vela en pips × 1000  (base proxy)
+    v_range = (rng / 0.0001 * 1000).clip(lower=1.0)
+
+    # b) Body efficiency: velas con más cuerpo relativo = más volumen real
+    body_ratio = (body / rng).clip(upper=1.0)
+    v_body = (v_range * (0.5 + body_ratio * 0.5)).clip(lower=1.0)
+
+    # c) ATR-normalizado: rango vs volatilidad media de 14 velas
+    atr14    = rng.rolling(14, min_periods=3).mean().clip(lower=1e-8)
+    atr_mult = (rng / atr14).clip(upper=3.0, lower=0.1)
+    v_atr    = (v_range * atr_mult).clip(lower=1.0)
+
+    # Normalizar cada proxy a [0,1] y combinar con pesos
+    def _norm(s: pd.Series) -> pd.Series:
+        mx = s.max()
+        return s / mx if mx > 0 else s
+
+    composite = (
+        _norm(v_range) * 0.40 +
+        _norm(v_body)  * 0.35 +
+        _norm(v_atr)   * 0.25
+    )
+    # Re-escalar al mismo orden de magnitud que el proxy de rango
+    scale = float(v_range.mean()) if v_range.mean() > 0 else 1.0
+    return (composite * scale).clip(lower=1.0).round()
 
 
 def detect_volume_spikes(df, threshold=2.0):

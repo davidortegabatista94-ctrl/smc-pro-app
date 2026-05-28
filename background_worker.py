@@ -463,6 +463,9 @@ def _quick_signal() -> tuple:
                   else "ranging"       if abs(spread) < 5
                   else "neutral")
 
+        # Enriquecer volumen con OANDA tick data (si disponible)
+        df = _enrich_volume_bg(df)
+
         return {
             "price": round(price, 5),
             "final_signal": final,
@@ -481,6 +484,36 @@ def _quick_signal() -> tuple:
     except Exception as exc:
         _log.debug("Quick signal error: %s", exc)
         return {}, None
+
+
+def _enrich_volume_bg(df):
+    """Intenta patchear df con OANDA tick volume (background worker)."""
+    try:
+        if not _MT5_SERVICE_URL:
+            return df
+        import requests as _req
+        import pandas as _pd
+        r = _req.get(
+            f"{_MT5_SERVICE_URL}/candles/EURUSD",
+            params={"tf": "1h", "count": len(df) + 10},
+            timeout=6,
+        )
+        if r.status_code != 200:
+            return df
+        candles = r.json().get("candles", [])
+        if not candles:
+            return df
+        cv = _pd.DataFrame(candles)
+        cv["time"] = _pd.to_datetime(cv["time"], utc=True).dt.tz_localize(None)
+        cv = cv.set_index("time")["volume"].rename("Volume_oanda")
+        idx = df.index.tz_localize(None) if df.index.tz is not None else df.index
+        merged = cv.reindex(idx)
+        if merged.sum() > 0:
+            df = df.copy()
+            df["Volume_oanda"] = merged.values
+    except Exception as _e:
+        _log.debug(f"BG volume enrich: {_e}")
+    return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────

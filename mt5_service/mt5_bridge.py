@@ -221,3 +221,41 @@ def get_current_price(symbol: str) -> Dict[str, Any]:
         "time":        p.get("time", ""),
         "tradeable":   p.get("tradeable", False),
     }
+
+
+_GRAN_MAP = {
+    "1m": "M1", "5m": "M5", "15m": "M15", "30m": "M30",
+    "1h": "H1", "4h": "H4", "1d": "D",
+}
+
+
+def get_oanda_candles(symbol: str, tf: str = "1h", count: int = 200) -> Dict[str, Any]:
+    """
+    Velas OANDA con tick volume real.
+    Devuelve {"candles": [{time, open, high, low, close, volume}, ...]}.
+    El campo 'volume' es el conteo de ticks (actualizaciones de precio) por vela —
+    el mejor proxy de actividad institucional disponible para forex.
+    """
+    oanda_sym = _to_oanda_symbol(symbol)
+    gran      = _GRAN_MAP.get(tf, "H1")
+    r = _get(f"/instruments/{oanda_sym}/candles?count={count}&granularity={gran}&price=M")
+    if not r.get("ok"):
+        return {"error": r.get("error"), "candles": []}
+    raw = r["data"].get("candles", [])
+    candles = []
+    for c in raw:
+        if not c.get("complete", True):
+            continue
+        mid = c.get("mid", {})
+        try:
+            candles.append({
+                "time":   c["time"][:19],           # "2024-01-15T13:00:00"
+                "open":   float(mid.get("o", 0)),
+                "high":   float(mid.get("h", 0)),
+                "low":    float(mid.get("l", 0)),
+                "close":  float(mid.get("c", 0)),
+                "volume": int(c.get("volume", 0)),  # real tick count
+            })
+        except (ValueError, KeyError):
+            continue
+    return {"candles": candles, "granularity": gran, "instrument": oanda_sym}
