@@ -2909,36 +2909,8 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
                 help="Servidor MT5 (opcional)"
             )
             
-            # Botón para conectar con credenciales
-            if st.button("🔗 Conectar MT5 con Credenciales"):
-                if st.session_state.mt5_login and st.session_state.mt5_password:
-                    with st.spinner("Conectando..."):
-                        if mt5_connect(
-                            login=st.session_state.mt5_login,
-                            password=st.session_state.mt5_password,
-                            server=st.session_state.mt5_server or None
-                        ):
-                            st.success(f"✅ Conectado a MT5 — cuenta de {current_user_name}")
-                            save_user_config({
-                                "MT5_LOGIN": st.session_state.mt5_login,
-                                "MT5_PASSWORD": st.session_state.mt5_password,
-                                "MT5_SERVER": st.session_state.mt5_server,
-                            })
-                            # Guardar credenciales MT5 en DB por usuario
-                            if _DB_OK:
-                                try:
-                                    _db.save_user_mt5(
-                                        current_user,
-                                        st.session_state.mt5_login,
-                                        st.session_state.mt5_password,
-                                        st.session_state.mt5_server,
-                                    )
-                                except Exception:
-                                    pass
-                        else:
-                            st.error(f"❌ Error de conexión: {get_mt5_error()}")
-                else:
-                    st.error("Completa Login y Password")
+            # Las credenciales MT5 se configuran via variables de entorno en Railway
+            st.caption("💡 Configura MT5_LOGIN y MT5_PASSWORD en variables de entorno de Railway")
             
             st.markdown("---")
             
@@ -3016,13 +2988,7 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
         position_state = load_position_state()
 
         if position_state["is_open"]:
-            st.warning(f"Posición {position_state['direction']} abierta")
-            if st.button("🔒 Cerrar Posición Manualmente", type="primary"):
-                if close_position("MANUAL"):
-                    st.success("✅ Posición cerrada manualmente")
-                    st.rerun()
-                else:
-                    st.error("❌ Error cerrando posición")
+            st.warning(f"📊 Posición {position_state['direction']} abierta — cierre automático por TP/SL")
 
     st.markdown("---")
     st.subheader("� Historial de Operaciones")
@@ -3108,9 +3074,6 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
                 for _m in _user_mems:
                     _ct = _m.get("content", "")
                     st.caption(f"• {_ct[:90]}{'…' if len(_ct)>90 else ''}")
-                if st.button("🗑️ Borrar memorias", key="_clear_mems"):
-                    _db.clear_ai_memories(current_user)
-                    st.rerun()
             else:
                 st.caption("Chatea con el Advisor para generar aprendizajes")
         except Exception:
@@ -4641,60 +4604,19 @@ if _any_conn:
     else:
         st.info("⏸️ **BOT INACTIVO** - Modo manual")
 
-    # Controles del bot
-    col_bot1, col_bot2, col_bot3 = st.columns([2, 1, 1])
-
-    with col_bot1:
+    # Estado del bot — solo lectura, corre automáticamente en el servidor
+    _bot_cols = st.columns([2, 1])
+    with _bot_cols[0]:
         if st.session_state.bot_enabled:
-            if st.button("⏸️ **DESACTIVAR BOT**", type="secondary"):
-                st.session_state.bot_enabled = False
-                st.session_state.bot_just_activated = False
-                if _DB_OK:
-                    try: _db.set_setting("bg_bot_enabled", "false")
-                    except Exception: pass
+            st.success("🤖 **Bot ACTIVO** — analizando señales automáticamente 24/7")
         else:
-            if st.button("🚀 **ACTIVAR BOT**", type="primary"):
-                st.session_state.bot_enabled = True
-                st.session_state.bot_just_activated = True
-                if _DB_OK:
-                    try: _db.set_setting("bg_bot_enabled", "true")
-                    except Exception: pass
-
-    with col_bot2:
-        st.session_state.bot_volume = st.number_input(
-            "Volumen", 0.01, 1.0, st.session_state.bot_volume, 0.01,
-            help="Lote estándar (0.01 = 1000 unidades)"
-        )
-
-    with col_bot3:
+            st.info("📊 **Modo señales** — acumulando datos y aprendiendo del mercado")
+    with _bot_cols[1]:
         positions_mt5 = get_mt5_positions()
         if positions_mt5:
-            st.warning(f"📊 {len(positions_mt5)} pos.")
-            if st.button("🔒 Cerrar Todo", type="secondary"):
-                success, msg = auto_close_positions()
-                if success:
-                    st.success(f"✅ {msg}")
-                else:
-                    st.error(f"❌ {msg}")
+            st.warning(f"📊 {len(positions_mt5)} posiciones abiertas · cierre automático por TP/SL")
         else:
-            st.info("🎯 Sin pos.")
-
-    # ── Bot 24/7 (background worker) ──────────────────────────────────────────
-    if _DB_OK and _svc_ok:
-        st.markdown("---")
-        _bg_bot_on = _db.get_setting("bg_bot_enabled") if _DB_OK else "false"
-        _bg_active = str(_bg_bot_on).lower() in ("1", "true", "yes")
-        if _bg_active:
-            st.success("🤖 **Bot 24/7 ACTIVO** — opera aunque nadie tenga la app abierta")
-            if st.button("⏹ Detener Bot 24/7", key="bg_bot_off"):
-                _db.set_setting("bg_bot_enabled", "false")
-                st.rerun()
-        else:
-            st.info("🌙 Bot 24/7 **inactivo** — solo opera cuando la app está abierta")
-            if st.button("🌐 Activar Bot 24/7 (background)", key="bg_bot_on", type="primary"):
-                _db.set_setting("bg_bot_enabled", "true")
-                _db.set_setting("bg_bot_last_direction", "")
-                st.rerun()
+            st.caption("🎯 Sin posiciones abiertas")
 
     # ── Panel de posiciones abiertas ──────────────────────────────────────────
     _live_pos = get_mt5_positions()
@@ -5470,18 +5392,7 @@ if _chat_prompt:
             except Exception:
                 pass
 
-if st.session_state.advisor_chat:
-    if st.button("🗑️ Limpiar conversación", key="_advisor_clear"):
-        if _DB_OK:
-            try:
-                _db.clear_chat_history(
-                    st.session_state.advisor_session_id, user_id=current_user
-                )
-            except Exception:
-                pass
-        st.session_state.advisor_chat = []
-        st.session_state[f"advisor_chat_{current_user}"] = []
-        st.rerun()
+    # Historial del Advisor — se muestra automáticamente, sin botón de limpiar
 
 st.markdown("---")
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
