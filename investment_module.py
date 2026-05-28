@@ -370,6 +370,509 @@ def _score_asset(ticker: str, meta: dict, data: dict) -> dict:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# PYMEs con potencial explosivo — universo curado de 20 small/mid caps
+# ─────────────────────────────────────────────────────────────────────────────
+
+PYME_UNIVERSE = {
+    "IONQ": {
+        "name":   "IonQ — Computación Cuántica",
+        "sector": "Tecnología / IA",
+        "risk":   5,
+        "thesis": (
+            "Líder en computación cuántica atrapada en iones. "
+            "Contratos con AWS, Azure, Google Cloud. La computación cuántica "
+            "podría romper el cifrado actual y acelerar la IA 100x. "
+            "Cuando llegue la ventaja cuántica ('quantum advantage'), IonQ "
+            "estará ahí."
+        ),
+        "catalysts": ["Contratos gobierno USA", "Quantum advantage milestone", "Acuerdos big cloud"],
+        "risks":     ["Tecnología inmadura", "Pérdidas operativas", "Competencia IBM/Google"],
+    },
+    "RKLB": {
+        "name":   "Rocket Lab — Nueva Era Espacial",
+        "sector": "Espacio / Defensa",
+        "risk":   4,
+        "thesis": (
+            "El único rival serio de SpaceX en pequeños satélites. "
+            "Lanzamientos Electron probados (50+), fabricación de satélites Photon, "
+            "y en desarrollo el cohete Neutron para cargas medianas. "
+            "Contratos NASA, DARPA y Defensa USA. La economía espacial llegará a "
+            "$1 billón para 2040."
+        ),
+        "catalysts": ["Primer vuelo Neutron", "Contratos DOD", "Acuerdos satélites comerciales"],
+        "risks":     ["Fallos de lanzamiento", "SpaceX dominancia", "Financiación Neutron"],
+    },
+    "ASTS": {
+        "name":   "AST SpaceMobile — 5G desde el Espacio",
+        "sector": "Telecom / Espacio",
+        "risk":   5,
+        "thesis": (
+            "Construye una red de banda ancha directamente desde satélites "
+            "a móviles normales, sin hardware especial. Acuerdos con AT&T, "
+            "Verizon, Vodafone, Rakuten. Si funciona, conecta al 90% del mundo "
+            "sin cobertura. Un monopolio espacial de telecomunicaciones."
+        ),
+        "catalysts": ["Comercialización servicio", "Nuevos operadores", "Despliegue constelación BlueBird"],
+        "risks":     ["Ejecución técnica compleja", "Interferencias satelitales", "Capital intensivo"],
+    },
+    "BBAI": {
+        "name":   "BigBear.ai — IA para Defensa",
+        "sector": "IA / Defensa",
+        "risk":   4,
+        "thesis": (
+            "Plataforma de IA para inteligencia militar, supply chain y "
+            "seguridad nacional. Contratos US Army, Air Force y agencias civiles. "
+            "El gasto global en IA de defensa crece al 14% anual. "
+            "Empresa pequeña en un mercado de cientos de miles de millones."
+        ),
+        "catalysts": ["Contratos militares grandes", "Expansión internacional", "M&A objetivo"],
+        "risks":     ["Dependencia presupuesto gobierno", "Competencia Palantir", "Márgenes bajos"],
+    },
+    "SOUN": {
+        "name":   "SoundHound AI — Voz IA",
+        "sector": "IA / Automoción",
+        "risk":   4,
+        "thesis": (
+            "IA de voz independiente del teléfono, integrada en vehículos "
+            "(Stellantis, Honda), restaurantes y bancos. NVIDIA tiene participación. "
+            "El mercado de asistentes de voz IA crece al 28% anual. "
+            "Primer mover en voz sin internet en coches."
+        ),
+        "catalysts": ["Expansión autos nuevos modelos", "Plataforma restaurantes escala", "Partnership NVIDIA"],
+        "risks":     ["Amazon/Apple/Google competencia", "Pérdidas operativas", "Concentración clientes"],
+    },
+    "RXRX": {
+        "name":   "Recursion Pharma — IA + Descubrimiento Fármacos",
+        "sector": "Biotech / IA",
+        "risk":   4,
+        "thesis": (
+            "Usa IA y biología celular a escala para descubrir fármacos 10x más "
+            "rápido y barato. Partnership con NVIDIA ($50M) para el 'sistema operativo "
+            "de biología'. Pipeline de 40+ candidatos. Si la IA transforma la "
+            "farmacéutica, Recursion está en el centro."
+        ),
+        "catalysts": ["Datos clínicos positivos", "Partnership big pharma", "Plataforma licencias"],
+        "risks":     ["Alta tasa de fracaso clínico", "Quema de caja", "Competencia IA bio"],
+    },
+    "BEAM": {
+        "name":   "Beam Therapeutics — Gene Editing",
+        "sector": "Biotech",
+        "risk":   5,
+        "thesis": (
+            "Edición genética de base ('base editing'): corrige letras del ADN "
+            "sin cortar la doble hélice. Más precisa que CRISPR tradicional. "
+            "Pipeline contra anemia falciforme, leucemia aguda, enfermedades cardiacas. "
+            "Potencial de cura permanente de enfermedades genéticas."
+        ),
+        "catalysts": ["Datos clínicos Fase 1/2", "Aprobación FDA primera indicación", "Partnerships pharma"],
+        "risks":     ["Fracaso clínico", "Años hasta revenue", "Caja limitada"],
+    },
+    "LUNR": {
+        "name":   "Intuitive Machines — Economía Lunar",
+        "sector": "Espacio / NASA",
+        "risk":   5,
+        "thesis": (
+            "Únicos que han aterrizado con éxito en la Luna en 50 años (2024). "
+            "Contratos exclusivos NASA Artemis para infraestructura lunar: "
+            "comunicaciones, navegación, transporte de carga. La economía lunar "
+            "empieza ahora y ellos llevan ventaja de 10 años."
+        ),
+        "catalysts": ["Misiones Luna 2025-26", "Contratos NASA Lunar Comms Network", "Misiones privadas"],
+        "risks":     ["Alta probabilidad de fallo misión", "Dependencia NASA", "Capital intensivo"],
+    },
+    "KTOS": {
+        "name":   "Kratos Defense — Drones & Hipersónica",
+        "sector": "Defensa",
+        "risk":   3,
+        "thesis": (
+            "Fabricante de drones militares de bajo coste, misiles y sistemas "
+            "hipersónicos. El conflicto en Ucrania demostró que los drones "
+            "cambian la guerra. Backlog récord. Contratos con USAF, Marina USA. "
+            "Crecimiento estable con upside de contratos grandes."
+        ),
+        "catalysts": ["Contratos Valkyrie drone", "Programa hipersónico", "Aumento presupuesto Defensa USA"],
+        "risks":     ["Ciclo presupuestario congreso", "Competencia Northrop/Lockheed", "Márgenes ajustados"],
+    },
+    "HIMS": {
+        "name":   "Hims & Hers — Telesalud + GLP-1",
+        "sector": "Salud / Telehealth",
+        "risk":   3,
+        "thesis": (
+            "Plataforma de salud online (telehealth + farmacia). Gran apuesta: "
+            "vende compuestos de semaglutida (Ozempic genérico) directamente. "
+            "El mercado de GLP-1 (obesidad/diabetes) puede superar $100B en 5 años. "
+            "Ya rentable. Crecimiento de revenue >60% anual."
+        ),
+        "catalysts": ["Escala GLP-1 compuestos", "Expansión Europa", "Nuevas categorías salud"],
+        "risks":     ["FDA regulación compuestos", "Ozempic disponibilidad mejora", "Competencia"],
+    },
+    "FLNC": {
+        "name":   "Fluence Energy — Almacenamiento Grid",
+        "sector": "Energía Limpia",
+        "risk":   3,
+        "thesis": (
+            "Líder en sistemas de almacenamiento de energía a escala industrial "
+            "(baterías para redes eléctricas). JV entre Siemens y AES. "
+            "La transición renovable es imposible sin almacenamiento. "
+            "Backlog $4B+. Contrato tras contrato de utilities y gobiernos."
+        ),
+        "catalysts": ["Contratos utilities escala", "Política IRA USA", "Expansión internacional"],
+        "risks":     ["Precios baterías", "Cadena suministro", "Márgenes presionados"],
+    },
+    "ARRY": {
+        "name":   "Array Technologies — Solar Tracker",
+        "sector": "Energía Solar",
+        "risk":   3,
+        "thesis": (
+            "Fabricante de sistemas de seguimiento solar (trackers): maximizan "
+            "la energía generada un 25% vs paneles fijos. Líder mundial en "
+            "este nicho crítico. El boom solar a escala utility requiere trackers. "
+            "Beneficia directamente del IRA americano y políticas solares globales."
+        ),
+        "catalysts": ["Expansión internacional", "Nuevos contratos utility-scale", "IRA créditos fiscales"],
+        "risks":     ["Aranceles paneles solares", "Dependencia USA", "Competencia precios"],
+    },
+    "JOBY": {
+        "name":   "Joby Aviation — Taxi Aéreo Eléctrico",
+        "sector": "Movilidad / eVTOL",
+        "risk":   5,
+        "thesis": (
+            "Desarrolla un taxi aéreo eléctrico silencioso (eVTOL). "
+            "Avanzado en certificación FAA (más cerca que ninguno). "
+            "Toyota ha invertido $894M. Acuerdo con Delta Air Lines. "
+            "Si el taxi aéreo se hace realidad, Joby lo lidera."
+        ),
+        "catalysts": ["Certificación FAA", "Primer servicio comercial", "Expansión ciudades"],
+        "risks":     ["Proceso certificación muy largo", "Caja pesada", "Aceptación pública"],
+    },
+    "TMDX": {
+        "name":   "TransMedics — Transporte Órganos",
+        "sector": "MedTech",
+        "risk":   3,
+        "thesis": (
+            "Sistema revolucionario que mantiene órganos vivos durante el "
+            "transporte (OCS), triplicando la distancia de trasplante viable. "
+            "Crecimiento de trasplantes +80% donde se usa. "
+            "Monopolio de facto en un nicho que literalmente salva vidas. "
+            "Ingresos creciendo >100% anual."
+        ),
+        "catalysts": ["Expansión corazón/pulmón", "Nuevos centros trasplante", "Internacional"],
+        "risks":     ["Reembolso aseguradoras", "Competencia", "Crecimiento dependiente adopción"],
+    },
+    "RXST": {
+        "name":   "RxSight — Lentes Inteligentes",
+        "sector": "MedTech / Oftalmología",
+        "risk":   3,
+        "thesis": (
+            "Única lente intraocular ajustable después de la cirugía de cataratas "
+            "(LDD: Light Delivery Device). Pacientes ven mejor que con cualquier "
+            "lente premium actual. Crecimiento de implantes >80% anual. "
+            "25M cirugías de cataratas al año en el mundo — mercado enorme y sin explotar."
+        ),
+        "catalysts": ["Expansión internacional", "Nuevos centros adopción", "Datos comparativos clínicos"],
+        "risks":     ["Precio premium barrera", "Reembolso seguro limitado", "Competencia Alcon/J&J"],
+    },
+    "ACMR": {
+        "name":   "ACM Research — Equipos Semiconductores",
+        "sector": "Semiconductores / Equipo",
+        "risk":   3,
+        "thesis": (
+            "Equipos de limpieza de obleas para fabricación de chips. "
+            "China invierte masivamente en semiconductor soberano — ACMR "
+            "es uno de sus proveedores clave. Backlog disparado. "
+            "El mundo necesita más fábricas de chips independientemente del ciclo."
+        ),
+        "catalysts": ["Inversión fab China", "CHIPS Act USA nuevas fábricas", "Nuevos clientes"],
+        "risks":     ["Restricciones exportación USA-China", "Ciclo semis", "Concentración geográfica"],
+    },
+    "SPIR": {
+        "name":   "Spire Global — Datos Satelitales",
+        "sector": "Espacio / Data",
+        "risk":   4,
+        "thesis": (
+            "Constelación de 100+ satélites recopilando datos meteorológicos, "
+            "marítimos y de aviación. Contratos con NOAA, ESA, navales y "
+            "aseguradoras. La data economy espacial apenas empieza. "
+            "El seguro marítimo solo ya es un mercado de $50B que necesita estos datos."
+        ),
+        "catalysts": ["Contratos gubernamentales", "Expansión datos marítimos", "Clima extremo demanda"],
+        "risks":     ["Quema de caja", "Competencia Planet/Maxar", "Precio dato presionado"],
+    },
+    "DAVE": {
+        "name":   "Dave Inc — Neobank para Todos",
+        "sector": "Fintech",
+        "risk":   3,
+        "thesis": (
+            "Banco digital para las personas rechazadas o ignoradas por la "
+            "banca tradicional (>100M en USA). Sin comisiones de overdraft. "
+            "Adelantos de nómina instantáneos. Ya RENTABLE. "
+            "Creciendo en un mercado que los grandes bancos no quieren tocar."
+        ),
+        "catalysts": ["Nuevos productos financieros", "Expansión B2B banking", "Adquisiciones"],
+        "risks":     ["Morosidad en recesión", "Competencia Chime/Cash App", "Regulación fintech"],
+    },
+    "ACHR": {
+        "name":   "Archer Aviation — Air Taxi",
+        "sector": "Movilidad / eVTOL",
+        "risk":   5,
+        "thesis": (
+            "eVTOL competidor de Joby. Acuerdo con United Airlines (200 aeronaves). "
+            "Stellantis fabrica los componentes (reducción coste). "
+            "Si el mercado de air taxi llega a $15B en 2030, "
+            "Archer tiene una posición fuerte con el backing industrial."
+        ),
+        "catalysts": ["Certificación FAA", "Primer vuelo comercial", "Pedidos United Airlines"],
+        "risks":     ["Certif. FAA incierta", "Caja pesada", "Joby lleva ventaja"],
+    },
+    "CWAN": {
+        "name":   "Clearwater Analytics — SaaS Financiero",
+        "sector": "Fintech / SaaS",
+        "risk":   2,
+        "thesis": (
+            "Plataforma SaaS de gestión y reporting de inversiones para "
+            "aseguradoras, fondos y bancos. Crecimiento ARR >20% anual. "
+            "Retención de clientes >98%. En un mercado regulado donde "
+            "cambiar de proveedor es casi imposible — moat defensivo fuerte."
+        ),
+        "catalysts": ["Expansión Europa/Asia", "Nuevos módulos producto", "Regulación IFRS aumenta demanda"],
+        "risks":     ["Valoración premium", "Bloomberg/SS&C competencia", "Ciclo presupuestario clientes"],
+    },
+}
+
+_RISK_STARS = {1: "⭐ Bajo", 2: "⭐⭐ Moderado", 3: "⭐⭐⭐ Medio-alto",
+               4: "⭐⭐⭐⭐ Alto", 5: "⭐⭐⭐⭐⭐ Muy alto"}
+_SECTOR_COLORS = {
+    "Tecnología / IA": "#805ad5", "IA / Defensa": "#3182ce",
+    "IA / Automoción": "#2b6cb0", "Espacio / Defensa": "#2d3748",
+    "Espacio / NASA": "#1a365d", "Espacio / Data": "#2c5282",
+    "Telecom / Espacio": "#2b6cb0", "Biotech / IA": "#276749",
+    "Biotech": "#276749", "Defensa": "#744210", "Salud / Telehealth": "#285e61",
+    "Energía Limpia": "#276749", "Energía Solar": "#975a16",
+    "Movilidad / eVTOL": "#44337a", "MedTech": "#285e61",
+    "MedTech / Oftalmología": "#285e61", "Semiconductores / Equipo": "#744210",
+    "Fintech": "#2c5282", "Fintech / SaaS": "#2c5282",
+}
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_pyme(ticker: str) -> dict:
+    """Descarga 2 años de precio + fundamentales para una PYME."""
+    try:
+        import yfinance as yf
+        t    = yf.Ticker(ticker)
+        hist = t.history(period="2y", auto_adjust=True)
+        if hist is None or hist.empty or len(hist) < 30:
+            return {}
+        info = {}
+        try:
+            info = t.info or {}
+        except Exception:
+            pass
+
+        c      = hist["Close"].dropna()
+        px     = float(c.iloc[-1])
+
+        def _ret(days):
+            idx  = max(0, len(c) - days)
+            past = float(c.iloc[idx])
+            return (px - past) / past * 100 if past > 0 else 0.0
+
+        ema200 = float(c.ewm(span=200, adjust=False).mean().iloc[-1])
+        ema50  = float(c.ewm(span=50,  adjust=False).mean().iloc[-1])
+
+        # RSI semanal
+        wc = c.resample("W").last().dropna()
+        _d = wc.diff()
+        _g = _d.clip(lower=0).rolling(14).mean()
+        _l = (-_d.clip(upper=0)).rolling(14).mean()
+        rsi_w = float(100 - 100 / (1 + _g.iloc[-1] / (_l.iloc[-1] + 1e-9))) if len(wc) >= 15 else 50.0
+
+        # Drawdown
+        roll_max = c.cummax()
+        dd_2y    = float(((c - roll_max) / roll_max * 100).min())
+
+        # Distancia desde mínimo/máximo 52 semanas
+        hi52 = float(c.tail(252).max())
+        lo52 = float(c.tail(252).min())
+        pct_from_hi  = (px - hi52) / hi52 * 100
+        pct_from_low = (px - lo52) / lo52 * 100
+
+        return {
+            "price":        round(px, 2),
+            "ret_1m":       round(_ret(21), 1),
+            "ret_3m":       round(_ret(63), 1),
+            "ret_6m":       round(_ret(126), 1),
+            "ret_1y":       round(_ret(252), 1),
+            "ema200":       round(ema200, 2),
+            "ema50":        round(ema50, 2),
+            "above_ema200": px > ema200,
+            "above_ema50":  px > ema50,
+            "rsi_w":        round(rsi_w, 1),
+            "max_dd_2y":    round(dd_2y, 1),
+            "hi52":         round(hi52, 2),
+            "lo52":         round(lo52, 2),
+            "pct_from_hi":  round(pct_from_hi, 1),
+            "pct_from_low": round(pct_from_low, 1),
+            "hist":         c,
+            # Fundamentales
+            "market_cap":   info.get("marketCap"),
+            "rev_growth":   info.get("revenueGrowth"),
+            "gross_margin": info.get("grossMargins"),
+            "pe_fwd":       info.get("forwardPE"),
+            "beta":         info.get("beta"),
+            "short_float":  info.get("shortPercentOfFloat"),
+            "analyst_target": info.get("targetMeanPrice"),
+            "analyst_count":  info.get("numberOfAnalystOpinions"),
+        }
+    except Exception as e:
+        _log.debug(f"fetch_pyme {ticker}: {e}")
+        return {}
+
+
+def _score_pyme(ticker: str, meta: dict, data: dict) -> dict:
+    """
+    Scoring adaptado a small caps / growth:
+    - Momentum (0-45): lo más importante, el mercado habla
+    - Calidad negocio (0-35): crecimiento revenue, margen bruto, cash
+    - Analyst conviction (0-20): consenso y upside analistas
+    """
+    if not data:
+        return {"total": 0, "momentum": 0, "quality": 0, "analyst": 0,
+                "flags": [], "warnings": [], "verdict": "Sin datos"}
+
+    flags = []; warnings = []; momentum = 0; quality = 0; analyst_sc = 0
+
+    r1m = data.get("ret_1m", 0); r3m = data.get("ret_3m", 0)
+    r6m = data.get("ret_6m", 0); r1y = data.get("ret_1y", 0)
+
+    # ── Momentum (0-45) ───────────────────────────────────────────────────────
+    if r1y > 50:
+        momentum += 15; flags.append(f"🚀 +{r1y:.0f}% en 1 año — momentum EXPLOSIVO")
+    elif r1y > 20:
+        momentum += 10; flags.append(f"📈 +{r1y:.0f}% en 1 año — tendencia fuerte")
+    elif r1y > 0:
+        momentum += 5
+    elif r1y < -40:
+        momentum -= 5; warnings.append(f"⚠️ -{abs(r1y):.0f}% en 1 año — debilidad severa")
+
+    if r6m > 25:
+        momentum += 12; flags.append(f"🔥 +{r6m:.0f}% en 6M — aceleración")
+    elif r6m > 10:
+        momentum += 8
+    elif r6m > 0:
+        momentum += 4
+    elif r6m < -20:
+        momentum -= 4
+
+    if r3m > 15:
+        momentum += 10; flags.append(f"✅ +{r3m:.0f}% en 3M — momentum corto fuerte")
+    elif r3m > 5:
+        momentum += 6
+    elif r3m > 0:
+        momentum += 3
+    elif r3m < -15:
+        momentum -= 3
+
+    if r1m > 5:
+        momentum += 6; flags.append(f"✅ +{r1m:.0f}% este mes")
+    elif r1m > 0:
+        momentum += 3
+    elif r1m < -10:
+        momentum -= 2
+
+    if data.get("above_ema200"):
+        momentum += 2; flags.append("✅ Sobre EMA200 — tendencia LP intacta")
+    else:
+        warnings.append("⚠️ Bajo EMA200 — tendencia LP rota")
+
+    pct_hi = data.get("pct_from_hi", 0)
+    if pct_hi > -15:
+        momentum += 3; flags.append(f"💪 A solo {abs(pct_hi):.0f}% del máximo 52 semanas")
+    elif pct_hi < -50:
+        warnings.append(f"⚠️ {abs(pct_hi):.0f}% lejos del máximo — muy castigada")
+
+    momentum = max(0, min(45, momentum))
+
+    # ── Calidad negocio (0-35) ────────────────────────────────────────────────
+    rv = data.get("rev_growth")
+    if rv is not None:
+        rv_pct = rv * 100
+        if rv_pct > 50:
+            quality += 15; flags.append(f"🚀 Crecimiento ingresos +{rv_pct:.0f}% — hipercrecimiento")
+        elif rv_pct > 25:
+            quality += 10; flags.append(f"📈 Crecimiento ingresos +{rv_pct:.0f}%")
+        elif rv_pct > 10:
+            quality += 6
+        elif rv_pct < 0:
+            quality -= 3; warnings.append(f"⚠️ Ingresos cayendo {rv_pct:.0f}%")
+
+    gm = data.get("gross_margin")
+    if gm is not None:
+        gm_pct = gm * 100
+        if gm_pct > 60:
+            quality += 10; flags.append(f"💎 Margen bruto {gm_pct:.0f}% — negocio de alta calidad")
+        elif gm_pct > 40:
+            quality += 6; flags.append(f"✅ Margen bruto {gm_pct:.0f}%")
+        elif gm_pct > 20:
+            quality += 3
+        elif gm_pct < 10:
+            warnings.append(f"⚠️ Margen bruto bajo {gm_pct:.0f}%")
+
+    beta = data.get("beta")
+    if beta is not None and beta > 0:
+        if beta > 2.5:
+            warnings.append(f"⚠️ Beta {beta:.1f} — muy alta volatilidad esperada")
+        elif 1.5 <= beta <= 2.5:
+            quality += 5; flags.append(f"📊 Beta {beta:.1f} — volatilidad alta pero controlable")
+
+    dd = data.get("max_dd_2y", 0)
+    if dd > -30:
+        quality += 5; flags.append(f"✅ Drawdown max 2Y: {dd:.0f}% — aguanta bien")
+    elif dd < -70:
+        warnings.append(f"⚠️ Drawdown 2Y: {dd:.0f}% — muy volátil")
+
+    quality = max(0, min(35, quality))
+
+    # ── Analistas (0-20) ──────────────────────────────────────────────────────
+    target  = data.get("analyst_target")
+    n_anal  = data.get("analyst_count", 0) or 0
+    px      = data.get("price", 1)
+    if target and px > 0 and n_anal >= 3:
+        upside = (target - px) / px * 100
+        if upside > 50:
+            analyst_sc += 20; flags.append(f"🎯 Upside analistas: +{upside:.0f}% (objetivo ${target:.2f})")
+        elif upside > 25:
+            analyst_sc += 14; flags.append(f"🎯 Upside analistas: +{upside:.0f}%")
+        elif upside > 10:
+            analyst_sc += 8
+        elif upside < -10:
+            warnings.append(f"⚠️ Analistas por debajo del precio actual")
+
+    analyst_sc = max(0, min(20, analyst_sc))
+
+    total   = momentum + quality + analyst_sc
+    total   = max(0, min(100, total))
+    risk    = meta.get("risk", 3)
+
+    if total >= 70 and risk <= 3:
+        verdict = "🟢 OPORTUNIDAD FUERTE"
+    elif total >= 70:
+        verdict = "🟡 OPORTUNIDAD (alto riesgo)"
+    elif total >= 50:
+        verdict = "🔵 SEGUIR DE CERCA"
+    elif total >= 35:
+        verdict = "🟠 ESPERAR MOMENTO"
+    else:
+        verdict = "🔴 NO AHORA"
+
+    return {
+        "total": total, "momentum": momentum, "quality": quality,
+        "analyst": analyst_sc, "flags": flags, "warnings": warnings,
+        "verdict": verdict,
+    }
+
+
 @st.cache_data(ttl=14400, show_spinner=False)
 def _get_macro_context() -> dict:
     """
@@ -572,9 +1075,10 @@ def render_investment_module():
     profile = RISK_PROFILES[profile_key]
 
     # ── Tabs ──────────────────────────────────────────────────────────────────
-    tab_port, tab_screen, tab_macro, tab_guide = st.tabs([
+    tab_port, tab_screen, tab_pymes, tab_macro, tab_guide = st.tabs([
         "🎯 Mi Cartera",
         "📊 Screener de Activos",
+        "💣 PYMEs Explosivas",
         "🌍 Entorno Macro",
         "📖 Guía de Inversión",
     ])
@@ -846,7 +1350,211 @@ def render_investment_module():
                 st.caption(a["verdict"])
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 3: ENTORNO MACRO
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 3: PYMEs EXPLOSIVAS
+    # ══════════════════════════════════════════════════════════════════════════
+    with tab_pymes:
+        st.markdown("### 💣 Las 20 PYMEs con Mayor Potencial Explosivo")
+        st.markdown(
+            "Small y mid-caps en sectores con catalizadores fuertes: IA, espacio, biotech, "
+            "defensa, movilidad y energía. **Alto riesgo — alto potencial.** "
+            "Nunca más del 5-10% de tu cartera en cada una."
+        )
+
+        _pyme_risk_filter = st.select_slider(
+            "Máximo nivel de riesgo a mostrar",
+            options=[1, 2, 3, 4, 5],
+            value=5,
+            format_func=lambda x: _RISK_STARS[x],
+        )
+
+        # Cargar datos PYMEs
+        with st.spinner("Analizando 20 PYMEs... (~20 segundos la primera vez)"):
+            _pyme_scored = []
+            for _tk, _pm in PYME_UNIVERSE.items():
+                _pd_data = _fetch_pyme(_tk)
+                _ps = _score_pyme(_tk, _pm, _pd_data)
+                _pyme_scored.append({
+                    "ticker":   _tk,
+                    "meta":     _pm,
+                    "data":     _pd_data,
+                    "score":    _ps["total"],
+                    "momentum": _ps["momentum"],
+                    "quality":  _ps["quality"],
+                    "analyst":  _ps["analyst"],
+                    "verdict":  _ps["verdict"],
+                    "flags":    _ps["flags"],
+                    "warnings": _ps["warnings"],
+                })
+            _pyme_scored.sort(key=lambda x: x["score"], reverse=True)
+
+        # Filtrar por riesgo
+        _pyme_filtered = [p for p in _pyme_scored if p["meta"].get("risk", 5) <= _pyme_risk_filter]
+
+        # ── Ranking visual ────────────────────────────────────────────────────
+        st.markdown(f"#### 🏆 Ranking ({len(_pyme_filtered)} empresas)")
+
+        _pcols = st.columns([2, 1, 1, 1, 1, 2])
+        for _h in ["Empresa", "Score", "Momento", "Calidad", "Riesgo", "Veredicto"]:
+            _pcols[["Empresa", "Score", "Momento", "Calidad", "Riesgo", "Veredicto"].index(_h)]\
+                .markdown(f"**{_h}**")
+
+        for _p in _pyme_filtered:
+            _c1, _c2, _c3, _c4, _c5, _c6 = st.columns([2, 1, 1, 1, 1, 2])
+            _d  = _p["data"]
+            _m  = _p["meta"]
+            _c1.markdown(f"**{_p['ticker']}** — {_m['name'].split('—')[0].strip()}")
+            _c2.markdown(f"**{_p['score']}/100**")
+            _c3.markdown(f"{_p['momentum']}/45")
+            _c4.markdown(f"{_p['quality']}/35")
+            _c5.markdown(_RISK_STARS.get(_m.get("risk", 3), "⭐⭐⭐"))
+            _c6.markdown(_p["verdict"])
+
+        st.markdown("---")
+
+        # ── Tarjetas detalladas por empresa ───────────────────────────────────
+        st.markdown("#### 🔍 Análisis detallado por empresa")
+
+        for _p in _pyme_filtered:
+            _d = _p["data"]
+            _m = _p["meta"]
+            _tk = _p["ticker"]
+            _sector_color = _SECTOR_COLORS.get(_m["sector"], "#2d3748")
+
+            with st.expander(
+                f"{_tk}  ·  {_m['name']}  ·  Score {_p['score']}/100  ·  {_p['verdict']}",
+                expanded=False,
+            ):
+                # Cabecera con sector y riesgo
+                st.markdown(
+                    f"<div style='background:{_sector_color};border-radius:8px;"
+                    f"padding:10px 16px;margin-bottom:12px'>"
+                    f"<b>{_m['sector']}</b> &nbsp;|&nbsp; "
+                    f"Riesgo: {_RISK_STARS.get(_m['risk'], '⭐⭐⭐')}"
+                    f"</div>",
+                    unsafe_allow_html=True,
+                )
+
+                # Métricas de precio
+                _pm1, _pm2, _pm3, _pm4, _pm5 = st.columns(5)
+                _pm1.metric("Precio", f"${_d.get('price', 0):.2f}")
+                _pm2.metric("1 Mes",  f"{_d.get('ret_1m', 0):+.1f}%",
+                            delta="▲" if _d.get("ret_1m", 0) > 0 else "▼")
+                _pm3.metric("3 Meses", f"{_d.get('ret_3m', 0):+.1f}%")
+                _pm4.metric("6 Meses", f"{_d.get('ret_6m', 0):+.1f}%")
+                _pm5.metric("1 Año",   f"{_d.get('ret_1y', 0):+.1f}%",
+                            delta="▲" if _d.get("ret_1y", 0) > 0 else "▼")
+
+                # Distancia máximo 52W
+                _hi52 = _d.get("hi52", 0)
+                _lo52 = _d.get("lo52", 0)
+                _px   = _d.get("price", 0)
+                if _hi52 and _lo52:
+                    _range = _hi52 - _lo52
+                    _pos   = (_px - _lo52) / _range if _range > 0 else 0.5
+                    st.markdown(
+                        f"**Rango 52 semanas:** ${_lo52:.2f} ← "
+                        f"actual ${_px:.2f} ({_pos*100:.0f}%) "
+                        f"→ máx ${_hi52:.2f}   "
+                        f"| {_d.get('pct_from_hi', 0):.1f}% desde el máximo"
+                    )
+
+                st.markdown("---")
+
+                # Tesis de inversión
+                st.markdown(f"**💡 Tesis de inversión:**")
+                st.info(_m["thesis"])
+
+                # Catalizadores y riesgos en 2 columnas
+                _cat_col, _risk_col = st.columns(2)
+                with _cat_col:
+                    st.markdown("**🚀 Catalizadores:**")
+                    for _cat in _m.get("catalysts", []):
+                        st.markdown(f"  ✅ {_cat}")
+                with _risk_col:
+                    st.markdown("**⚠️ Riesgos:**")
+                    for _rsk in _m.get("risks", []):
+                        st.markdown(f"  🔴 {_rsk}")
+
+                # Señales del scoring
+                if _p["flags"]:
+                    st.markdown("**📊 Señales positivas detectadas:**")
+                    for _f in _p["flags"][:6]:
+                        st.markdown(f"  {_f}")
+                if _p["warnings"]:
+                    st.markdown("**⚠️ Atención:**")
+                    for _w in _p["warnings"][:3]:
+                        st.markdown(f"  {_w}")
+
+                # Fundamentales si disponibles
+                _rev_g  = _d.get("rev_growth")
+                _gm     = _d.get("gross_margin")
+                _target = _d.get("analyst_target")
+                _n_a    = _d.get("analyst_count", 0) or 0
+                _mcap   = _d.get("market_cap")
+
+                _fund_items = []
+                if _mcap:
+                    _mc_b = _mcap / 1e9
+                    _fund_items.append(f"Market cap: ${_mc_b:.1f}B")
+                if _rev_g is not None:
+                    _fund_items.append(f"Crecimiento ingresos: {_rev_g*100:+.0f}%")
+                if _gm is not None:
+                    _fund_items.append(f"Margen bruto: {_gm*100:.0f}%")
+                if _target and _n_a >= 3 and _d.get("price", 0) > 0:
+                    _ups = (_target - _d["price"]) / _d["price"] * 100
+                    _fund_items.append(f"Objetivo analistas: ${_target:.2f} ({_ups:+.0f}%, {_n_a} analistas)")
+
+                if _fund_items:
+                    st.markdown("**📋 Datos fundamentales:**  " + "  ·  ".join(_fund_items))
+
+                # Mini gráfico precio
+                try:
+                    import plotly.graph_objects as _go_p
+                    _hist_p = _d.get("hist")
+                    if _hist_p is not None and len(_hist_p) > 30:
+                        _ema50_s = _hist_p.ewm(span=50, adjust=False).mean()
+                        _fig_p = _go_p.Figure()
+                        _fig_p.add_trace(_go_p.Scatter(
+                            x=_hist_p.index, y=_hist_p.values,
+                            mode="lines", name="Precio",
+                            line=dict(
+                                color="limegreen" if _d.get("ret_1y", 0) > 0 else "tomato",
+                                width=1.5,
+                            ),
+                        ))
+                        _fig_p.add_trace(_go_p.Scatter(
+                            x=_ema50_s.index, y=_ema50_s.values,
+                            mode="lines", name="EMA50",
+                            line=dict(color="orange", width=1, dash="dot"),
+                        ))
+                        _fig_p.update_layout(
+                            template="plotly_dark", height=220,
+                            margin=dict(l=20, r=10, t=10, b=20),
+                            showlegend=True, legend=dict(x=0, y=1),
+                        )
+                        st.plotly_chart(_fig_p, use_container_width=True)
+                except Exception:
+                    pass
+
+                # Nota de riesgo
+                if _m.get("risk", 3) >= 4:
+                    st.warning(
+                        "⚠️ **Inversión de ALTO RIESGO** — Solo para capital que puedes perder totalmente. "
+                        "Máximo 2-3% de tu cartera. No es renta fija, es apuesta con upside asimétrico."
+                    )
+
+        # Disclaimer final
+        st.markdown("---")
+        st.caption(
+            "💣 Las PYMEs explosivas son inversiones especulativas de alto riesgo. "
+            "Pueden multiplicar por 5-10x O perder el 90% de su valor. "
+            "Nunca inviertas más del 10% de tu cartera en este tipo de activos. "
+            "Este análisis es informativo, no asesoramiento financiero."
+        )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # TAB 4: ENTORNO MACRO
     # ══════════════════════════════════════════════════════════════════════════
     with tab_macro:
         st.markdown("### 🌍 Entorno Macroeconómico")
