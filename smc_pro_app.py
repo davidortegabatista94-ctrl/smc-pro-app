@@ -2476,6 +2476,74 @@ else:
     current_user      = st.session_state.current_user
     current_user_name = _USER_NAMES.get(current_user, current_user.capitalize())
 
+    # ── Selector de modo: Trading o Inversión a Largo Plazo ──────────────────
+    if st.session_state.get("app_mode") == "investment":
+        try:
+            import investment_module as _inv
+            _inv.render_investment_module()
+        except Exception as _inv_err:
+            st.error(f"Error en módulo de inversión: {_inv_err}")
+            if st.button("← Volver"):
+                st.session_state.app_mode = None
+                st.rerun()
+        st.stop()
+
+    if st.session_state.get("app_mode") is None:
+        st.markdown("""
+        <style>
+        .mode-container{display:flex;gap:24px;margin-top:32px}
+        .mode-card{background:#1a1f2e;border:1px solid #2d3748;border-radius:16px;
+                   padding:32px 24px;flex:1;text-align:center}
+        .mode-card h2{font-size:2rem;margin-bottom:8px}
+        .mode-card p{color:#a0aec0;margin-bottom:16px}
+        .mode-card ul{text-align:left;color:#cbd5e0;line-height:2rem;list-style:none;padding-left:8px}
+        </style>
+        """, unsafe_allow_html=True)
+
+        st.markdown(f"## ¡Bienvenido, {current_user_name}! ¿Qué quieres hacer hoy?")
+        st.markdown("")
+
+        _mc1, _mc2 = st.columns(2)
+        with _mc1:
+            st.markdown("""
+            <div class="mode-card">
+                <h2>⚡ Trading Activo</h2>
+                <p>Señales EUR/USD en tiempo real</p>
+                <ul>
+                    <li>🎯 Señales premium multi-filtro</li>
+                    <li>📊 Backtest de 17 estrategias</li>
+                    <li>🤖 Bot automático OANDA</li>
+                    <li>📱 Alertas Telegram</li>
+                    <li>🧠 Asesor IA</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("")
+            if st.button("⚡ Entrar a Trading", use_container_width=True, type="primary"):
+                st.session_state.app_mode = "trading"
+                st.rerun()
+
+        with _mc2:
+            st.markdown("""
+            <div class="mode-card">
+                <h2>📈 Inversión LP</h2>
+                <p>Cartera optimizada a 1-5 años</p>
+                <ul>
+                    <li>💎 35+ activos analizados</li>
+                    <li>📊 Scoring fundamental+técnico+macro</li>
+                    <li>🌍 ETFs, acciones, bonos, oro</li>
+                    <li>💼 Constructor de cartera</li>
+                    <li>📈 Proyección de crecimiento</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("")
+            if st.button("📈 Entrar a Inversión LP", use_container_width=True):
+                st.session_state.app_mode = "investment"
+                st.rerun()
+
+        st.stop()
+
     # ── Cargar credenciales MT5 del usuario desde DB (solo una vez) ──────────
     _mt5_load_key = f"mt5_loaded_{current_user}"
     if _mt5_load_key not in st.session_state and _DB_OK:
