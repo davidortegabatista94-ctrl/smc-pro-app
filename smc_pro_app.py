@@ -3302,8 +3302,6 @@ if st.session_state.analysis_executed:
             tick     = get_mt5_tick(SYMBOL) if connected else None
             df_1h    = get_eurusd_data("1h")
             df_15    = get_eurusd_data("15m")
-            # Enriquecer volumen con OANDA tick data + TradingView
-            df_1h = _enrich_df_volume(df_1h, SYMBOL, "1h")
 
         # Análisis de volumen completo
         vol_spikes   = detect_volume_spikes(df_1h)
@@ -6295,18 +6293,10 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
-# ── Auto-rerun visible cada 3 minutos — SOLO en modo trading ─────────────────
-# El fragmento persiste en Streamlit entre reruns; el guard de app_mode evita
-# que dispare st.rerun() cuando el usuario está en el módulo de inversión.
-st.session_state["_refresh_secs_live"] = 180
-
-@st.fragment(run_every="30s")
+# ── Auto-rerun cada 3 minutos — SOLO modo trading ────────────────────────────
+@st.fragment(run_every="3m")
 def _auto_refresh_fragment():
-    if st.session_state.get("app_mode") != "trading":
-        return   # inversión o selector: no tocar
-    _last = st.session_state.get("last_analysis_time")
-    _now  = time.time()
-    if not _last or (_now - _last) >= 171:   # 95% de 180s
+    if st.session_state.get("app_mode") == "trading":
         st.rerun()
 
 _auto_refresh_fragment()

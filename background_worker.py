@@ -466,9 +466,6 @@ def _quick_signal() -> tuple:
                   else "ranging"       if abs(spread) < 5
                   else "neutral")
 
-        # Enriquecer volumen con OANDA tick data (si disponible)
-        df = _enrich_volume_bg(df)
-
         return {
             "price": round(price, 5),
             "final_signal": final,
