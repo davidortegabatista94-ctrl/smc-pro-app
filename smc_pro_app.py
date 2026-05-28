@@ -596,8 +596,12 @@ def _mt5_service_available() -> bool:
     """True si hay conexión OANDA disponible (remota o directa)."""
     return bool(_MT5_SERVICE_URL) or (_oanda_bridge is not None)
 
+_mt5_health_cache: dict = {}   # {result, ts}
+_MT5_HEALTH_TTL = 60           # segundos entre peticiones reales
+
 def mt5_service_health() -> dict:
-    """Estado de la conexión OANDA (directa o via servicio remoto)."""
+    """Estado de la conexión OANDA — cacheado 60 s para no bloquear el refresh."""
+    global _mt5_health_cache
     if _oanda_bridge is not None:
         try:
             ok = _oanda_bridge.is_connected()
@@ -608,17 +612,26 @@ def mt5_service_health() -> dict:
             return {"status": "error", "error": str(e), "source": "oanda_direct"}
     if not _MT5_SERVICE_URL:
         return {"status": "no configurado"}
+    # Devolver caché si aún es válido
+    if _mt5_health_cache and (time.time() - _mt5_health_cache.get("ts", 0)) < _MT5_HEALTH_TTL:
+        return _mt5_health_cache.get("result", {"status": "no configurado"})
     reqs = get_requests()
     if not reqs:
         return {"status": "error", "error": "requests no disponible"}
     try:
-        r = reqs.get(f"{_MT5_SERVICE_URL}/health", timeout=5)
-        return r.json()
+        r = reqs.get(f"{_MT5_SERVICE_URL}/health", timeout=4)
+        result = r.json()
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        result = {"status": "error", "error": str(e)}
+    _mt5_health_cache = {"result": result, "ts": time.time()}
+    return result
+
+_mt5_account_cache: dict = {}   # {result, ts}
+_MT5_ACCOUNT_TTL = 120          # segundos
 
 def mt5_service_account() -> dict | None:
-    """Info de cuenta OANDA (directa o via servicio remoto)."""
+    """Info de cuenta OANDA — cacheada 120 s para no bloquear el refresh."""
+    global _mt5_account_cache
     if _oanda_bridge is not None:
         try:
             return _oanda_bridge.get_account_info()
@@ -626,16 +639,20 @@ def mt5_service_account() -> dict | None:
             return None
     if not _MT5_SERVICE_URL:
         return None
+    if _mt5_account_cache and (time.time() - _mt5_account_cache.get("ts", 0)) < _MT5_ACCOUNT_TTL:
+        return _mt5_account_cache.get("result")
     reqs = get_requests()
     if not reqs:
         return None
     try:
         r = reqs.get(f"{_MT5_SERVICE_URL}/account",
-                     headers=_mt5_service_headers(), timeout=5)
-        return r.json() if r.ok else None
+                     headers=_mt5_service_headers(), timeout=4)
+        result = r.json() if r.ok else None
     except Exception as e:
         logging.warning(f"mt5_service_account error: {e}")
-        return None
+        result = None
+    _mt5_account_cache = {"result": result, "ts": time.time()}
+    return result
 
 def mt5_service_positions() -> list:
     """Posiciones abiertas en OANDA (directa o via servicio remoto)."""
@@ -1330,49 +1347,15 @@ def get_eurusd_data(tf="1h", extended=False):
 
 def _enrich_df_volume(df: pd.DataFrame, symbol: str = "EURUSD", tf: str = "1h") -> pd.DataFrame:
     """
-    Enriquece df["Volume"] con las mejores fuentes disponibles en orden de prioridad:
-      1. OANDA tick volume real  (vía servicio remoto)
-      2. TradingView volume      (vía tradingview-ta)
-      3. Composite sintético     (ya gestionado en _ensure_volume de indicators.py)
-
-    Almacena el resultado en df["Volume_oanda"] para que _ensure_volume lo tome.
-    También añade df["tv_cmf"] y df["tv_obv"] si están disponibles.
+    Enriquece df["Volume"] con TradingView (CMF/OBV).
+    El composite sintético lo gestiona _ensure_volume en indicators.py como fallback.
     """
     if df is None or df.empty:
         return df
 
     df = df.copy()
 
-    # ── Fuente 1: OANDA tick count via servicio remoto ───────────────────────
-    try:
-        if _mt5_service_available():
-            _svc = os.getenv("MT5_SERVICE_URL", "").rstrip("/")
-            import requests as _req
-            _tf_q = tf.replace("m", "m")  # ya está en formato correcto
-            _r = _req.get(
-                f"{_svc}/candles/{symbol}",
-                params={"tf": tf, "count": min(len(df) + 10, 300)},
-                timeout=6,
-            )
-            if _r.status_code == 200:
-                _cdata = _r.json().get("candles", [])
-                if _cdata:
-                    import pandas as _pd_vol
-                    _cvol = _pd_vol.DataFrame(_cdata)
-                    _cvol["time"] = _pd_vol.to_datetime(_cvol["time"], utc=True) \
-                                              .dt.tz_localize(None)
-                    _cvol = _cvol.set_index("time")["volume"].rename("Volume_oanda")
-                    # Alinear por índice (ambos en UTC naive)
-                    _idx = df.index
-                    if _idx.tz is not None:
-                        _idx = _idx.tz_localize(None)
-                    _merged = _pd_vol.Series(_cvol, name="Volume_oanda").reindex(_idx)
-                    if _merged.sum() > 0:
-                        df["Volume_oanda"] = _merged.values
-    except Exception as _e:
-        logging.debug(f"OANDA volume enrich: {_e}")
-
-    # ── Fuente 2: TradingView volume (último bar) ────────────────────────────
+    # ── TradingView volume (último bar) ─────────────────────────────────────
     try:
         _tv = get_tv_data(symbol.replace("m", ""), tf)
         _tv_vol = _tv.get("tv_volume")
@@ -6312,13 +6295,15 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
-# ── Auto-rerun invisible cada 3 minutos ───────────────────────────────────────
-# run_every="30s" es suficiente resolución para un umbral de 171s (95% de 180s).
-# El fragmento corre en el servidor: funciona aunque la pestaña no esté activa.
+# ── Auto-rerun visible cada 3 minutos — SOLO en modo trading ─────────────────
+# El fragmento persiste en Streamlit entre reruns; el guard de app_mode evita
+# que dispare st.rerun() cuando el usuario está en el módulo de inversión.
 st.session_state["_refresh_secs_live"] = 180
 
 @st.fragment(run_every="30s")
 def _auto_refresh_fragment():
+    if st.session_state.get("app_mode") != "trading":
+        return   # inversión o selector: no tocar
     _last = st.session_state.get("last_analysis_time")
     _now  = time.time()
     if not _last or (_now - _last) >= 171:   # 95% de 180s

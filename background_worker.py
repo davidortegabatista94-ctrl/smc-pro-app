@@ -668,57 +668,127 @@ def _monitor_positions() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _check_strategy_alerts(df, price: float) -> None:
-    """Evalúa las 17 estrategias y envía Telegram cuando alguna da señal de entrada.
-    Cooldown de 4h por estrategia+dirección para evitar spam.
+    """Desactivado: las señales por estrategia individual generaban demasiado ruido.
+    La única alerta de entrada es la señal PREMIUM (_check_premium_entry),
+    que requiere score >= 82 y >= 5 confluencias simultáneas.
     """
-    if df is None or len(df) < 115:
-        return
+    pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers para enriquecer el mensaje premium
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _find_liquidity_target(df, direction: str) -> tuple:
+    """
+    Localiza el pool de liquidez más cercano en la dirección del trade.
+    Para LONG: próximo swing high (stops de shorts acumulados ahí).
+    Para SHORT: próximo swing low (stops de longs acumulados ahí).
+    Retorna (nivel_precio, pips_de_distancia, descripción_str).
+    """
     try:
-        from backend.strategies import _live_strategy_signal
-        from backend.knowledge_base import _STRATEGY_META
-        import db as _db
-    except Exception as e:
-        _log.debug("_check_strategy_alerts import error: %s", e)
-        return
+        h  = df["High"].values
+        lo = df["Low"].values
+        c  = df["Close"].values
+        px = float(c[-1])
+        n  = len(h)
+        pip = 0.0001
 
-    now = datetime.now(timezone.utc)
+        # Pivots de 3 barras en las últimas 80 velas
+        start = max(0, n - 80)
+        pivots = []
+        for i in range(start + 2, n - 1):
+            if direction == "LONG":
+                if h[i] > h[i - 1] and h[i] > h[i + 1] and h[i] > px:
+                    pivots.append(h[i])
+            else:
+                if lo[i] < lo[i - 1] and lo[i] < lo[i + 1] and lo[i] < px:
+                    pivots.append(lo[i])
 
-    for strat_key, meta in _STRATEGY_META.items():
-        try:
-            direction, reason = _live_strategy_signal(df, strat_key)
-            if direction not in ("LONG", "SHORT"):
-                continue
+        if not pivots:
+            return None, None, None
 
-            # Cooldown: 4h entre alertas de la misma estrategia+dirección
-            db_key = f"strat_tg_{strat_key}_{direction}"
-            last_alert = _db.get_setting(db_key)
-            if last_alert:
-                try:
-                    last_dt = datetime.fromisoformat(last_alert)
-                    if not last_dt.tzinfo:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
-                    if (now - last_dt).total_seconds() < _STRAT_ALERT_COOLDOWN:
-                        continue
-                except Exception:
-                    pass
+        if direction == "LONG":
+            target = min(p for p in pivots if p > px)
+            pips   = round((target - px) / pip, 0)
+            desc   = f"`{target:.5f}` (+{pips:.0f} pips)"
+        else:
+            target = max(p for p in pivots if p < px)
+            pips   = round((px - target) / pip, 0)
+            desc   = f"`{target:.5f}` (-{pips:.0f} pips)"
 
-            icon  = "🟢" if direction == "LONG" else "🔴"
-            label = meta.get("label", strat_key)
-            msg = (
-                f"🎯 *SEÑAL DE ENTRADA — SMC Pro*\n"
-                f"━━━━━━━━━━━━━━━━\n"
-                f"📊 Estrategia: *{label}*\n"
-                f"💱 EUR/USD: `{price:.5f}`\n"
-                f"{icon} Dirección: *{direction}*\n"
-                f"📝 {reason}\n"
-                f"🕐 UTC {now.strftime('%H:%M')}  |  Bot SMC Pro"
-            )
-            if _send_tg(msg):
-                _db.set_setting(db_key, now.isoformat())
-                _log.info("Alerta estrategia enviada: %s %s", strat_key, direction)
+        return target, pips, desc
+    except Exception:
+        return None, None, None
 
-        except Exception as e:
-            _log.debug("Strategy alert error [%s]: %s", strat_key, e)
+
+def _generate_why_narrative(confluences: list, direction: str, regime: str,
+                             rsi: float, atr_pips: float,
+                             rsi_4h: float, has_4h: bool) -> str:
+    """
+    Genera 2-3 frases en lenguaje natural explicando por qué esta operación
+    tiene sentido ahora mismo. Sintetiza las confluencias más relevantes.
+    """
+    bull = direction == "LONG"
+    dir_word = "alcista" if bull else "bajista"
+
+    # Estructura de tendencia
+    if any("totalmente alineadas" in cf for cf in confluences):
+        trend_line = f"La estructura técnica está perfectamente alineada {dir_word}"
+    elif any("mayoritariamente" in cf for cf in confluences):
+        trend_line = f"Las medias muestran un sesgo {dir_word} claro"
+    else:
+        trend_line = f"El precio se posiciona correctamente en terreno {dir_word}"
+
+    # RSI
+    if bull:
+        if 50 <= rsi <= 65:
+            rsi_line = f"con RSI {rsi:.0f} en zona de fuerza sin sobrecompra"
+        elif rsi < 50:
+            rsi_line = f"con RSI {rsi:.0f} en pullback limpio listo para rebotar"
+        else:
+            rsi_line = f"con RSI {rsi:.0f}"
+    else:
+        if 35 <= rsi <= 50:
+            rsi_line = f"con RSI {rsi:.0f} en zona de debilidad sin sobreventa"
+        elif rsi > 50:
+            rsi_line = f"con RSI {rsi:.0f} en rebote que se agota"
+        else:
+            rsi_line = f"con RSI {rsi:.0f}"
+
+    sentence1 = f"{trend_line}, {rsi_line}."
+
+    # Momentum + 4H
+    if any("acaba de cruzar" in cf for cf in confluences):
+        mom = "El MACD acaba de cruzar marcando un cambio fresco de momentum"
+    elif any("MACD positivo" in cf or "MACD negativo" in cf for cf in confluences):
+        mom = "El MACD confirma el momentum en la misma dirección"
+    else:
+        mom = "El momentum técnico global apoya la señal"
+
+    if has_4h and any("4H" in cf and "confirmada" in cf for cf in confluences):
+        sentence2 = f"{mom}; el marco de 4H también confirma la tendencia con RSI {rsi_4h:.0f}."
+    elif has_4h and any("4H" in cf for cf in confluences):
+        sentence2 = f"{mom} y el 4H está del mismo lado."
+    else:
+        sentence2 = f"{mom}."
+
+    # Institucionales
+    inst = []
+    if any("COT" in cf and "CONFIRMA" in cf for cf in confluences):
+        inst.append("los institucionales (COT) operan en el mismo sentido")
+    if any("institucional" in cf.lower() and "alta" in cf.lower() for cf in confluences):
+        inst.append("el volumen institucional está por encima de la media")
+    if any("London" in cf or "NY" in cf for cf in confluences):
+        inst.append("estamos en sesión de máxima liquidez")
+
+    sentence3 = (
+        f"Además, {' y '.join(inst)}, lo que refuerza la validez de la señal."
+        if inst else
+        f"El ATR actual de {atr_pips:.0f} pips confirma que hay volatilidad suficiente para el movimiento esperado."
+    )
+
+    return f"{sentence1} {sentence2} {sentence3}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1039,6 +1109,22 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
             risk_pct = "0.25%"
             risk_note = "REDUCIDO por noticia próxima"
 
+        # ── LIQUIDEZ OBJETIVO ─────────────────────────────────────────────
+        liq_lvl, liq_pips, liq_desc = _find_liquidity_target(df_1h, direction)
+
+        # ── NARRATIVA DEL POR QUÉ ─────────────────────────────────────────
+        why_text = _generate_why_narrative(
+            confluences, direction, signal.get("regime", ""),
+            rsi, atr_pips, rsi_4h if has_4h else 50.0, has_4h,
+        )
+
+        # ── EJEMPLOS DE RIESGO EN € ───────────────────────────────────────
+        _risk_float = float(risk_pct.replace("%", "")) / 100
+        _ex5k  = int(5000  * _risk_float)
+        _ex10k = int(10000 * _risk_float)
+        _ex20k = int(20000 * _risk_float)
+        risk_examples = f"€5K→€{_ex5k} | €10K→€{_ex10k} | €20K→€{_ex20k}"
+
         # ── CONSTRUIR MENSAJE TELEGRAM ────────────────────────────────────
         dir_emoji  = "🟢 LONG" if bull else "🔴 SHORT"
         qual_emoji = ("🏆 EXCEPCIONAL" if score >= 92
@@ -1047,11 +1133,26 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
         now_str    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         conf_block = "\n".join(f"  {cf}" for cf in confluences)
 
+        # Liquidez section
+        if liq_lvl is not None:
+            liq_section = (
+                f"🎯 *¿HACIA QUÉ LIQUIDEZ VA?*\n"
+                f"Próximo pool de liquidez en {liq_desc}\n"
+                f"  ↳ Stops {'de posiciones short' if bull else 'de posiciones long'} acumulados ahí son el imán del movimiento.\n\n"
+            )
+        else:
+            liq_section = ""
+
         msg = (
             f"🎯 *ENTRADA PREMIUM — SMC Pro*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"*{dir_emoji} EUR/USD*  |  {qual_emoji}\n"
-            f"Puntuación: *{score}/100*  ·  {len(confluences)} confluencias\n\n"
+            f"Puntuación: *{score}/100*  ·  {len(_positive_conf)} confluencias activas\n\n"
+
+            f"💡 *¿POR QUÉ ENTRAR AHORA?*\n"
+            f"{why_text}\n\n"
+
+            f"{liq_section}"
 
             f"💰 *NIVELES DE LA OPERACIÓN*\n"
             f"┌ Entrada:   `{px:.5f}`\n"
@@ -1061,9 +1162,9 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
             f"└ TP3:       `{tp3:.5f}`  (+{tp3_pips:.0f}p)  R:R 1:{rr3}\n\n"
 
             f"💼 *GESTIÓN DEL RIESGO*\n"
-            f"• Riesgo recomendado: *{risk_pct}* de cuenta\n"
-            f"  ↳ {risk_note}\n"
-            f"• Plan: cerrar 40% en TP1 → SL a BE → 40% en TP2 → dejar 20% a TP3\n"
+            f"• Riesgo recomendado: *{risk_pct}* de cuenta  ← {risk_note}\n"
+            f"  ↳ {risk_examples}\n"
+            f"• Plan: cerrar 40% en TP1 → SL a BE → 40% en TP2 → trail 20% a TP3\n"
             f"• SL basado en 1.5×ATR ({atr_pips:.1f} pips de volatilidad actual)\n\n"
 
             f"⚡ *CONFLUENCIAS DETECTADAS*\n"
@@ -1074,11 +1175,11 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
         )
 
         if has_4h:
-            msg += f"• RSI 4H: {rsi_4h:.0f}  |  EMA50-4H: {e50_4h:.5f}\n"
+            msg += f"• RSI 4H: {rsi_4h:.0f}  |  EMA50-4H: `{e50_4h:.5f}`\n"
 
         msg += (
             f"• COT institucional: {cot_bias.upper()}\n"
-            f"• Noticias próximas: {'PRECAUCIÓN' if news_risk != 'low' else 'sin riesgo'}\n"
+            f"• Noticias próximas: {'⚠️ PRECAUCIÓN' if news_risk != 'low' else '✅ sin riesgo'}\n"
             f"• Volumen relativo: {vol_ratio:.1f}x la media\n\n"
             f"⏰ {now_str}\n"
             f"_Confirma en el gráfico antes de entrar. Respeta siempre el SL._"
