@@ -94,11 +94,29 @@ def interpret_cot_for_signal(cot):
 # ============================================
 # VOLUMEN — ANÁLISIS COMPLETO
 # ============================================
+
+def _ensure_volume(df: pd.DataFrame) -> pd.Series:
+    """
+    Devuelve la serie de volumen del df.
+    Si Volume no existe o es todo ceros/NaN (caso típico de EUR/USD en yfinance),
+    genera un volumen sintético proporcional al rango de vela (H-L en pips).
+    Este proxy captura actividad institucional real: velas grandes = más actividad.
+    """
+    if "Volume" in df.columns:
+        vol = df["Volume"].fillna(0)
+        if vol.sum() > 0:
+            return vol.astype(float)
+
+    # Volumen sintético: rango de vela en pips × 1000 (escala parecida a tick volume)
+    synthetic = ((df["High"] - df["Low"]) / 0.0001 * 1000).round().astype(float)
+    return synthetic.clip(lower=1)
+
+
 def detect_volume_spikes(df, threshold=2.0):
-    """Detecta picos de volumen usando tick volume de MT5."""
-    if df.empty or "Volume" not in df.columns:
+    """Detecta picos de volumen. Usa volumen sintético si el real es cero (forex)."""
+    if df.empty or "Close" not in df.columns:
         return []
-    vol = df["Volume"].dropna()
+    vol = _ensure_volume(df)
     if len(vol) < 20:
         return []
     avg_vol = vol.rolling(20).mean().iloc[-1]
@@ -110,32 +128,36 @@ def detect_volume_spikes(df, threshold=2.0):
                 "tipo":    "SPIKE DE VOLUMEN",
                 "ratio":   round(ratio, 2),
                 "emoji":   "⚡",
-                "mensaje": f"Volumen {ratio:.1f}x sobre la media — posible movimiento institucional"
+                "mensaje": f"Actividad {ratio:.1f}x sobre la media — posible movimiento institucional"
             }]
     return []
 
+
 def detect_volume_trend(df):
     """Detecta si el volumen confirma la tendencia de precio."""
-    if df.empty or "Volume" not in df.columns or len(df) < 5:
+    if df.empty or "Close" not in df.columns or len(df) < 5:
         return "Sin datos"
+    vol = _ensure_volume(df)
     price_up  = float(df["Close"].iloc[-1]) > float(df["Close"].iloc[-5])
-    volume_up = float(df["Volume"].iloc[-1]) > float(df["Volume"].iloc[-5])
+    volume_up = float(vol.iloc[-1]) > float(vol.iloc[-5])
     if price_up and volume_up:
-        return "✅ Volumen confirma tendencia ALCISTA"
+        return "✅ Actividad confirma tendencia ALCISTA"
     elif not price_up and volume_up:
-        return "✅ Volumen confirma tendencia BAJISTA"
+        return "✅ Actividad confirma tendencia BAJISTA"
     elif price_up and not volume_up:
-        return "⚠️ Precio sube pero volumen cae — posible debilidad alcista"
+        return "⚠️ Precio sube pero actividad cae — posible debilidad alcista"
     else:
-        return "⚠️ Precio baja pero volumen cae — posible agotamiento bajista"
+        return "⚠️ Precio baja pero actividad cae — posible agotamiento bajista"
+
 
 def analyze_volume_profile(df, n_levels=10):
     """
-    Calcula un perfil de volumen simplificado.
-    Muestra en qué niveles de precio hay más volumen acumulado.
+    Perfil de volumen simplificado por niveles de precio.
+    Usa volumen sintético si el real es cero.
     """
-    if df.empty or "Volume" not in df.columns or len(df) < 10:
+    if df.empty or "Close" not in df.columns or len(df) < 10:
         return [], None
+    vol = _ensure_volume(df)
     price_min = float(df["Low"].min())
     price_max = float(df["High"].max())
     step = (price_max - price_min) / n_levels
@@ -146,9 +168,9 @@ def analyze_volume_profile(df, n_levels=10):
         low_lvl  = price_min + i * step
         high_lvl = low_lvl + step
         mask = (df["Low"] <= high_lvl) & (df["High"] >= low_lvl)
-        vol_at_level = float(df.loc[mask, "Volume"].sum())
+        vol_at_level = float(vol[mask].sum())
         levels.append({
-            "precio": round((low_lvl + high_lvl) / 2, 5),
+            "precio":  round((low_lvl + high_lvl) / 2, 5),
             "volumen": int(vol_at_level),
         })
     if not levels:
@@ -159,45 +181,49 @@ def analyze_volume_profile(df, n_levels=10):
     poc = max(levels, key=lambda x: x["volumen"]) if max_vol > 0 else levels[0]
     return sorted(levels, key=lambda x: x["precio"], reverse=True), poc
 
+
 def get_volume_delta(df):
     """
-    Estima el delta de volumen (diferencia entre volumen alcista y bajista).
-    Aproximación: velas alcistas = volumen comprador, bajistas = volumen vendedor.
+    Delta de volumen: diferencia entre presión compradora y vendedora.
+    Usa volumen sintético si el real es cero.
     """
-    if df.empty or "Volume" not in df.columns or len(df) < 5:
+    if df.empty or "Close" not in df.columns or len(df) < 5:
         return None
-    recent = df.tail(20)
-    bull_vol = recent.loc[recent["Close"] >= recent["Open"], "Volume"].sum()
-    bear_vol = recent.loc[recent["Close"] <  recent["Open"], "Volume"].sum()
+    vol    = _ensure_volume(df)
+    recent = df.tail(20).copy()
+    rvol   = vol.iloc[-20:]
+    bull_vol = rvol[recent["Close"] >= recent["Open"]].sum()
+    bear_vol = rvol[recent["Close"] <  recent["Open"]].sum()
     total    = bull_vol + bear_vol
     if total == 0:
         return None
-    delta = bull_vol - bear_vol
+    delta     = bull_vol - bear_vol
     delta_pct = delta / total * 100
     return {
         "bull_vol":  int(bull_vol),
         "bear_vol":  int(bear_vol),
         "delta":     int(delta),
         "delta_pct": round(delta_pct, 1),
-        "bias":      "COMPRADORES" if delta > 0 else "VENDEDORES"
+        "bias":      "COMPRADORES" if delta > 0 else "VENDEDORES",
     }
+
 
 def get_cvd(df):
     """
-    Calcula el CVD (Cumulative Volume Delta) de las últimas velas.
-    Muestra si hay presión acumulada de compra o venta.
+    CVD (Cumulative Volume Delta): presión acumulada de compra/venta.
+    Usa volumen sintético si el real es cero.
     """
-    if df.empty or "Volume" not in df.columns or len(df) < 5:
+    if df.empty or "Close" not in df.columns or len(df) < 5:
         return []
+    vol    = _ensure_volume(df)
     recent = df.tail(30).copy()
-    deltas = []
-    for _, row in recent.iterrows():
-        if row["Close"] >= row["Open"]:
-            deltas.append(float(row["Volume"]))
-        else:
-            deltas.append(-float(row["Volume"]))
-    cvd = pd.Series(deltas).cumsum().tolist()
-    return cvd
+    rvol   = vol.iloc[-30:].reset_index(drop=True)
+    rc     = recent["Close"].reset_index(drop=True)
+    ro     = recent["Open"].reset_index(drop=True)
+    deltas = [float(rvol.iloc[i]) if rc.iloc[i] >= ro.iloc[i]
+              else -float(rvol.iloc[i])
+              for i in range(len(recent))]
+    return pd.Series(deltas).cumsum().tolist()
 
 # ============================================
 # LIQUIDEZ
@@ -550,11 +576,12 @@ def detect_market_structure(df, lookback=60):
 
 
 def detect_volume_absorption(df, vol_window=20):
-    """Absorción institucional: alto volumen con poco movimiento de precio."""
-    if df.empty or "Volume" not in df.columns or len(df) < vol_window:
+    """Absorción institucional: alta actividad con poco movimiento de precio."""
+    if df.empty or "Close" not in df.columns or len(df) < vol_window:
         return None
-    avg_vol  = float(df["Volume"].tail(vol_window).mean())
-    last_vol = float(df["Volume"].iloc[-1])
+    vol      = _ensure_volume(df)
+    avg_vol  = float(vol.tail(vol_window).mean())
+    last_vol = float(vol.iloc[-1])
     body = abs(float(df["Close"].iloc[-1]) - float(df["Open"].iloc[-1]))
     rng  = float(df["High"].iloc[-1]) - float(df["Low"].iloc[-1])
     if avg_vol <= 0 or rng <= 0:
@@ -566,9 +593,9 @@ def detect_volume_absorption(df, vol_window=20):
         return {
             "tipo": f"ABSORCIÓN {side}", "vol_ratio": round(vol_ratio, 2),
             "body_ratio": round(body_ratio, 2),
-            "descripcion": f"Volumen {vol_ratio:.1f}x con mecha grande — institucional absorbiendo",
+            "descripcion": f"Actividad {vol_ratio:.1f}x con mecha grande — institucional absorbiendo",
             "sesgo": "LONG" if side == "COMPRADORA" else "SHORT",
-            "fuerza": "ALTA" if vol_ratio >= 2.5 else "MEDIA"
+            "fuerza": "ALTA" if vol_ratio >= 2.5 else "MEDIA",
         }
     return None
 

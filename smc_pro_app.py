@@ -1973,8 +1973,14 @@ def _render_trading_chart(
     close   = df_plot["Close"]
     high    = df_plot["High"]
     low     = df_plot["Low"]
-    vol     = df_plot["Volume"]
     idx     = df_plot.index
+
+    # Volumen real si existe y es no-cero; si no, sintético (rango × 1000)
+    _raw_vol = df_plot.get("Volume", pd.Series(0, index=idx)).fillna(0)
+    if _raw_vol.sum() == 0:
+        vol = ((high - low) / 0.0001 * 1000).round().clip(lower=1)
+    else:
+        vol = _raw_vol
 
     # ── Indicators ───────────────────────────────────────────────────────────
     ema21  = close.ewm(span=21,  adjust=False).mean()
