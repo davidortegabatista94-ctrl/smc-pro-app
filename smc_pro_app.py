@@ -5190,8 +5190,119 @@ with _t_mejora:
     # ── Trading Advisor AI ────────────────────────────────────────────────────────
 
 with _t_ia:
-    st.markdown('<div id="sec-advisor"></div>', unsafe_allow_html=True)
+    # ── Panel: Señal de Entrada Actual ────────────────────────────────────────
     st.markdown("---")
+    st.subheader("🎯 Señal de Entrada Actual")
+
+    _kb_strat_key  = signal.get("kb_best_strategy", "")
+    _kb_dir_now    = signal.get("kb_direction", "NO TRADE")
+    _kb_reason_now = signal.get("kb_reason", "")
+    _sig_price_now = signal.get("price")
+    _sig_dir_now   = signal.get("direction")
+    _dna_panel     = st.session_state.get("active_dna") or {}
+    _sc_panel      = st.session_state.get("strategy_comparison") or {}
+    _sc_res_map    = {r["strategy"]: r for r in (_sc_panel.get("results") or [])}
+    _strat_bt      = _sc_res_map.get(_kb_strat_key, {})
+    _meta_panel    = _STRATEGY_META.get(_kb_strat_key, {})
+
+    if not _sig_price_now:
+        st.info("📊 Presiona **ANALIZAR MERCADO** para ver la señal de entrada.")
+    else:
+        # ── Badge de estado ────────────────────────────────────────────────────
+        _edir = _kb_dir_now if _kb_dir_now in ("LONG", "SHORT") else _sig_dir_now
+        if _edir == "LONG":
+            _ec, _eb, _ei, _el = "#0f5132", "#3fb950", "📈", "ENTRADA — LONG"
+        elif _edir == "SHORT":
+            _ec, _eb, _ei, _el = "#450a0a", "#f85149", "📉", "ENTRADA — SHORT"
+        else:
+            _ec, _eb, _ei, _el = "#1a1a1a", "#e3b341", "⚪", "SIN ENTRADA — ESPERAR"
+        st.markdown(
+            f'<div style="background:{_ec};border:2px solid {_eb};border-radius:12px;'
+            f'padding:14px 22px;display:flex;align-items:center;gap:16px;margin-bottom:12px">'
+            f'<span style="font-size:32px">{_ei}</span>'
+            f'<span style="color:{_eb};font-weight:700;font-size:20px">{_el}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # ── Score bar ──────────────────────────────────────────────────────────
+        st.markdown(f"**Score de confluencia: {score}/100**")
+        st.progress(min(score, 100) / 100)
+
+        # ── Dos columnas: estrategia | niveles ────────────────────────────────
+        _pn_l, _pn_r = st.columns(2)
+
+        with _pn_l:
+            st.markdown("**📊 Estrategia Activa**")
+            if _kb_strat_key and _meta_panel:
+                st.markdown(f"🏆 **{_meta_panel.get('label', _kb_strat_key)}**")
+                st.caption(f"💡 {_meta_panel.get('why', '')[:120]}")
+                if _meta_panel.get("pros"):
+                    st.caption(f"✅ {_meta_panel['pros']}")
+                if _meta_panel.get("cons"):
+                    st.caption(f"⚠️ {_meta_panel['cons']}")
+                if _kb_reason_now:
+                    st.caption(f"📝 {_kb_reason_now[:120]}")
+            else:
+                st.caption("Estrategia seleccionada por KB tras el análisis.")
+
+            st.markdown("**📈 Backtest 1 año**")
+            if _strat_bt:
+                _bt_c1, _bt_c2 = st.columns(2)
+                _bt_c1.metric("Win Rate",    f"{_strat_bt.get('winrate', 0):.1f}%")
+                _bt_c2.metric("Pips netos",  f"{_strat_bt.get('net_pips', 0):+.1f}")
+                _bt_c1.metric("Max Drawdown",f"{_strat_bt.get('max_dd', 0):.1f}%")
+                _bt_c2.metric("P. Factor",   f"{_strat_bt.get('profit_factor', 0):.2f}")
+                _bt_c1.metric("Trades",      str(_strat_bt.get("total", "—")))
+                _bt_c2.metric("R:R Ratio",   f"1:{_strat_bt.get('rr_ratio', 0):.1f}")
+            else:
+                st.caption("Ejecuta el backtest (pestaña 📊) para ver estadísticas.")
+
+            st.markdown("**🧬 DNA Aprendido**")
+            _dn_wr = float(_dna_panel.get("_winrate") or _dna_panel.get("winrate") or 0)
+            _dn_np = float(_dna_panel.get("_net_pips") or _dna_panel.get("net_pips") or 0)
+            _dn_v  = _dna_panel.get("_version") or _dna_panel.get("version", "—")
+            _dc1, _dc2 = st.columns(2)
+            _dc1.metric("WR Aprendido", f"{_dn_wr:.1f}%")
+            _dc2.metric("Pips DNA",     f"{_dn_np:+.1f}")
+            st.caption(f"Versión DNA: v{_dn_v}")
+
+        with _pn_r:
+            st.markdown("**💰 Niveles de Entrada**")
+            _lc1, _lc2 = st.columns(2)
+            if _sig_price_now:
+                _lc1.metric("Precio actual", f"{_sig_price_now:.5f}")
+            if smart_sl:
+                _lc2.metric("Stop Loss", f"{smart_sl:.5f}",
+                            delta=f"{round(abs(_sig_price_now - smart_sl)/0.0001,1)} pips" if _sig_price_now else None,
+                            delta_color="inverse")
+            if tp1:
+                _lc1.metric("TP1", f"{tp1:.5f}")
+            if tp2:
+                _lc2.metric("TP2", f"{tp2:.5f}")
+            if tp3:
+                _lc1.metric("TP3", f"{tp3:.5f}")
+            if rr2:
+                _lc2.metric("R:R", f"1:{rr2:.1f}")
+
+            st.markdown("**📡 Contexto de Mercado**")
+            _ctx_c1, _ctx_c2 = st.columns(2)
+            _ctx_c1.metric("Sesión",  signal.get("session", "—"))
+            _ctx_c2.metric("Régimen", signal.get("regime",  "—").replace("_", " ").title())
+            _ctx_c1.metric("RSI 1H",  f"{signal.get('rsi', 0):.1f}" if signal.get("rsi") else "—")
+            _ctx_c2.metric("ATR 1H",  f"{signal.get('atr_1h_pips', 0):.1f} p" if signal.get("atr_1h_pips") else "—")
+
+            if _edir in ("LONG", "SHORT"):
+                _liq = signal.get("liquidity_warnings") or smart_warnings or []
+                if _liq:
+                    st.warning("⚠️ " + " · ".join(str(w) for w in _liq[:3]))
+                else:
+                    st.success("✅ Sin alertas de liquidez en los niveles actuales")
+
+    st.markdown("---")
+
+    # ── Trading Advisor AI ────────────────────────────────────────────────────
+    st.markdown('<div id="sec-advisor"></div>', unsafe_allow_html=True)
     st.subheader(f"🧠 Trading Advisor AI — Asesor Personal de {current_user_name}")
     st.caption(f"Hola {current_user_name}, cuéntame tu tesis. Analizo tu visión contra tus operaciones reales, los backtests históricos (2008–hoy), posicionamiento institucional, técnico y fundamental. Aprendo de cada conversación.")
 
