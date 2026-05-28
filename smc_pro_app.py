@@ -6294,9 +6294,8 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
 # ── Auto-rerun cada 3 minutos — SOLO modo trading ────────────────────────────
-@st.fragment(run_every="3m")
-def _auto_refresh_fragment():
-    if st.session_state.get("app_mode") == "trading":
-        st.rerun()
-
-_auto_refresh_fragment()
+try:
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=180_000, key="trading_autorefresh")
+except Exception:
+    pass
