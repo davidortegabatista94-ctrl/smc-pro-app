@@ -4228,11 +4228,12 @@ else:
 
 # Navegacion principal
 st.markdown("---")
-_t_bt, _t_bot, _t_mejora, _t_ia = st.tabs([
+_t_bt, _t_bot, _t_mejora, _t_ia, _t_prem = st.tabs([
     "📊 Backtest & Mercado",
     "🤖 Bot & Posiciones",
     "🔬 Auto-Mejora",
     "🧠 Asesor IA",
+    "🏹 Señales Premium",
 ])
 
 with _t_bt:
@@ -5565,6 +5566,311 @@ with _t_ia:
         # Historial del Advisor — se muestra automáticamente, sin botón de limpiar
 
     st.markdown("---")
+
+with _t_prem:
+    # ══════════════════════════════════════════════════════════════════════════
+    # SEÑALES PREMIUM — Solo movimientos direccionales fuertes
+    # Objetivo: ~10 operaciones de alta calidad por semana
+    # Filtros: score ≥78 · régimen tendencial · sesión activa · EMAs alineadas
+    #          consenso ≥5/8 estrategias clave · RSI en rango limpio · ATR ≥5p
+    # ══════════════════════════════════════════════════════════════════════════
+    import json as _json_prem
+    from datetime import timezone as _tz
+
+    st.markdown("---")
+    _prem_hdr_l, _prem_hdr_r = st.columns([3, 1])
+    _prem_hdr_l.subheader("🏹 Señales Premium — Movimientos Direccionales Fuertes")
+    _prem_hdr_r.caption("Objetivo: ~10 señales/semana")
+    st.caption(
+        "Filtro estricto de 7 capas: **score ≥78** · **régimen tendencial** · "
+        "**sesión London o NY** · **EMAs 5/10/20/50 todas alineadas** · "
+        "**≥5 de 8 estrategias en consenso** · **RSI en zona limpia** · **ATR ≥5 pips**. "
+        "Sin confirmaciones débiles — solo decisión clara del mercado."
+    )
+
+    _pr_price   = signal.get("price")
+    _pr_dir     = signal.get("direction")
+    _pr_score   = score
+    _pr_regime  = signal.get("regime", "")
+    _pr_sess    = signal.get("session", "")
+    _pr_rsi     = float(signal.get("rsi") or 50)
+    _pr_atr     = float(signal.get("atr_1h_pips") or 0)
+
+    if not _pr_price:
+        st.info("📊 Presiona **ANALIZAR MERCADO** para evaluar la señal premium.")
+    else:
+        # ── Evaluación de filtros (transparente) ──────────────────────────────
+        _pr_fails  = []
+        _pr_checks = []
+
+        def _pcheck(ok, label, detail=""):
+            if ok:
+                _pr_checks.append(f"✅ {label}" + (f" — {detail}" if detail else ""))
+            else:
+                _pr_fails.append(f"❌ {label}" + (f" — {detail}" if detail else ""))
+            return ok
+
+        # 1. Dirección
+        _pcheck(_pr_dir in ("LONG", "SHORT"),
+                "Dirección clara",
+                _pr_dir or signal.get("final_signal", "NEUTRAL"))
+
+        # 2. Score
+        _pcheck(_pr_score >= 78,
+                f"Score ≥78",
+                f"{_pr_score}/100")
+
+        # 3. Régimen tendencial (no lateral)
+        _regime_ok = _pr_regime in ("trending_up", "trending_down")
+        _pcheck(_regime_ok,
+                "Régimen tendencial",
+                _pr_regime.replace("_", " ") if _pr_regime else "desconocido")
+
+        # 4. Sesión activa
+        _pcheck(_pr_sess in ("London", "NY"),
+                "Sesión London o NY",
+                _pr_sess or "fuera de sesión")
+
+        # 5. ATR mínimo
+        _pcheck(_pr_atr >= 5,
+                "ATR ≥5 pips (volatilidad)",
+                f"{_pr_atr:.1f} pips")
+
+        # 6. RSI en zona limpia
+        if _pr_dir == "LONG":
+            _rsi_ok = 45 <= _pr_rsi <= 68
+            _rsi_detail = f"{_pr_rsi:.1f} (ideal 45-68 para LONG)"
+        elif _pr_dir == "SHORT":
+            _rsi_ok = 32 <= _pr_rsi <= 55
+            _rsi_detail = f"{_pr_rsi:.1f} (ideal 32-55 para SHORT)"
+        else:
+            _rsi_ok = False
+            _rsi_detail = f"{_pr_rsi:.1f}"
+        _pcheck(_rsi_ok, "RSI en zona limpia", _rsi_detail)
+
+        # 7. EMA ribbon alineada + consensus estrategias
+        _pr_df1h = get_eurusd_data("1h")
+        _pr_ribbon = get_ema_ribbon(_pr_df1h) if (_pr_df1h is not None and not _pr_df1h.empty) else {}
+        _ema_ok = (
+            (_pr_dir == "LONG"  and _pr_ribbon.get("bull_align")) or
+            (_pr_dir == "SHORT" and _pr_ribbon.get("bear_align"))
+        )
+        _pcheck(_ema_ok,
+                "EMAs 5/10/20/50 alineadas",
+                "bull_align" if _pr_ribbon.get("bull_align") else ("bear_align" if _pr_ribbon.get("bear_align") else "sin alineación"))
+
+        # 8. Consenso multi-estrategia (≥5 de 8 estrategias clave)
+        _KEY_STRATS = [
+            "ema_trend", "ema_ribbon", "triple_ema",
+            "macd_cross", "supertrend", "rsi_50_cross",
+            "momentum_break", "meta_composite",
+        ]
+        _agreeing  = []
+        _rejecting = []
+        if _pr_df1h is not None and not _pr_df1h.empty and len(_pr_df1h) >= 115 and _pr_dir:
+            from backend.strategies import _live_strategy_signal as _lss_pr
+            for _sk in _KEY_STRATS:
+                try:
+                    _sd, _sr = _lss_pr(_pr_df1h, _sk)
+                    if _sd == _pr_dir:
+                        _agreeing.append(_sk)
+                    elif _sd in ("LONG", "SHORT"):
+                        _rejecting.append(_sk)
+                except Exception:
+                    pass
+
+        _consensus_ok = len(_agreeing) >= 5
+        _pcheck(_consensus_ok,
+                f"Consenso ≥5/8 estrategias",
+                f"{len(_agreeing)}/8 confirman {_pr_dir or '?'}")
+
+        # ── Resultado final ───────────────────────────────────────────────────
+        _is_premium = len(_pr_fails) == 0
+
+        if _is_premium:
+            # ── SETUP PREMIUM DETECTADO ───────────────────────────────────────
+            _dir_col  = "#3fb950" if _pr_dir == "LONG" else "#f85149"
+            _dir_bg   = "#0a1f0d" if _pr_dir == "LONG" else "#1f0a0a"
+            _dir_icon = "📈" if _pr_dir == "LONG" else "📉"
+            st.markdown(
+                f'<div style="background:{_dir_bg};border:2px solid {_dir_col};'
+                f'border-radius:14px;padding:20px 26px;margin:10px 0">'
+                f'<div style="display:flex;align-items:center;gap:14px">'
+                f'<span style="font-size:40px">{_dir_icon}</span>'
+                f'<div><div style="color:{_dir_col};font-weight:800;font-size:24px">'
+                f'✅ SETUP PREMIUM — {_pr_dir}</div>'
+                f'<div style="color:#aaa;font-size:13px;margin-top:4px">'
+                f'{len(_agreeing)}/8 estrategias · Score {_pr_score}/100 · '
+                f'{_pr_sess} · {_pr_regime.replace("_"," ")}</div>'
+                f'</div></div></div>',
+                unsafe_allow_html=True,
+            )
+
+            # Métricas principales
+            _pm1, _pm2, _pm3, _pm4, _pm5 = st.columns(5)
+            _pm1.metric("Score",    f"{_pr_score}/100")
+            _pm2.metric("Consenso", f"{len(_agreeing)}/8")
+            _pm3.metric("RSI 1H",   f"{_pr_rsi:.1f}")
+            _pm4.metric("ATR",      f"{_pr_atr:.1f} pips")
+            _pm5.metric("Sesión",   _pr_sess)
+
+            # Niveles y estrategias
+            _ql, _qr = st.columns(2)
+            with _ql:
+                st.markdown("**💰 Niveles de Entrada**")
+                _lev_c1, _lev_c2 = st.columns(2)
+                _lev_c1.metric("Precio",     f"{_pr_price:.5f}")
+                if smart_sl:
+                    _lev_c2.metric("Stop Loss",
+                                   f"{smart_sl:.5f}",
+                                   delta=f"−{round(abs(_pr_price - smart_sl)/0.0001,1)} pips",
+                                   delta_color="inverse")
+                if tp1: _lev_c1.metric("TP1 (1R)", f"{tp1:.5f}")
+                if tp2: _lev_c2.metric("TP2 (2R)", f"{tp2:.5f}")
+                if tp3: _lev_c1.metric("TP3 (3R)", f"{tp3:.5f}")
+                if rr2: _lev_c2.metric("R:R",       f"1:{rr2:.1f}")
+
+                st.markdown("**📊 EMA Ribbon**")
+                for _lbl, _val in [
+                    ("EMA5",  _pr_ribbon.get("ema5")),
+                    ("EMA10", _pr_ribbon.get("ema10")),
+                    ("EMA20", _pr_ribbon.get("ema20")),
+                    ("EMA50", _pr_ribbon.get("ema50")),
+                ]:
+                    if _val:
+                        st.caption(f"{_lbl}: `{_val:.5f}`")
+
+            with _qr:
+                st.markdown("**✅ Estrategias confirmando**")
+                for _sk in _agreeing:
+                    _sm = _STRATEGY_META.get(_sk, {})
+                    st.success(f"✅ {_sm.get('label', _sk)}")
+                if _rejecting:
+                    st.markdown("**⚠️ Estrategias en contra**")
+                    for _sk in _rejecting:
+                        _sm = _STRATEGY_META.get(_sk, {})
+                        st.warning(f"⚠️ {_sm.get('label', _sk)}")
+
+            # Guardar señal premium en DB
+            try:
+                import db as _dbp
+                _hist_raw = _dbp.get_setting("premium_signals_hist") or "[]"
+                _hist_p   = _json_prem.loads(_hist_raw)
+                _new_sig  = {
+                    "ts":         __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    "direction":  _pr_dir,
+                    "price":      round(_pr_price, 5),
+                    "score":      _pr_score,
+                    "session":    _pr_sess,
+                    "regime":     _pr_regime,
+                    "consensus":  len(_agreeing),
+                    "strategies": [_STRATEGY_META.get(s, {}).get("label", s)[:25] for s in _agreeing],
+                    "rsi":        round(_pr_rsi, 1),
+                    "atr":        round(_pr_atr, 1),
+                    "sl":         round(smart_sl, 5) if smart_sl else None,
+                    "tp1":        round(tp1, 5) if tp1 else None,
+                    "tp2":        round(tp2, 5) if tp2 else None,
+                    "tp3":        round(tp3, 5) if tp3 else None,
+                }
+                # Evitar duplicados (misma dirección en últimos 30 min)
+                _last_ts = _hist_p[0].get("ts", "") if _hist_p else ""
+                _dup = (_hist_p and _hist_p[0].get("direction") == _pr_dir
+                        and _hist_p[0].get("price", 0) != 0
+                        and abs(_hist_p[0].get("price", 0) - _pr_price) < 0.0010)
+                if not _dup:
+                    _hist_p.insert(0, _new_sig)
+                    _hist_p = _hist_p[:100]
+                    _dbp.set_setting("premium_signals_hist", _json_prem.dumps(_hist_p))
+            except Exception:
+                pass
+
+        else:
+            # ── Sin setup premium ─────────────────────────────────────────────
+            st.markdown(
+                '<div style="background:#111;border:2px solid #e3b341;border-radius:12px;'
+                'padding:16px 22px;margin:10px 0">'
+                '<div style="color:#e3b341;font-weight:700;font-size:18px">'
+                '⏳ Sin Setup Premium — Mercado No Decisivo</div>'
+                '<div style="color:#777;font-size:12px;margin-top:4px">'
+                'Esperando confluencia excepcional de múltiples filtros...</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            _fc_l, _fc_r = st.columns(2)
+            with _fc_l:
+                st.markdown("**Filtros cumplidos**")
+                for _c in _pr_checks:
+                    st.success(_c)
+            with _fc_r:
+                st.markdown("**Filtros pendientes**")
+                for _f in _pr_fails:
+                    st.error(_f)
+
+    # ── Historial de señales premium ──────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📅 Historial — Señales Premium Detectadas")
+    try:
+        import db as _dbph
+        _hist_raw2 = _dbph.get_setting("premium_signals_hist") or "[]"
+        _hist2     = _json_prem.loads(_hist_raw2)
+        if _hist2:
+            import pandas as _pd_prem
+            _hdf = _pd_prem.DataFrame(_hist2)
+            _show_cols = [c for c in ["ts", "direction", "price", "score", "session",
+                                      "regime", "consensus", "rsi", "atr", "sl", "tp1"] if c in _hdf.columns]
+            _hdf_disp = _hdf[_show_cols].rename(columns={
+                "ts": "Fecha UTC", "direction": "Dir", "price": "Precio",
+                "score": "Score", "session": "Sesión", "regime": "Régimen",
+                "consensus": "Consenso", "rsi": "RSI", "atr": "ATR(pips)",
+                "sl": "SL", "tp1": "TP1",
+            })
+            _green = {"LONG": "background-color:#0a1f0d;color:#3fb950",
+                      "SHORT": "background-color:#1f0a0a;color:#f85149"}
+            st.dataframe(_hdf_disp, use_container_width=True, hide_index=True)
+            # Estadísticas rápidas
+            if len(_hist2) >= 3:
+                _total_h = len(_hist2)
+                _long_h  = sum(1 for h in _hist2 if h.get("direction") == "LONG")
+                _short_h = _total_h - _long_h
+                _avg_sc  = sum(h.get("score", 0) for h in _hist2) / _total_h
+                _avg_con = sum(h.get("consensus", 0) for h in _hist2) / _total_h
+                _hs1, _hs2, _hs3, _hs4 = st.columns(4)
+                _hs1.metric("Total señales", _total_h)
+                _hs2.metric("LONG / SHORT", f"{_long_h} / {_short_h}")
+                _hs3.metric("Score medio", f"{_avg_sc:.0f}/100")
+                _hs4.metric("Consenso medio", f"{_avg_con:.1f}/8")
+        else:
+            st.info(
+                "Sin señales premium registradas aún. "
+                "El sistema guarda automáticamente cada setup que cumple todos los filtros."
+            )
+    except Exception as _phe:
+        st.caption(f"Historial no disponible: {_phe}")
+
+    # Guía de interpretación
+    with st.expander("📖 Cómo interpretar las señales premium", expanded=False):
+        st.markdown("""
+**¿Qué es una señal premium?**
+Una señal que supera simultáneamente 7 filtros independientes, diseñados para capturar
+solo los movimientos direccionales más claros y con mayor probabilidad de éxito.
+
+**Los 7 filtros:**
+| Filtro | Umbral | Por qué |
+|--------|--------|---------|
+| Score confluencia | ≥ 78/100 | Mínimo de señales técnicas alineadas |
+| Régimen mercado | Trending (no ranging) | En laterales las señales fallan |
+| Sesión activa | London o NY | Máxima liquidez institucional |
+| ATR mínimo | ≥ 5 pips | Volatilidad suficiente para el movimiento |
+| RSI limpio | 45-68 LONG / 32-55 SHORT | Sin sobrecompra/venta en la dirección |
+| EMAs alineadas | 5/10/20/50 en cascada | Tendencia estructural confirmada |
+| Consenso | ≥ 5/8 estrategias | El mercado lo ve desde múltiples ángulos |
+
+**Gestión de la operación:**
+- Entrada en el precio marcado (a mercado o límite ±2 pips)
+- SL obligatorio en el nivel indicado
+- TP1 para asegurar parcial (50%), dejar correr a TP2/TP3 con SL en BE
+- **Nunca mover el SL contra la posición**
+        """)
 
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
