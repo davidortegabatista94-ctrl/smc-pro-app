@@ -174,10 +174,13 @@ def _cycle() -> None:
     # 5 — Bot autónomo (ejecuta orden si está activado en DB y score ≥ umbral)
     _bot_trade_if_due(signal, score)
 
-    # 6 — Alertas Telegram por estrategia
+    # 6 — Monitor posiciones: TP/SL/BE
+    _monitor_positions()
+
+    # 7 — Alertas Telegram por estrategia
     _check_strategy_alerts(df_1h, price)
 
-    # 7 — Telegram horario / urgente
+    # 8 — Telegram horario / urgente
     _telegram_if_due(signal, score)
 
 
@@ -478,6 +481,150 @@ def _quick_signal() -> tuple:
     except Exception as exc:
         _log.debug("Quick signal error: %s", exc)
         return {}, None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Monitor de posiciones — TP / SL / Break Even
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _monitor_positions() -> None:
+    """Revisa posiciones abiertas cada ciclo y avisa por Telegram de:
+      - TP o SL alcanzado (posición desaparecida)
+      - Momento de mover SL a Break Even (precio = entrada + 1× riesgo)
+      - Cercanía al TP (a 3 pips o menos)
+    """
+    if not _MT5_SERVICE_URL:
+        return
+
+    try:
+        import db as _db
+        import json
+    except Exception:
+        return
+
+    positions = _service_get("/positions")
+    if not isinstance(positions, list):
+        return
+
+    now     = datetime.now(timezone.utc)
+    pip     = 0.0001
+    current: dict = {}
+
+    for pos in positions:
+        ticket    = str(pos.get("ticket", ""))
+        symbol    = pos.get("symbol", _SYMBOL)
+        direction = pos.get("type", "BUY")
+        entry     = float(pos.get("open_price", 0) or 0)
+        sl        = float(pos.get("sl",         0) or 0)
+        tp        = float(pos.get("tp",         0) or 0)
+        profit    = float(pos.get("profit",     0) or 0)
+
+        if not ticket or not entry:
+            continue
+
+        current[ticket] = {
+            "symbol": symbol, "direction": direction,
+            "entry": entry, "sl": sl, "tp": tp, "profit": profit,
+        }
+
+        # Precio en tiempo real
+        tick  = _service_get(f"/tick/{symbol}")
+        price = 0.0
+        if tick:
+            price = float(tick.get("ask" if direction == "BUY" else "bid", 0) or 0)
+        if not price:
+            continue
+
+        # ── Break Even ──────────────────────────────────────────────────────
+        if sl and entry:
+            be_key = f"pos_be_{ticket}"
+            if _db.get_setting(be_key) != "1":
+                risk = abs(entry - sl)
+                sl_already_at_be = (
+                    (direction == "BUY"  and sl >= entry - pip) or
+                    (direction == "SELL" and sl <= entry + pip)
+                )
+                be_trigger = (entry + risk) if direction == "BUY" else (entry - risk)
+                triggered  = (
+                    (direction == "BUY"  and price >= be_trigger) or
+                    (direction == "SELL" and price <= be_trigger)
+                )
+                if triggered and not sl_already_at_be:
+                    icon = "📈" if direction == "BUY" else "📉"
+                    _send_tg(
+                        f"⚡ *MUEVE SL A BREAK EVEN*\n"
+                        f"━━━━━━━━━━━━━━━━\n"
+                        f"💱 {symbol}: `{price:.5f}`\n"
+                        f"{icon} {direction} | Entrada: `{entry:.5f}`\n"
+                        f"✅ Pon SL en: `{entry:.5f}` (sin riesgo)\n"
+                        f"SL actual: `{sl:.5f}` · Riesgo: {round(risk/pip,1)} pips\n"
+                        f"💰 P&L: {profit:+.2f}\n"
+                        f"🕐 UTC {now.strftime('%H:%M')}"
+                    )
+                    _db.set_setting(be_key, "1")
+
+        # ── Cerca del TP (≤ 3 pips) ─────────────────────────────────────────
+        if tp:
+            near_key = f"pos_near_tp_{ticket}"
+            if _db.get_setting(near_key) != "1":
+                near = (
+                    (direction == "BUY"  and price >= tp - 3 * pip) or
+                    (direction == "SELL" and price <= tp + 3 * pip)
+                )
+                if near:
+                    _send_tg(
+                        f"🎯 *CERCA DEL TP — {symbol}*\n"
+                        f"━━━━━━━━━━━━━━━━\n"
+                        f"💱 Precio: `{price:.5f}` → TP: `{tp:.5f}`\n"
+                        f"{'📈' if direction=='BUY' else '📉'} {direction} | "
+                        f"Entrada: `{entry:.5f}`\n"
+                        f"💰 P&L: {profit:+.2f}\n"
+                        f"🕐 UTC {now.strftime('%H:%M')}"
+                    )
+                    _db.set_setting(near_key, "1")
+
+    # ── Detectar posiciones cerradas (TP o SL ejecutado) ────────────────────
+    prev: dict = {}
+    try:
+        raw = _db.get_setting("bg_tracked_positions") or "{}"
+        prev = json.loads(raw)
+    except Exception:
+        pass
+
+    for ticket, p in prev.items():
+        if ticket in current:
+            continue  # sigue abierta
+
+        sym    = p.get("symbol", _SYMBOL)
+        d      = p.get("direction", "BUY")
+        entry  = float(p.get("entry", 0))
+        sl_p   = float(p.get("sl",    0))
+        tp_p   = float(p.get("tp",    0))
+        profit = float(p.get("profit", 0))
+
+        hit_tp = profit >= 0
+        emoji  = "🎯" if hit_tp else "🛑"
+        result = "TP ALCANZADO ✅" if hit_tp else "SL ALCANZADO ❌"
+        _send_tg(
+            f"{emoji} *{result}*\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"💱 {sym} | Ticket #{ticket}\n"
+            f"{'📈' if d=='BUY' else '📉'} {d} | Entrada: `{entry:.5f}`\n"
+            f"SL: `{sl_p:.5f}` · TP: `{tp_p:.5f}`\n"
+            f"💰 Resultado: {profit:+.2f}\n"
+            f"🕐 UTC {now.strftime('%H:%M')}"
+        )
+        for suffix in ("be", "near_tp"):
+            try:
+                _db.set_setting(f"pos_{suffix}_{ticket}", "")
+            except Exception:
+                pass
+
+    # Guardar estado actual
+    try:
+        _db.set_setting("bg_tracked_positions", json.dumps(current))
+    except Exception:
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
