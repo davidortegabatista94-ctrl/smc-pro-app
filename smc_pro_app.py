@@ -2527,12 +2527,19 @@ else:
 
         st.stop()
 
-    # ── Auto-refresh cada 3 minutos (se registra AQUÍ, antes de cualquier error) ──
-    try:
-        from streamlit_autorefresh import st_autorefresh as _sar
-        _sar(interval=180_000, key="trading_autorefresh")
-    except Exception:
-        pass
+    # ── Auto-refresh cada 3 minutos — 100% nativo Streamlit, sin paquetes ──────
+    @st.fragment(run_every=30)
+    def _trading_autorefresh():
+        _last = st.session_state.get("last_analysis_time")
+        _now  = time.time()
+        _elapsed = (_now - float(_last)) if _last else 999
+        if _elapsed >= 175:
+            st.rerun()
+        else:
+            _rem = max(0, int(180 - _elapsed))
+            st.caption(f"⏱ Próximo análisis en {_rem}s")
+
+    _trading_autorefresh()
 
     # ── Cargar credenciales MT5 del usuario desde DB (solo una vez) ──────────
     _mt5_load_key = f"mt5_loaded_{current_user}"
@@ -6300,4 +6307,3 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
-# (auto-refresh registrado al inicio del modo trading)
