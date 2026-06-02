@@ -2459,15 +2459,16 @@ else:
     current_user      = st.session_state.current_user
     current_user_name = _USER_NAMES.get(current_user, current_user.capitalize())
 
-    # ── Auto-refresh: registrado aquí, ANTES de cualquier st.stop() ──────────
+    # ── Auto-refresh: registrado ANTES de cualquier st.stop() ───────────────
     # run_every=20s mantiene el WebSocket vivo en Railway (timeout ~60s).
-    # Solo llama st.rerun() cuando han pasado >=175s Y el modo es trading.
+    # IMPORTANTE: solo hace rerun si last_analysis_time ya está SETEADO y han
+    # pasado ≥175s — evita bucle infinito en el primer arranque.
     @st.fragment(run_every=20)
     def _autorefresh():
         if st.session_state.get("app_mode") != "trading":
             return
         _t = st.session_state.get("last_analysis_time")
-        if not _t or (time.time() - float(_t)) >= 175:
+        if _t and (time.time() - float(_t)) >= 175:
             st.rerun()
 
     _autorefresh()
