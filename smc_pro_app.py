@@ -2527,6 +2527,13 @@ else:
 
         st.stop()
 
+    # ── Auto-refresh cada 3 minutos (se registra AQUÍ, antes de cualquier error) ──
+    try:
+        from streamlit_autorefresh import st_autorefresh as _sar
+        _sar(interval=180_000, key="trading_autorefresh")
+    except Exception:
+        pass
+
     # ── Cargar credenciales MT5 del usuario desde DB (solo una vez) ──────────
     _mt5_load_key = f"mt5_loaded_{current_user}"
     if _mt5_load_key not in st.session_state and _DB_OK:
@@ -6293,9 +6300,4 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
 st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
-# ── Auto-rerun cada 3 minutos — SOLO modo trading ────────────────────────────
-try:
-    from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=180_000, key="trading_autorefresh")
-except Exception:
-    pass
+# (auto-refresh registrado al inicio del modo trading)
