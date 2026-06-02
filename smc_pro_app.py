@@ -6076,8 +6076,24 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         _w_close = c.resample("W").last().reindex(c.index, method="ffill")
         _w_ema10 = _w_close.ewm(span=10, adjust=False).mean()
         _w_ema20 = _w_close.ewm(span=20, adjust=False).mean()
-        _df["w_trend_bull"] = (_w_ema10 > _w_ema20).astype(int)   # tendencia semanal alcista
+        _df["w_trend_bull"] = (_w_ema10 > _w_ema20).astype(int)
         _df["w_trend_bear"] = (_w_ema10 < _w_ema20).astype(int)
+
+        # BOS (Break of Structure): precio rompe máximo/mínimo de últimas 20 velas
+        _df["bos_bull"] = (c > h.rolling(20).max().shift(1)).astype(int)
+        _df["bos_bear"] = (c < lo.rolling(20).min().shift(1)).astype(int)
+
+        # Supertrend score: precio sobre/bajo EMA de (H+L/2) ± 3×ATR
+        _mid = (h+lo)/2
+        _df["st_bull"] = (c > _mid + 3*_df["atr"]).astype(int)  # momentum fuerte alcista
+        _df["st_bear"] = (c < _mid - 3*_df["atr"]).astype(int)  # momentum fuerte bajista
+
+        # Engulfing simple (vela alcista/bajista que envuelve la anterior)
+        _prev_h = h.shift(1); _prev_l = lo.shift(1)
+        _prev_o = _df["Open"].shift(1) if "Open" in _df.columns else c.shift(1)
+        _this_o = _df["Open"] if "Open" in _df.columns else c.shift(1)
+        _df["engulf_bull"] = ((c > _prev_h) & (_this_o < _prev_l)).astype(int)
+        _df["engulf_bear"] = ((c < _prev_l) & (_this_o > _prev_h)).astype(int)
 
         _df = _df.dropna()
 
@@ -6100,7 +6116,7 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
                 wtb=bool(row["w_trend_bull"]); wtbr=bool(row["w_trend_bear"])
                 if _np.isnan(atr) or atr==0: continue
 
-                # FILTRO DE RÉGIMEN: tendencia semanal clara y slope suficiente
+                # ── FILTRO RÉGIMEN SEMANAL ─────────────────────────────────────
                 trending_up   = abs(slope_) >= slope_thr and slope_ > 0 and wtb and adx_ >= adx_min
                 trending_down = abs(slope_) >= slope_thr and slope_ < 0 and wtbr and adx_ >= adx_min
 
@@ -6108,16 +6124,29 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
                 bull_rib = r3>r7>r14 and r14>r34
                 bear_rib = r3<r7<r14 and r14<r34
 
-                # Pullback al ribbon (precio cerca de EMA7)
+                # Pullback al ribbon
                 near = abs(px-r7) < atr*pb
 
-                # Solo LONG si tendencia semanal alcista; solo SHORT si bajista
-                if trending_up  and bull_rib and near and rsi_lo<=rsi_<=rsi_hi and macd_>0 and px>r200:
-                    d_="LONG"
-                elif trending_down and bear_rib and near and rsi_lo<=rsi_<=rsi_hi and macd_<0 and px<r200:
-                    d_="SHORT"
-                else:
-                    continue
+                # BOS confirma
+                bos_b = bool(row.get("bos_bull",0))
+                bos_s = bool(row.get("bos_bear",0))
+
+                # Engulfing bonus
+                eng_b = bool(row.get("engulf_bull",0))
+                eng_s = bool(row.get("engulf_bear",0))
+
+                # SCORE de confluencias (no solo booleano)
+                sc_l = (int(trending_up) + int(bull_rib) + int(near) +
+                        int(rsi_lo<=rsi_<=rsi_hi) + int(macd_>0) + int(px>r200) +
+                        int(bos_b) + int(eng_b))
+                sc_s = (int(trending_down) + int(bear_rib) + int(near) +
+                        int(rsi_lo<=rsi_<=rsi_hi) + int(macd_<0) + int(px<r200) +
+                        int(bos_s) + int(eng_s))
+
+                # Requiere RÉGIMEN OK + ribbon + 5 confluencias mínimo
+                if trending_up  and bull_rib and near and sc_l >= 5: d_="LONG"
+                elif trending_down and bear_rib and near and sc_s >= 5: d_="SHORT"
+                else: continue
 
                 sign=1 if d_=="LONG" else -1
                 sl_dist=max(abs(px-r14)+atr*0.15, atr*0.5)

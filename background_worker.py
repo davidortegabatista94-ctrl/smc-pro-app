@@ -976,75 +976,157 @@ def _check_definitiva_entry(df_1h, signal: dict, price: float) -> None:
         if news_risk == "high":
             return   # Sin noticias de alto impacto
 
-        # ADX mínimo en 4H
+        # ADX mínimo
         if adx < 18:
             return   # Mercado lateral — no operar
 
-        # ── CONFLUENCIAS SOFT ─────────────────────────────────────────────────
+        # ── REGIME CHECK via backend ──────────────────────────────────────────
+        regime_ok = False
+        regime_label = ""
+        try:
+            from backend.market_context import detect_market_regime
+            _reg_key, _reg_lbl, _reg_det = detect_market_regime(df_1h)
+            regime_label = _reg_lbl
+            regime_ok = _reg_key in ("trending_bull","trending_bear","volatile_trend")
+            if _reg_key == "trending_bull" and not bull: regime_ok = False
+            if _reg_key == "trending_bear" and bull:     regime_ok = False
+        except Exception:
+            regime_ok = True   # si falla, no bloquear
+
+        if not regime_ok:
+            return   # Régimen no apto (ranging/pre-news)
+
+        # ── CONFLUENCIAS COMBINADAS ───────────────────────────────────────────
         confs = []; score = 0
 
-        # 1. MACD crossover o confirmación
+        # 1. MACD
         if bull:
             if macd_hist > 0 and macd_prev <= 0:
-                confs.append("⚡ MACD cruzó AL ALZA — momentum fresco"); score += 20
+                confs.append("⚡ MACD cruzó AL ALZA — cambio de momentum"); score += 20
             elif macd_hist > 0:
-                confs.append("⚡ MACD positivo — momentum alcista");      score += 12
+                confs.append("⚡ MACD positivo — momentum alcista");          score += 12
         else:
             if macd_hist < 0 and macd_prev >= 0:
-                confs.append("⚡ MACD cruzó A LA BAJA — momentum fresco"); score += 20
+                confs.append("⚡ MACD cruzó A LA BAJA — cambio de momentum"); score += 20
             elif macd_hist < 0:
-                confs.append("⚡ MACD negativo — momentum bajista");       score += 12
+                confs.append("⚡ MACD negativo — momentum bajista");           score += 12
 
         # 2. RSI zona óptima
         if bull:
-            if 48 <= rsi <= 63: confs.append(f"📈 RSI {rsi:.0f} zona ALCISTA limpia"); score += 15
-            elif 40 <= rsi < 48: confs.append(f"📈 RSI {rsi:.0f} pullback limpio");    score += 9
+            if 48 <= rsi <= 63: confs.append(f"📈 RSI {rsi:.0f} — zona pullback alcista"); score += 15
+            elif 40 <= rsi < 48: confs.append(f"📈 RSI {rsi:.0f} — pullback profundo");    score += 9
         else:
-            if 37 <= rsi <= 52: confs.append(f"📉 RSI {rsi:.0f} zona BAJISTA limpia"); score += 15
-            elif 52 < rsi <= 60: confs.append(f"📉 RSI {rsi:.0f} rebote limpio");      score += 9
+            if 37 <= rsi <= 52: confs.append(f"📉 RSI {rsi:.0f} — zona pullback bajista"); score += 15
+            elif 52 < rsi <= 60: confs.append(f"📉 RSI {rsi:.0f} — rebote bajista");       score += 9
 
-        # 3. Confirmación 4H
+        # 3. 4H estructura
         if has_4h:
             if bull and px4h > e21_4h > e50_4h and 40 <= rsi_4h <= 72:
-                confs.append("🕯 4H ALCISTA confirmado (EMA+RSI)"); score += 18
+                confs.append("🕯 4H ALCISTA confirmado"); score += 18
             elif bull and px4h > e50_4h:
-                confs.append("🕯 4H — precio sobre EMA50");         score += 10
+                confs.append("🕯 4H sesgo alcista");       score += 10
             elif not bull and px4h < e21_4h < e50_4h and 28 <= rsi_4h <= 60:
-                confs.append("🕯 4H BAJISTA confirmado (EMA+RSI)"); score += 18
+                confs.append("🕯 4H BAJISTA confirmado"); score += 18
             elif not bull and px4h < e50_4h:
-                confs.append("🕯 4H — precio bajo EMA50");          score += 10
+                confs.append("🕯 4H sesgo bajista");       score += 10
 
-        # 4. ADX — fuerza de tendencia
-        if adx >= 28: confs.append(f"💪 ADX {adx:.0f} — tendencia FUERTE"); score += 15
+        # 4. ADX fuerza
+        if adx >= 28: confs.append(f"💪 ADX {adx:.0f} — tendencia FUERTE");    score += 15
         elif adx >= 22: confs.append(f"✅ ADX {adx:.0f} — tendencia confirmada"); score += 9
 
-        # 5. Stochastic no sobreextendido
-        if bull and stk < 68:
-            confs.append(f"📉 Stoch {stk:.0f} — entrada válida sin sobrecompra"); score += 10
-        elif not bull and stk > 32:
-            confs.append(f"📈 Stoch {stk:.0f} — entrada válida sin sobreventa"); score += 10
+        # 5. Stochastic
+        if bull and stk < 68:  confs.append(f"📉 Stoch {stk:.0f} sin sobrecompra"); score += 8
+        elif not bull and stk > 32: confs.append(f"📈 Stoch {stk:.0f} sin sobreventa"); score += 8
 
-        # 6. Volumen institucional
-        if vol_r >= 1.8:
-            confs.append(f"📊 Volumen {vol_r:.1f}x — actividad institucional ALTA"); score += 10
-        elif vol_r >= 1.3:
-            confs.append(f"📊 Volumen {vol_r:.1f}x — actividad sobre media");       score += 6
+        # 6. Régimen detectado
+        if regime_label:
+            confs.append(f"🌐 Régimen: {regime_label}"); score += 8
 
-        # 7. COT
+        # 7. Estructura de mercado (BOS/ChoCH)
+        try:
+            from backend.indicators import detect_market_structure
+            _ms = detect_market_structure(df_1h)
+            _ms_str = _ms.get("estructura","")
+            _ms_score = int(_ms.get("score",0))
+            if (bull and "alcista" in _ms_str.lower()) or (not bull and "bajista" in _ms_str.lower()):
+                confs.append(f"🏗 Estructura: {_ms_str} (score {_ms_score})"); score += 12
+            elif _ms_score > 0:
+                score += 4
+        except Exception:
+            pass
+
+        # 8. Trend strength (ADX avanzado con +DI/-DI)
+        try:
+            from backend.indicators import calculate_trend_strength
+            _ts = calculate_trend_strength(df_1h)
+            _ts_lbl = _ts.get("tendencia","")
+            _ts_sc  = int(_ts.get("score",0))
+            if (bull and "alcista" in _ts_lbl.lower() and _ts_sc >= 2) or \
+               (not bull and "bajista" in _ts_lbl.lower() and _ts_sc >= 2):
+                confs.append(f"📐 Fuerza de tendencia: {_ts_lbl} ({_ts_sc}/3)"); score += 12
+        except Exception:
+            pass
+
+        # 9. AI Market Bias
+        ai_conf = 0
+        try:
+            from backend.indicators import ai_market_bias, ai_candlestick_patterns, detect_market_structure
+            _pats, _pat_sc = ai_candlestick_patterns(df_1h)
+            _ms2 = detect_market_structure(df_1h)
+            _ai = ai_market_bias(signal, {}, None, [], _pat_sc)
+            ai_bias = _ai.get("bias","NEUTRAL")
+            ai_conf = int(_ai.get("confidence",0))
+            if ai_bias == direction and ai_conf >= 55:
+                confs.append(f"🤖 AI bias: {ai_bias} — confianza {ai_conf}%"); score += 15
+            elif ai_bias == direction:
+                score += 6
+            elif ai_bias not in (direction, "NEUTRAL"):
+                score -= 8   # AI en contra
+            if _pats:
+                confs.append(f"🕯 Patrón IA: {', '.join(_pats[:2])}"); score += min(10, abs(_pat_sc))
+        except Exception:
+            pass
+
+        # 10. Volume delta (presión compradora/vendedora)
+        try:
+            from backend.indicators import get_volume_delta
+            _vd = get_volume_delta(df_1h)
+            _vd_bias = _vd.get("bias","neutral")
+            _vd_pct  = float(_vd.get("delta_pct",0))
+            if (bull and _vd_bias=="bullish" and _vd_pct > 5) or \
+               (not bull and _vd_bias=="bearish" and _vd_pct < -5):
+                confs.append(f"📊 Volume delta: {_vd_bias} ({_vd_pct:+.0f}%)"); score += 10
+        except Exception:
+            pass
+
+        # 11. Estrategia meta-composite (consenso de 6 estrategias)
+        try:
+            from backend.strategies import _live_strategy_signal
+            _meta_d, _meta_r = _live_strategy_signal(df_1h, "meta_composite")
+            if _meta_d == direction:
+                confs.append(f"🎯 Meta-composite: {_meta_d} ({_meta_r[:50]})"); score += 15
+        except Exception:
+            pass
+
+        # 12. Volumen relativo
+        if vol_r >= 1.8:  confs.append(f"📊 Vol {vol_r:.1f}x — ALTA actividad inst."); score += 10
+        elif vol_r >= 1.3: confs.append(f"📊 Vol {vol_r:.1f}x — sobre media");          score += 6
+
+        # 13. COT
         if (bull and cot_bias=="bullish") or (not bull and cot_bias=="bearish"):
-            confs.append("🏦 COT — institucionales en el mismo lado"); score += 10
+            confs.append("🏦 COT confirma — inst. en el mismo lado"); score += 10
         elif cot_bias == "neutral":
             score += 2
 
-        # 8. Sesión (ya pasó hard filter, bonus por sesión premium)
+        # 14. Sesión premium
         if 8 <= h_utc < 12 or 13 <= h_utc < 16:
-            confs.append(f"🌍 Sesión {'London' if h_utc < 12 else 'NY'} peak — máxima liquidez"); score += 5
+            confs.append(f"🌍 {'London' if h_utc<12 else 'NY'} peak — liquidez máxima"); score += 5
 
         # ── UMBRAL DEFINITIVA ─────────────────────────────────────────────────
-        _log.info("DEFINITIVA check: dir=%s score=%d conf=%d adx=%.0f",
-                  direction, score, len(confs), adx)
+        _log.info("DEFINITIVA: dir=%s score=%d conf=%d adx=%.0f ai_conf=%d regime=%s",
+                  direction, score, len(confs), adx, ai_conf, regime_label)
 
-        if score < 70 or len(confs) < 5:
+        if score < 75 or len(confs) < 6:
             return   # No cumple el estándar DEFINITIVA
 
         # ── NIVELES: SL 1.0×ATR, TP1 25% a 2:1, TP2 75% a swing ≥5:1 ──────
