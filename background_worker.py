@@ -1184,10 +1184,38 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
 
         if _send_tg(msg):
             _db.set_setting("premium_signal_last_ts", str(time.time()))
-            _log.info(
-                "PREMIUM SIGNAL SENT: %s score=%d conf=%d",
-                direction, score, len(confluences),
-            )
+            _log.info("PREMIUM SIGNAL SENT: %s score=%d conf=%d",
+                      direction, score, len(confluences))
+            # Guardar en DB para historial y backtest de señales reales
+            try:
+                _db.save_metric(
+                    name="tg_signal_log",
+                    value=float(score),
+                    context={
+                        "ts":           datetime.now(timezone.utc).isoformat(),
+                        "direction":    direction,
+                        "entry":        round(px, 5),
+                        "sl":           round(sl, 5),
+                        "tp1":          round(tp1, 5),
+                        "tp2":          round(tp2, 5),
+                        "tp3":          round(tp3, 5),
+                        "sl_pips":      int(sl_pips),
+                        "tp1_pips":     int(tp1_pips),
+                        "tp2_pips":     int(tp2_pips),
+                        "tp3_pips":     int(tp3_pips),
+                        "score":        score,
+                        "confluences":  len(_positive_conf),
+                        "atr_pips":     round(atr_pips, 1),
+                        "risk_pct":     risk_pct,
+                        "rsi":          round(rsi, 1),
+                        "rsi_4h":       round(rsi_4h, 1) if has_4h else None,
+                        "cot_bias":     cot_bias,
+                        "liq_target":   liq_desc,
+                        "session":      datetime.now(timezone.utc).strftime("%H UTC"),
+                    },
+                )
+            except Exception as _se:
+                _log.debug("save signal log error: %s", _se)
         else:
             _log.warning("Premium signal: fallo al enviar Telegram")
 

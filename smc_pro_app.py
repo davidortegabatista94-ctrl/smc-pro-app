@@ -6305,6 +6305,175 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
             "recarga la página en 30 segundos."
         )
 
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📱 Operaciones reales enviadas al Telegram")
+    st.caption("Cada señal premium que superó el filtro (score ≥ 82 · ≥5 confluencias) queda registrada aquí con su resultado real.")
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _load_tg_signals():
+        try:
+            import db as _dbs
+            rows = _dbs.get_metrics("tg_signal_log", limit=100)
+            out = []
+            for r in rows:
+                ctx = r.get("context") or {}
+                if isinstance(ctx, str):
+                    import json as _j; ctx = _j.loads(ctx)
+                ctx["_ts_raw"] = r.get("created_at") or ctx.get("ts", "")
+                out.append(ctx)
+            return out
+        except Exception:
+            return []
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _evaluate_signal(ts_str: str, direction: str, entry: float,
+                          sl: float, tp1: float, tp2: float):
+        """Descarga velas horarias post-señal y determina si tocó TP1/TP2/SL."""
+        try:
+            import yfinance as _yf
+            from datetime import datetime as _dt, timedelta as _td
+            _pip = 0.0001
+            # Parsear timestamp
+            _t0 = _dt.fromisoformat(str(ts_str).replace("Z", "+00:00").split("+")[0])
+            _t1 = _t0 + _td(days=12)
+            _end = min(_dt.utcnow(), _t1)
+            _df  = _yf.download(
+                "EURUSD=X",
+                start=_t0.strftime("%Y-%m-%d"),
+                end=(_end + _td(days=1)).strftime("%Y-%m-%d"),
+                interval="1h", progress=False, auto_adjust=True,
+            )
+            if _df is None or _df.empty:
+                return "Sin datos", 0.0
+            if isinstance(_df.columns, __import__("pandas").MultiIndex):
+                _df.columns = _df.columns.get_level_values(0)
+            _sl_pips  = round(abs(entry - sl)  / _pip, 1)
+            _tp1_pips = round(abs(tp1 - entry) / _pip, 1)
+            _tp2_pips = round(abs(tp2 - entry) / _pip, 1) if tp2 else 0
+            for _idx, _row in _df.iterrows():
+                _h = float(_row.get("High", 0) or 0)
+                _l = float(_row.get("Low",  0) or 0)
+                if not _h or not _l:
+                    continue
+                if direction == "LONG":
+                    if _l <= sl:
+                        return f"❌ SL  −{_sl_pips:.0f}p", -_sl_pips
+                    if tp2 and _h >= tp2:
+                        return f"🏆 TP2  +{_tp2_pips:.0f}p", _tp2_pips
+                    if _h >= tp1:
+                        return f"✅ TP1  +{_tp1_pips:.0f}p", _tp1_pips
+                else:
+                    if _h >= sl:
+                        return f"❌ SL  −{_sl_pips:.0f}p", -_sl_pips
+                    if tp2 and _l <= tp2:
+                        return f"🏆 TP2  +{_tp2_pips:.0f}p", _tp2_pips
+                    if _l <= tp1:
+                        return f"✅ TP1  +{_tp1_pips:.0f}p", _tp1_pips
+            # No tocó nada aún
+            _last = float(_df["Close"].iloc[-1])
+            _cur_pips = ((_last - entry) / _pip) if direction == "LONG" else ((entry - _last) / _pip)
+            _still_open = (_dt.utcnow() - _t0).days < 12
+            return f"{'🔄 Abierta' if _still_open else '⏱ Expirada'}  {_cur_pips:+.0f}p", _cur_pips
+        except Exception as _ee:
+            return f"Error", 0.0
+
+    _tg_sigs = _load_tg_signals()
+
+    if not _tg_sigs:
+        st.info("Aún no hay señales Telegram registradas. La próxima vez que el sistema envíe una señal premium aparecerá aquí automáticamente.")
+    else:
+        # Evaluar resultados (con spinner solo la primera vez)
+        _rows_display = []
+        _total_pips   = 0.0
+        _wins_tp1 = _wins_tp2 = _losses = _open_exp = 0
+
+        with st.spinner("Evaluando resultados con datos reales…"):
+            for _sig in _tg_sigs:
+                _ts   = str(_sig.get("ts") or _sig.get("_ts_raw", ""))[:19]
+                _dir  = _sig.get("direction", "—")
+                _ent  = float(_sig.get("entry", 0) or 0)
+                _sl_  = float(_sig.get("sl", 0) or 0)
+                _tp1_ = float(_sig.get("tp1", 0) or 0)
+                _tp2_ = float(_sig.get("tp2", 0) or 0)
+                _sc   = int(_sig.get("score", 0) or 0)
+                _conf = int(_sig.get("confluences", 0) or 0)
+                _rp   = _sig.get("risk_pct", "—")
+                _liq  = _sig.get("liq_target") or "—"
+
+                _outcome, _pips = _evaluate_signal(_ts, _dir, _ent, _sl_, _tp1_, _tp2_)
+                _total_pips += _pips
+                if "TP2" in _outcome:  _wins_tp2 += 1
+                elif "TP1" in _outcome: _wins_tp1 += 1
+                elif "SL"  in _outcome: _losses   += 1
+                else:                   _open_exp += 1
+
+                _rows_display.append({
+                    "Fecha UTC":    _ts,
+                    "Dir":          "🟢 LONG" if _dir == "LONG" else "🔴 SHORT",
+                    "Entrada":      f"{_ent:.5f}",
+                    "SL":           f"{_sl_:.5f}",
+                    "TP1":          f"{_tp1_:.5f}",
+                    "TP2":          f"{_tp2_:.5f}" if _tp2_ else "—",
+                    "Score":        f"{_sc}/100",
+                    "Conf.":        _conf,
+                    "Riesgo":       _rp,
+                    "Resultado":    _outcome,
+                    "Liquidez":     _liq[:30] if len(str(_liq)) > 30 else _liq,
+                })
+
+        # Métricas de rendimiento
+        _total_sigs = len(_tg_sigs)
+        _closed = _wins_tp1 + _wins_tp2 + _losses
+        _wr = (_wins_tp1 + _wins_tp2) / _closed * 100 if _closed else 0
+        _mc1, _mc2, _mc3, _mc4, _mc5 = st.columns(5)
+        _mc1.metric("Señales totales", _total_sigs)
+        _mc2.metric("Win rate (TP1+TP2)", f"{_wr:.0f}%", f"{_wins_tp1+_wins_tp2}W / {_losses}L")
+        _mc3.metric("TP2 alcanzado", _wins_tp2)
+        _mc4.metric("Pips netos", f"{_total_pips:+.0f}p")
+        _mc5.metric("Abiertas/Exp.", _open_exp)
+
+        # Tabla
+        import pandas as _pd_tg
+        _tg_df = _pd_tg.DataFrame(_rows_display)
+        st.dataframe(_tg_df, use_container_width=True, hide_index=True)
+
+        # Mini gráfico de pips acumulados
+        if _closed >= 2:
+            _pips_list = []
+            _cum = 0.0
+            for _r in _rows_display:
+                _res = _r["Resultado"]
+                if "TP2" in _res or "TP1" in _res or "SL" in _res:
+                    try:
+                        _p = float(_res.split()[-1].replace("p","").replace("+",""))
+                        _p = _p if "SL" not in _res else -_p
+                        _cum += _p
+                        _pips_list.append(_cum)
+                    except Exception:
+                        pass
+            if _pips_list:
+                import plotly.graph_objects as _go_tg
+                _fig_tg = _go_tg.Figure()
+                _fig_tg.add_trace(_go_tg.Scatter(
+                    y=_pips_list, mode="lines+markers",
+                    line=dict(color="#3fb950" if _pips_list[-1] >= 0 else "#f85149", width=2),
+                    marker=dict(size=6),
+                    name="Pips acumulados",
+                ))
+                _fig_tg.add_hline(y=0, line=dict(color="#666", dash="dash", width=1))
+                _fig_tg.update_layout(
+                    title="Curva de pips acumulados (señales cerradas)",
+                    paper_bgcolor="#0e1117", plot_bgcolor="#161b22",
+                    font_color="#e6edf3", height=220,
+                    margin=dict(l=40, r=20, t=40, b=30),
+                )
+                st.plotly_chart(_fig_tg, use_container_width=True)
+
+        if st.button("🔄 Actualizar resultados", key="_tg_refresh"):
+            st.cache_data.clear()
+            st.rerun()
+
 _refresh_str = st.session_state.get("last_refresh_str", "—")
 st.caption(f"🔄 Último análisis: {_refresh_str}  |  ⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
