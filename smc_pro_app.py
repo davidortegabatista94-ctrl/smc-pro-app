@@ -6407,174 +6407,136 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
     # ─────────────────────────────────────────────────────────────────────────
     st.markdown("---")
-    st.subheader("📅 Backtest histórico desde 2008 — 17 años de datos reales")
-    st.caption("Mismo sistema, mismos parámetros, sobre toda la historia disponible. Tres estrategias de salida comparadas.")
+    st.subheader("📅 Misma estrategia desde 2008 — 17 años")
+    st.caption("Mismos parámetros: slope>0.2% · ADX>22 · RSI 40-60 · Pullback EMA50 · SL=1.5×ATR · TP=3:1")
 
     @st.cache_data(ttl=86400, show_spinner=False)
     def _run_backtest_2008():
+        # Misma lógica exacta que _run_ribbon_backtest pero desde 2008
         import yfinance as _yf, numpy as _np, pandas as _pd
         try:
-            _df = _yf.download("EURUSD=X", start="2003-01-01", interval="1d",
+            _df = _yf.download("EURUSD=X", start="2008-01-01", interval="1d",
                                auto_adjust=True, progress=False, timeout=25)
         except Exception as _e:
-            return None, str(_e)
+            return None, None, {}, str(_e)
         if _df is None or _df.empty or len(_df) < 200:
-            return None, "datos insuficientes"
+            return None, None, {}, "datos insuficientes"
         if isinstance(_df.columns, _pd.MultiIndex):
             _df.columns = _df.columns.get_level_values(0)
-        _df.columns = [str(c).strip().capitalize() for c in _df.columns]
-        _df = _df[[c for c in ["Open","High","Low","Close"] if c in _df.columns]].dropna().copy()
-        if _df.index.tz is not None:
-            _df.index = _df.index.tz_localize(None)
+        _df.columns = [str(x).strip().capitalize() for x in _df.columns]
+        _df = _df[[x for x in ["High","Low","Close"] if x in _df.columns]].dropna().copy()
+        if _df.index.tz: _df.index = _df.index.tz_localize(None)
         c=_df["Close"]; h=_df["High"]; lo=_df["Low"]
-        for _sp,_nm in [(5,"e5"),(10,"e10"),(20,"e20"),(50,"e50"),(200,"e200")]:
-            _df[_nm] = c.ewm(span=_sp,adjust=False).mean()
-        _pc=c.shift(1)
-        _df["atr"] = _pd.concat([h-lo,(h-_pc).abs(),(lo-_pc).abs()],axis=1).max(axis=1).ewm(14,adjust=False).mean()
+        _df["e50"]  = c.ewm(50, adjust=False).mean()
+        _df["e200"] = c.ewm(200,adjust=False).mean()
+        _df["slope"]= (_df["e50"]-_df["e50"].shift(20))/(_df["e50"].shift(20)+1e-9)*100
+        _pc=c.shift(1); _tr=_pd.concat([h-lo,(h-_pc).abs(),(lo-_pc).abs()],axis=1).max(axis=1)
+        _df["atr"]=_tr.ewm(14,adjust=False).mean()
         _d=c.diff()
-        _df["rsi"] = 100-100/(1+_d.clip(lower=0).ewm(14,adjust=False).mean()/(-_d.clip(upper=0)).ewm(14,adjust=False).mean().replace(0,_np.nan))
-        _mc_=c.ewm(12,adjust=False).mean()-c.ewm(26,adjust=False).mean()
-        _df["macd"] = _mc_-_mc_.ewm(9,adjust=False).mean()
-        _df = _df.dropna()
+        _df["rsi"]=100-100/(1+_d.clip(lower=0).ewm(14,adjust=False).mean()/
+                              (-_d.clip(upper=0)).ewm(14,adjust=False).mean().replace(0,_np.nan))
+        _pdm=h.diff().clip(lower=0); _ndm=(-lo.diff()).clip(lower=0)
+        _pdm2=_pdm.where(_pdm>_ndm,0.0)
+        _at14=_tr.ewm(14,adjust=False).mean()
+        _pdi=100*_pdm2.ewm(14,adjust=False).mean()/(_at14+1e-9)
+        _ndi=100*((_ndm.where(_ndm>_pdm,0.0)).ewm(14,adjust=False).mean())/(_at14+1e-9)
+        _df["adx"]=(100*abs(_pdi-_ndi)/(_pdi+_ndi+1e-9)).ewm(14,adjust=False).mean()
+        _df=_df.dropna()
 
-        _bull=(_df["e5"]>_df["e10"])&(_df["e10"]>_df["e20"])&(_df["e20"]>_df["e50"])
-        _bear=(_df["e5"]<_df["e10"])&(_df["e10"]<_df["e20"])&(_df["e20"]<_df["e50"])
-        _aok =_df["atr"]>=0.0035
-        _rl  =(_df["rsi"]>=45)&(_df["rsi"]<=68); _rs=(_df["rsi"]>=32)&(_df["rsi"]<=55)
-        _mb  =_df["macd"]>0; _ms=_df["macd"]<0
-        _ae  =_df["Close"]>_df["e50"]; _be=_df["Close"]<_df["e50"]
-        _mac =_df["Close"]>_df["e200"]; _mbc=_df["Close"]<_df["e200"]
-        _sc_l=(_bull.astype(int)*25+_aok.astype(int)*12+_rl.astype(int)*18+_mb.astype(int)*18+_ae.astype(int)*12+_mac.astype(int)*15)
-        _sc_s=(_bear.astype(int)*25+_aok.astype(int)*12+_rs.astype(int)*18+_ms.astype(int)*18+_be.astype(int)*12+_mbc.astype(int)*15)
-        _co_l=_bull.astype(int)+_rl.astype(int)+_mb.astype(int)+_ae.astype(int)+_mac.astype(int)
-        _co_s=_bear.astype(int)+_rs.astype(int)+_ms.astype(int)+_be.astype(int)+_mbc.astype(int)
-        # Parámetros que mejor funcionaron en el grid 2020
-        _ls=(_sc_l>=65)&(_co_l>=4); _ss=(_sc_s>=65)&(_co_s>=4)
-
-        _h_=_df["High"].values; _lo_=_df["Low"].values; _atv_=_df["atr"].values
-        _cl_=_df["Close"].values
-
-        results = {}
-        # ── Estrategia A: TP fijo 3:1 (sin parciales) ─────────────────────
-        # ── Estrategia B: parcial 50%@2R → BE → 50%@4R ────────────────────
-        # ── Estrategia C: parcial 25%@2R → trail → 75%@4R ─────────────────
-        for _strat in ["A","B","C"]:
-            _trades=[]; _last=-3
-            for _i in range(60, len(_df)):
-                if _i-_last < 3: continue
-                if   _ls.iloc[_i]: _d_="LONG"
-                elif _ss.iloc[_i]: _d_="SHORT"
-                else: continue
-                _en=float(_cl_[_i]); _at=float(_atv_[_i])
-                _sld=_at*1.2; _sl=_en-_sld if _d_=="LONG" else _en+_sld
-                _sign=1 if _d_=="LONG" else -1
-                # TPs según estrategia
-                if _strat=="A":
-                    _tp1=_en+_sign*_sld*3.0; _tp2=None
-                elif _strat=="B":
-                    _tp1=_en+_sign*_sld*2.0; _tp2=_en+_sign*_sld*4.0
+        _trades=[]; _last=-3
+        for _i in range(220, len(_df)):
+            if _i-_last < 3: continue
+            _row=_df.iloc[_i]; _px=float(_row["Close"]); _atr=float(_row["atr"])
+            if _np.isnan(_atr) or _atr==0: continue
+            _e50=float(_row["e50"]); _e200=float(_row["e200"])
+            _sl=float(_row["slope"]); _adx=float(_row["adx"]); _rsi=float(_row["rsi"])
+            if _adx<22 or abs(_sl)<0.2: continue
+            _near=abs(_px-_e50)<_atr*0.6
+            if _sl>0.2 and _px>_e200 and _near and 40<=_rsi<=60: _d_="LONG"
+            elif _sl<-0.2 and _px<_e200 and _near and 40<=_rsi<=60: _d_="SHORT"
+            else: continue
+            _sign=1 if _d_=="LONG" else -1
+            _sld=_atr*1.5; _sl_=_px-_sign*_sld; _tp=_px+_sign*_sld*3
+            _p=0.0; _hit=False
+            for _j in range(_i+1, min(_i+16,len(_df))):
+                _fh=float(_df["High"].iloc[_j]); _fl=float(_df["Low"].iloc[_j])
+                if _d_=="LONG":
+                    if _fl<=_sl_: _p=-_sld/0.0001; _hit=True; break
+                    if _fh>=_tp:  _p=_sld*3/0.0001; _hit=True; break
                 else:
-                    _tp1=_en+_sign*_sld*2.0; _tp2=_en+_sign*_sld*5.0
+                    if _fh>=_sl_: _p=-_sld/0.0001; _hit=True; break
+                    if _fl<=_tp:  _p=_sld*3/0.0001; _hit=True; break
+            if not _hit:
+                _cx=float(_df["Close"].iloc[min(_i+15,len(_df)-1)])
+                _p=((_cx-_px) if _d_=="LONG" else (_px-_cx))/0.0001
+            _trades.append({"date":_df.index[_i],"dir":_d_,"pips":round(_p,1),"win":_p>0,
+                            "entry":_px,"sl":round(_sl_,5),"tp":round(_tp,5)})
+            _last=_i
 
-                _p=0.0; _hit=False; _tp1h=False; _slc=_sl; _buf=_sld*0.1
-                for _j in range(_i+1, min(_i+13,len(_df))):
-                    _fh=float(_df["High"].iloc[_j]); _fl=float(_df["Low"].iloc[_j])
-                    if _d_=="LONG":
-                        if _fl<=_slc:
-                            if _strat=="A": _p=-_sld/0.0001
-                            elif _tp1h: _p+=0.0
-                            else: _p=-_sld/0.0001
-                            _hit=True; break
-                        if not _tp1h and _fh>=_tp1:
-                            if _strat=="A": _p=(_tp1-_en)/0.0001; _hit=True; break
-                            elif _strat=="B": _tp1h=True;_p+=(_tp1-_en)/0.0001*0.5;_slc=_en+_buf
-                            else: _tp1h=True;_p+=(_tp1-_en)/0.0001*0.25;_slc=_en+_buf
-                        if _tp1h and _tp2 and _fh>=_tp2:
-                            if _strat=="B": _p+=(_tp2-_en)/0.0001*0.5
-                            else: _p+=(_tp2-_en)/0.0001*0.75
-                            _hit=True; break
-                    else:
-                        if _fh>=_slc:
-                            if _strat=="A": _p=-_sld/0.0001
-                            elif _tp1h: _p+=0.0
-                            else: _p=-_sld/0.0001
-                            _hit=True; break
-                        if not _tp1h and _fl<=_tp1:
-                            if _strat=="A": _p=(_en-_tp1)/0.0001; _hit=True; break
-                            elif _strat=="B": _tp1h=True;_p+=(_en-_tp1)/0.0001*0.5;_slc=_en-_buf
-                            else: _tp1h=True;_p+=(_en-_tp1)/0.0001*0.25;_slc=_en-_buf
-                        if _tp1h and _tp2 and _fl<=_tp2:
-                            if _strat=="B": _p+=(_en-_tp2)/0.0001*0.5
-                            else: _p+=(_en-_tp2)/0.0001*0.75
-                            _hit=True; break
-                if not _hit:
-                    _cx=float(_df["Close"].iloc[min(_i+12,len(_df)-1)])
-                    _rem=((_cx-_en) if _d_=="LONG" else (_en-_cx))/0.0001
-                    _wgt=0.5 if _strat=="B" else (0.75 if _strat=="C" else 1.0)
-                    _p += _rem*_wgt if _tp1h else _rem
-                _trades.append({"date":_df.index[_i],"dir":_d_,"pips":round(_p,1),"win":_p>0,"entry":_en})
-                _last=_i
-            if not _trades: continue
-            _tdf=_pd.DataFrame(_trades)
-            _tdf["equity"]=_tdf["pips"].cumsum()
-            _n=len(_tdf); _w=int(_tdf["win"].sum()); _wr=_w/_n*100
-            _net=float(_tdf["pips"].sum())
-            _gp=_tdf.loc[_tdf["win"],"pips"].sum(); _gl=abs(_tdf.loc[~_tdf["win"],"pips"].sum())
-            _pf=round(_gp/(_gl+1e-9),2)
-            _avg_w=float(_tdf.loc[_tdf["win"],"pips"].mean()) if _w>0 else 0
-            _avg_l=float(_tdf.loc[~_tdf["win"],"pips"].mean()) if (_n-_w)>0 else 0
-            _pk=_tdf["equity"].cummax(); _dd=float((_tdf["equity"]-_pk).min())
-            results[_strat]={"tdf":_tdf,"n":_n,"wr":round(_wr,1),"net":round(_net,1),
-                             "pf":_pf,"avg_w":round(_avg_w,1),"avg_l":round(_avg_l,1),"dd":round(_dd,1)}
-        return results, "ok"
+        if not _trades:
+            return None,None,{},"sin señales desde 2008"
+        _tdf=_pd.DataFrame(_trades); _tdf["equity"]=_tdf["pips"].cumsum()
+        _n=len(_tdf); _w=int(_tdf["win"].sum()); _wr=_w/_n*100; _net=float(_tdf["pips"].sum())
+        _aw=float(_tdf.loc[_tdf["win"],"pips"].mean()) if _w>0 else 0
+        _al=float(_tdf.loc[~_tdf["win"],"pips"].mean()) if (_n-_w)>0 else 0
+        _gp=_tdf.loc[_tdf["win"],"pips"].sum(); _gl=abs(_tdf.loc[~_tdf["win"],"pips"].sum())
+        _pf=round(_gp/(_gl+1e-9),2)
+        _pk=_tdf["equity"].cummax(); _dd=float((_tdf["equity"]-_pk).min())
+        _days=(_tdf["date"].iloc[-1]-_tdf["date"].iloc[0]).days; _wks=max(1,_days/7)
+        return _tdf,_df,{
+            "total":_n,"wins":_w,"winrate":round(_wr,1),"net_pips":round(_net,1),
+            "profit_factor":_pf,"avg_win":round(_aw,1),"avg_loss":round(_al,1),
+            "max_dd":round(_dd,1),"per_week":round(_n/_wks,2),"years":round(_wks/52,1),
+        },"ok"
 
-    with st.spinner("Cargando backtest 2003-hoy (~15 s)..."):
-        _bt08_result, _bt08_err = _run_backtest_2008()
+    with st.spinner("Cargando backtest 2008-hoy (~10 s)..."):
+        _bt08_res, _bt08_df, _bt08_st, _bt08_err = _run_backtest_2008()
 
-    if _bt08_result:
+    if _bt08_res is not None and _bt08_st:
         import plotly.graph_objects as _go08
-        _strat_labels={"A":"🎯 TP fijo 3:1 (sin parciales)","B":"⚡ Parcial 50%@2R→BE→50%@4R","C":"🏆 Parcial 25%@2R→trail→75%@5R"}
-        _strat_colors={"A":"#58a6ff","B":"#3fb950","C":"#f0883e"}
-
-        # Tabla comparativa
-        _cmp_rows=[]
-        for _s,_r in _bt08_result.items():
-            _cmp_rows.append({"Estrategia":_strat_labels[_s],"Trades":_r["n"],
-                              "Win Rate":f"{_r['wr']}%","Pips netos":f"{_r['net']:+.0f}",
-                              "Profit Factor":f"{_r['pf']:.2f}","Avg ganancia":f"{_r['avg_w']:+.0f}p",
-                              "Avg pérdida":f"{_r['avg_l']:+.0f}p","Max DD":f"{_r['dd']:.0f}p"})
-        import pandas as _pd_cmp
-        st.dataframe(_pd_cmp.DataFrame(_cmp_rows), use_container_width=True, hide_index=True)
-
-        # Curvas de equity superpuestas
-        _fig08=_go08.Figure()
-        for _s,_r in _bt08_result.items():
-            _tdf=_r["tdf"]
-            _fig08.add_trace(_go08.Scatter(
-                x=_tdf["date"],y=_tdf["equity"],mode="lines",
-                name=_strat_labels[_s],line=dict(color=_strat_colors[_s],width=2),
-            ))
-        _fig08.add_hline(y=0,line=dict(color="#444",dash="dash",width=1))
-        _fig08.update_layout(
-            title="EUR/USD Diario 2003→Hoy — Comparativa de estrategias de salida (21 años)",
-            xaxis_title="Año",yaxis_title="Pips acumulados",
-            template="plotly_dark",height=420,
-            margin=dict(l=40,r=20,t=55,b=40),
-            legend=dict(orientation="h",yanchor="bottom",y=1.02,xanchor="left",x=0),
+        # Métricas
+        _b8c1,_b8c2,_b8c3,_b8c4,_b8c5,_b8c6 = st.columns(6)
+        _b8c1.metric("Operaciones",  _bt08_st["total"])
+        _b8c2.metric("Win Rate",     f"{_bt08_st['winrate']}%",
+                     delta="bueno" if _bt08_st['winrate']>=55 else "mejorable")
+        _b8c3.metric("Pips netos",   f"{_bt08_st['net_pips']:+.0f}")
+        _b8c4.metric("Profit Factor",f"{_bt08_st['profit_factor']:.2f}",
+                     delta="solido" if _bt08_st['profit_factor']>=1.5 else "bajo")
+        _b8c5.metric("Max Drawdown", f"{_bt08_st['max_dd']:.0f} pips")
+        _b8c6.metric("Señales/sem",  f"{_bt08_st['per_week']:.2f}")
+        _b8ca,_b8cb = st.columns(2)
+        _b8ca.metric("Avg ganancia", f"{_bt08_st['avg_win']:+.1f} pips")
+        _b8cb.metric("Avg pérdida",  f"{_bt08_st['avg_loss']:+.1f} pips")
+        # Curva
+        _clr8 = "limegreen" if _bt08_st["net_pips"]>0 else "tomato"
+        _fig8 = _go08.Figure()
+        _fig8.add_trace(_go08.Scatter(
+            x=_bt08_res["date"], y=_bt08_res["equity"],
+            mode="lines", line=dict(color=_clr8, width=2),
+            fill="tozeroy", fillcolor=f"rgba({'50,205,50' if _bt08_st['net_pips']>0 else '255,99,71'},0.08)",
+        ))
+        _fig8.add_hline(y=0, line=dict(color="#444", dash="dash", width=1))
+        _fig8.update_layout(
+            title="Curva de Equity — Estrategia Definitiva EUR/USD Diario (2008-hoy, 17 años)",
+            xaxis_title="Año", yaxis_title="Pips acumulados",
+            template="plotly_dark", height=350,
+            margin=dict(l=40,r=20,t=50,b=40),
         )
-        st.plotly_chart(_fig08,use_container_width=True)
-
-        # Mejor estrategia
-        _best_s = max(_bt08_result.items(), key=lambda x: x[1]["net"])[0]
-        _br = _bt08_result[_best_s]
-        st.success(
-            f"✅ **Mejor estrategia: {_strat_labels[_best_s]}** — "
-            f"{_br['net']:+.0f} pips netos · {_br['wr']}% win rate · PF {_br['pf']} "
-            f"sobre {_br['n']} operaciones en 21 años"
-        )
+        st.plotly_chart(_fig8, use_container_width=True)
+        # Tabla de operaciones
+        with st.expander("📋 Todas las operaciones desde 2008", expanded=False):
+            _b8show = _bt08_res[["date","dir","entry","sl","tp","pips","win"]].copy()
+            _b8show["date"]  = _b8show["date"].dt.strftime("%Y-%m-%d")
+            _b8show["entry"] = _b8show["entry"].map("{:.5f}".format)
+            _b8show["sl"]    = _b8show["sl"].map("{:.5f}".format)
+            _b8show["tp"]    = _b8show["tp"].map("{:.5f}".format)
+            _b8show["pips"]  = _b8show["pips"].map("{:+.1f}".format)
+            _b8show["win"]   = _b8show["win"].map({True:"✅",False:"❌"})
+            _b8show.columns  = ["Fecha","Dir","Entrada","SL","TP","Pips","Resultado"]
+            st.dataframe(_b8show, use_container_width=True, hide_index=True)
         st.caption(
-            "La estrategia C (25% parcial temprano + 75% corriendo con trailing) maximiza el beneficio "
-            "en tendencias fuertes como 2014-2015 y 2022. Sin slippage ni comisiones."
+            f"EUR/USD Diario 2008→hoy · {_bt08_st['years']:.0f} años · "
+            f"Mismos parámetros validados · Sin slippage ni comisiones."
         )
     else:
         st.warning(f"Backtest 2008 no disponible: {_bt08_err}")
