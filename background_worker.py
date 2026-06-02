@@ -177,11 +177,11 @@ def _cycle() -> None:
     # 6 — Monitor posiciones: TP/SL/BE
     _monitor_positions()
 
-    # 7 — Señal PREMIUM: entra solo cuando TODO se alinea (score ≥ 82, 5+ confluencias)
-    _check_premium_entry(df_1h, signal, price)
+    # 7 — ESTRATEGIA DEFINITIVA: única señal que llega al Telegram
+    _check_definitiva_entry(df_1h, signal, price)
 
-    # 8 — Alertas Telegram por estrategia individual
-    _check_strategy_alerts(df_1h, price)
+    # 8 — (alertas por estrategia desactivadas — solo DEFINITIVA al Telegram)
+    # _check_strategy_alerts(df_1h, price)
 
     # 9 — Telegram horario / urgente
     _telegram_if_due(signal, score)
@@ -807,6 +807,336 @@ _TOP_STRATEGIES = {
     "ema_ribbon", "meta_composite", "precision_be",
     "ema_trend", "supertrend", "rsi_reversion",
 }
+
+
+_DEFINITIVA_COOLDOWN = 8 * 3600   # máximo 3 señales al día
+
+
+def _check_definitiva_entry(df_1h, signal: dict, price: float) -> None:
+    """
+    ESTRATEGIA DEFINITIVA — única señal que llega al Telegram.
+    Combina los mejores filtros de todas las estrategias del sistema.
+
+    REQUISITOS OBLIGATORIOS (hard filters):
+      - Sesión London (7-12 UTC) o NY (12-17 UTC)
+      - ATR ≥ 6 pips (volatilidad suficiente)
+      - EMA ribbon alineado (5>10>20>50 para LONG)
+      - Precio al lado correcto de EMA200
+
+    CONFLUENCIAS SOFT (mínimo 5, score ≥ 70):
+      - MACD crossover reciente (+20)
+      - RSI zona óptima (+15)
+      - Confirmación 4H (+18)
+      - ADX > 22 tendencia fuerte (+15)
+      - Stochastic no sobreextendido (+10)
+      - Volumen institucional (+10)
+      - COT confirma (+10)
+      - Sin noticias alto impacto (+5/-20)
+
+    SALIDA: 25% en TP1 (2:1) → SL a BE → 75% en TP2 (5:1 o swing lejano)
+    """
+    if df_1h is None or df_1h.empty or len(df_1h) < 80 or not price:
+        return
+
+    direction = signal.get("direction")
+    if direction not in ("LONG", "SHORT"):
+        return
+
+    try:
+        import db as _db
+        import pandas as _pd
+        import numpy as _np
+
+        # ── Cooldown ─────────────────────────────────────────────────────────
+        _raw = _db.get_setting("definitiva_last_ts") or "0"
+        try:
+            if time.time() - float(_raw) < _DEFINITIVA_COOLDOWN:
+                return
+        except ValueError:
+            pass
+
+        # ── Indicadores base ─────────────────────────────────────────────────
+        c  = df_1h["Close"]; h = df_1h["High"]; lo = df_1h["Low"]
+        px = float(c.iloc[-1])
+
+        e5   = float(c.ewm(span=5,   adjust=False).mean().iloc[-1])
+        e10  = float(c.ewm(span=10,  adjust=False).mean().iloc[-1])
+        e20  = float(c.ewm(span=20,  adjust=False).mean().iloc[-1])
+        e50  = float(c.ewm(span=50,  adjust=False).mean().iloc[-1])
+        e200 = float(c.ewm(span=200, adjust=False).mean().iloc[-1])
+
+        _tr  = _pd.concat([h-lo,(h-c.shift()).abs(),(lo-c.shift()).abs()],axis=1).max(axis=1)
+        atr      = float(_tr.ewm(span=14, adjust=False).mean().iloc[-1])
+        atr_pips = atr / 0.0001
+
+        _d  = c.diff()
+        _g  = _d.clip(lower=0).ewm(14, adjust=False).mean()
+        _l  = (-_d.clip(upper=0)).ewm(14, adjust=False).mean()
+        rsi = float(100 - 100 / (1 + _g.iloc[-1] / (_l.iloc[-1] + 1e-9)))
+
+        _m12 = c.ewm(12, adjust=False).mean()
+        _m26 = c.ewm(26, adjust=False).mean()
+        _mac = _m12 - _m26
+        _sig = _mac.ewm(9, adjust=False).mean()
+        macd_hist = float((_mac - _sig).iloc[-1])
+        macd_prev = float((_mac - _sig).iloc[-2]) if len(c) > 2 else macd_hist
+
+        _stk = 100*(c - lo.rolling(14).min()) / (h.rolling(14).max() - lo.rolling(14).min() + 1e-9)
+        stk  = float(_stk.iloc[-1])
+
+        # ADX(14)
+        _pdm = h.diff().clip(lower=0); _ndm = (-lo.diff()).clip(lower=0)
+        _pdm2 = _pdm.where(_pdm > _ndm, 0.0); _ndm2 = _ndm.where(_ndm > _pdm, 0.0)
+        _pdi = 100 * _pdm2.ewm(14, adjust=False).mean() / (_tr.ewm(14, adjust=False).mean() + 1e-9)
+        _ndi = 100 * _ndm2.ewm(14, adjust=False).mean() / (_tr.ewm(14, adjust=False).mean() + 1e-9)
+        _dx  = 100 * abs(_pdi - _ndi) / (_pdi + _ndi + 1e-9)
+        adx  = float(_dx.ewm(14, adjust=False).mean().iloc[-1])
+
+        # 4H resample
+        try:
+            df4h = df_1h.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna()
+            c4   = df4h["Close"]
+            e21_4h = float(c4.ewm(21, adjust=False).mean().iloc[-1])
+            e50_4h = float(c4.ewm(50, adjust=False).mean().iloc[-1])
+            px4h   = float(c4.iloc[-1])
+            _d4    = c4.diff()
+            rsi_4h = float(100 - 100/(1+_d4.clip(lower=0).ewm(14,adjust=False).mean().iloc[-1]/
+                                        ((-_d4.clip(upper=0)).ewm(14,adjust=False).mean().iloc[-1]+1e-9)))
+            has_4h = True
+        except Exception:
+            has_4h = False; px4h = e21_4h = e50_4h = rsi_4h = 0
+
+        # Volumen
+        try:
+            from backend.indicators import _ensure_volume
+            _vol   = _ensure_volume(df_1h)
+            vol_r  = float(_vol.iloc[-1]) / (float(_vol.rolling(20).mean().iloc[-1]) + 1e-9)
+        except Exception:
+            vol_r = 1.0
+
+        # COT
+        cot_bias = "neutral"
+        try:
+            import json as _j
+            _cr = _db.get_setting("cot_cache")
+            if _cr: cot_bias = _j.loads(_cr).get("bias", "neutral")
+        except Exception:
+            pass
+
+        # Noticias
+        news_risk = "low"
+        try:
+            import json as _jn
+            _cal = _db.get_setting("calendar_cache")
+            if _cal:
+                _now_utc = datetime.now(timezone.utc)
+                for _ev in _jn.loads(_cal):
+                    if _ev.get("impact","").upper() == "HIGH":
+                        try:
+                            _et   = datetime.fromisoformat(_ev["date"].replace("Z","+00:00"))
+                            _mins = abs((_et - _now_utc).total_seconds() / 60)
+                            if _mins < 60:   news_risk = "high";   break
+                            elif _mins < 120: news_risk = "medium"
+                        except Exception: pass
+        except Exception:
+            pass
+
+        # ── HARD FILTERS ─────────────────────────────────────────────────────
+        bull = direction == "LONG"
+        h_utc = datetime.now(timezone.utc).hour
+        in_session = (7 <= h_utc < 12) or (12 <= h_utc < 17)
+        if not in_session:
+            return   # Solo London y NY
+
+        if atr_pips < 6:
+            return   # Volatilidad insuficiente
+
+        ribbon_ok = (e5>e10>e20>e50) if bull else (e5<e10<e20<e50)
+        if not ribbon_ok:
+            return   # EMA ribbon debe estar PERFECTAMENTE alineado
+
+        macro_ok = (px > e200) if bull else (px < e200)
+        if not macro_ok:
+            return   # No operar contra la macro EMA200
+
+        if news_risk == "high":
+            return   # Sin noticias de alto impacto
+
+        # ── CONFLUENCIAS SOFT ─────────────────────────────────────────────────
+        confs = []; score = 0
+
+        # 1. MACD crossover o confirmación
+        if bull:
+            if macd_hist > 0 and macd_prev <= 0:
+                confs.append("⚡ MACD cruzó AL ALZA — momentum fresco"); score += 20
+            elif macd_hist > 0:
+                confs.append("⚡ MACD positivo — momentum alcista");      score += 12
+        else:
+            if macd_hist < 0 and macd_prev >= 0:
+                confs.append("⚡ MACD cruzó A LA BAJA — momentum fresco"); score += 20
+            elif macd_hist < 0:
+                confs.append("⚡ MACD negativo — momentum bajista");       score += 12
+
+        # 2. RSI zona óptima
+        if bull:
+            if 48 <= rsi <= 63: confs.append(f"📈 RSI {rsi:.0f} zona ALCISTA limpia"); score += 15
+            elif 40 <= rsi < 48: confs.append(f"📈 RSI {rsi:.0f} pullback limpio");    score += 9
+        else:
+            if 37 <= rsi <= 52: confs.append(f"📉 RSI {rsi:.0f} zona BAJISTA limpia"); score += 15
+            elif 52 < rsi <= 60: confs.append(f"📉 RSI {rsi:.0f} rebote limpio");      score += 9
+
+        # 3. Confirmación 4H
+        if has_4h:
+            if bull and px4h > e21_4h > e50_4h and 40 <= rsi_4h <= 72:
+                confs.append("🕯 4H ALCISTA confirmado (EMA+RSI)"); score += 18
+            elif bull and px4h > e50_4h:
+                confs.append("🕯 4H — precio sobre EMA50");         score += 10
+            elif not bull and px4h < e21_4h < e50_4h and 28 <= rsi_4h <= 60:
+                confs.append("🕯 4H BAJISTA confirmado (EMA+RSI)"); score += 18
+            elif not bull and px4h < e50_4h:
+                confs.append("🕯 4H — precio bajo EMA50");          score += 10
+
+        # 4. ADX — fuerza de tendencia
+        if adx >= 28: confs.append(f"💪 ADX {adx:.0f} — tendencia FUERTE"); score += 15
+        elif adx >= 22: confs.append(f"✅ ADX {adx:.0f} — tendencia confirmada"); score += 9
+
+        # 5. Stochastic no sobreextendido
+        if bull and stk < 68:
+            confs.append(f"📉 Stoch {stk:.0f} — entrada válida sin sobrecompra"); score += 10
+        elif not bull and stk > 32:
+            confs.append(f"📈 Stoch {stk:.0f} — entrada válida sin sobreventa"); score += 10
+
+        # 6. Volumen institucional
+        if vol_r >= 1.8:
+            confs.append(f"📊 Volumen {vol_r:.1f}x — actividad institucional ALTA"); score += 10
+        elif vol_r >= 1.3:
+            confs.append(f"📊 Volumen {vol_r:.1f}x — actividad sobre media");       score += 6
+
+        # 7. COT
+        if (bull and cot_bias=="bullish") or (not bull and cot_bias=="bearish"):
+            confs.append("🏦 COT — institucionales en el mismo lado"); score += 10
+        elif cot_bias == "neutral":
+            score += 2
+
+        # 8. Sesión (ya pasó hard filter, bonus por sesión premium)
+        if 8 <= h_utc < 12 or 13 <= h_utc < 16:
+            confs.append(f"🌍 Sesión {'London' if h_utc < 12 else 'NY'} peak — máxima liquidez"); score += 5
+
+        # ── UMBRAL DEFINITIVA ─────────────────────────────────────────────────
+        _log.info("DEFINITIVA check: dir=%s score=%d conf=%d adx=%.0f",
+                  direction, score, len(confs), adx)
+
+        if score < 70 or len(confs) < 5:
+            return   # No cumple el estándar DEFINITIVA
+
+        # ── NIVELES: SL 1.0×ATR, TP1 25% a 2:1, TP2 75% a swing ≥5:1 ──────
+        sl, tp1, tp2, tp3, sl_pips, tp1_pips, tp2_pips, tp3_pips, \
+            rr1, rr2, rr3, liq_lvl, liq_pips, liq_desc = \
+            _smart_tpsl(df_1h, direction, px, atr * 0.85)  # SL 0.85×ATR (más ajustado)
+
+        # Calcular TP2 a ~5×SL para capturar la mayor parte del movimiento
+        _sign = 1 if bull else -1
+        _sl_d = abs(px - sl)
+        _tp2_def = round(px + _sign * _sl_d * 5.0, 5)
+        _tp2_pips_def = round(_sl_d * 5.0 / 0.0001, 0)
+        # Usar el que sea mayor (swing o 5×SL)
+        if bull:
+            tp2 = max(tp2, _tp2_def)
+        else:
+            tp2 = min(tp2, _tp2_def)
+        tp2_pips = round(abs(tp2 - px) / 0.0001, 0)
+        rr2 = round(tp2_pips / sl_pips, 1)
+
+        # ── RIESGO ADAPTATIVO ────────────────────────────────────────────────
+        risk_pct = "0.5%"
+        for _min_sc, _r, _n in _RISK_TABLE:
+            if score >= _min_sc: risk_pct = _r; break
+        try:
+            _wr = float(_db.get_setting("adaptive_win_rate") or "0")
+            if _wr >= 0.60:
+                _pct_f = float(risk_pct.replace("%","")) * 1.2
+                risk_pct = f"{min(_pct_f,1.5):.2f}%"
+            elif _wr > 0 and _wr < 0.38:
+                _pct_f = float(risk_pct.replace("%","")) * 0.6
+                risk_pct = f"{max(_pct_f,0.25):.2f}%"
+        except Exception:
+            pass
+        _rf = float(risk_pct.replace("%",""))/100
+        _ex5k=int(5000*_rf); _ex10k=int(10000*_rf); _ex20k=int(20000*_rf)
+
+        # ── NARRATIVA ────────────────────────────────────────────────────────
+        why = _generate_why_narrative(confs, direction, signal.get("regime",""),
+                                      rsi, atr_pips, rsi_4h if has_4h else 50.0, has_4h)
+
+        # ── MENSAJE TELEGRAM ─────────────────────────────────────────────────
+        dir_e = "🟢 LONG" if bull else "🔴 SHORT"
+        now_s = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        conf_b = "\n".join(f"  {cf}" for cf in confs)
+
+        if liq_lvl is not None:
+            liq_s = (f"🎯 *¿HACIA QUÉ LIQUIDEZ VA?*\n"
+                     f"Pool de liquidez en {liq_desc}\n"
+                     f"  ↳ Stops {'de shorts' if bull else 'de longs'} acumulados ahí son el imán.\n\n")
+        else:
+            liq_s = ""
+
+        msg = (
+            f"🏆 *ESTRATEGIA DEFINITIVA — SMC Pro*\n"
+            f"══════════════════════════════\n"
+            f"*{dir_e} EUR/USD*  |  Score: *{score}/100*  ·  {len(confs)} confluencias\n\n"
+
+            f"💡 *¿POR QUÉ AHORA?*\n{why}\n\n"
+
+            f"{liq_s}"
+
+            f"💰 *NIVELES DE ENTRADA*\n"
+            f"┌ Entrada:      `{px:.5f}`\n"
+            f"├ Stop Loss:    `{sl:.5f}`  (-{sl_pips:.0f} pips)\n"
+            f"├ TP1  25%:     `{tp1:.5f}`  (+{tp1_pips:.0f}p)  R:R 1:{rr1}\n"
+            f"└ TP2  75%:     `{tp2:.5f}`  (+{tp2_pips:.0f}p)  R:R 1:{rr2}\n\n"
+
+            f"📋 *PLAN DE SALIDA DEFINITIVA*\n"
+            f"  1️⃣ Al tocar TP1 → cerrar *25%*, SL → BE+3pips\n"
+            f"  2️⃣ Dejar correr *75%* hasta TP2 o swing lejano\n"
+            f"  3️⃣ Si en 12h no avanza → cerrar todo al precio actual\n\n"
+
+            f"💼 *RIESGO RECOMENDADO: {risk_pct}*\n"
+            f"  ↳ €5K→€{_ex5k} | €10K→€{_ex10k} | €20K→€{_ex20k}\n"
+            f"  ↳ SL en {sl_pips:.0f} pips = {round(sl_pips*_rf/sl_pips*100,2)}% de cuenta\n\n"
+
+            f"⚡ *CONFLUENCIAS*\n{conf_b}\n\n"
+
+            f"📌 ATR: {atr_pips:.1f}p | RSI: {rsi:.0f} | ADX: {adx:.0f} | "
+            f"Vol: {vol_r:.1f}x | COT: {cot_bias.upper()}\n"
+            f"⏰ {now_s}\n"
+            f"_Confirma en gráfico · Respeta siempre el SL_"
+        )
+
+        if _send_tg(msg):
+            _db.set_setting("definitiva_last_ts", str(time.time()))
+            # Guardar en historial de señales
+            try:
+                _db.save_metric(name="tg_signal_log", value=float(score), context={
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "strategy": "DEFINITIVA",
+                    "direction": direction, "entry": round(px,5),
+                    "sl": round(sl,5), "tp1": round(tp1,5),
+                    "tp2": round(tp2,5), "tp3": round(tp3,5),
+                    "sl_pips": int(sl_pips), "tp1_pips": int(tp1_pips),
+                    "tp2_pips": int(tp2_pips), "score": score,
+                    "confluences": len(confs), "atr_pips": round(atr_pips,1),
+                    "risk_pct": risk_pct, "rsi": round(rsi,1),
+                    "adx": round(adx,1), "liq_target": liq_desc,
+                    "exit_plan": "25%@TP1→BE / 75%@TP2",
+                })
+            except Exception:
+                pass
+            _log.info("DEFINITIVA SENT: %s score=%d conf=%d", direction, score, len(confs))
+        else:
+            _log.warning("DEFINITIVA: fallo al enviar Telegram")
+
+    except Exception as _de:
+        _log.warning("_check_definitiva_entry error: %s", _de)
 
 
 def _smart_tpsl(df, direction: str, px: float, atr: float):
