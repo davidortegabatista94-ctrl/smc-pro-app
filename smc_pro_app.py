@@ -6013,7 +6013,7 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
     # ── BACKTEST PREMIUM desde 2020 ──────────────────────────────────────────
     st.markdown("---")
-    st.markdown("### 📊 Backtest del filtro premium (EUR/USD Diario — desde 2020)")
+    st.markdown("### 📊 Backtest Estrategia Definitiva (EUR/USD Diario — desde 2003)")
 
     @st.cache_data(ttl=86400, show_spinner=False)
     def _run_ribbon_backtest():
