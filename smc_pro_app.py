@@ -2527,20 +2527,6 @@ else:
 
         st.stop()
 
-    # ── Auto-refresh cada 3 minutos — 100% nativo Streamlit, sin paquetes ──────
-    @st.fragment(run_every=30)
-    def _trading_autorefresh():
-        _last = st.session_state.get("last_analysis_time")
-        _now  = time.time()
-        _elapsed = (_now - float(_last)) if _last else 999
-        if _elapsed >= 175:
-            st.rerun()
-        else:
-            _rem = max(0, int(180 - _elapsed))
-            st.caption(f"⏱ Próximo análisis en {_rem}s")
-
-    _trading_autorefresh()
-
     # ── Cargar credenciales MT5 del usuario desde DB (solo una vez) ──────────
     _mt5_load_key = f"mt5_loaded_{current_user}"
     if _mt5_load_key not in st.session_state and _DB_OK:
@@ -3271,7 +3257,8 @@ if not run_fresh_analysis and not st.session_state.analysis_executed:
 
 if run_fresh_analysis:
     st.session_state.last_analysis_time = time.time()
-    st.session_state.analysis_executed = True
+    st.session_state.analysis_executed  = True
+    st.session_state.last_refresh_str   = datetime.utcnow().strftime("%H:%M:%S UTC")
 
 # Valores por defecto para evitar errores cuando no se ha analizado aún
 signal      = {}
@@ -6305,5 +6292,19 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
             "recarga la página en 30 segundos."
         )
 
-st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
+_refresh_str = st.session_state.get("last_refresh_str", "—")
+st.caption(f"🔄 Último análisis: {_refresh_str}  |  ⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
+# ── Auto-refresh cada 3 min — definido a nivel módulo para que Streamlit
+#    lo registre correctamente. Solo actúa cuando app_mode == "trading".
+@st.fragment(run_every=30)
+def _trading_autorefresh():
+    if st.session_state.get("app_mode") != "trading":
+        return
+    _last = st.session_state.get("last_analysis_time")
+    _now  = time.time()
+    _elapsed = (_now - float(_last)) if _last else 999
+    if _elapsed >= 175:
+        st.rerun()
+
+_trading_autorefresh()
