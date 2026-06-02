@@ -809,6 +809,116 @@ _TOP_STRATEGIES = {
 }
 
 
+def _smart_tpsl(df, direction: str, px: float, atr: float):
+    """
+    Calcula SL y tres TPs usando pools de liquidez como objetivos naturales.
+    Garantiza mínimo 1:2 en TP1. Extiende a 1:3 o más si hay liquidez más lejana.
+    Retorna: sl, tp1, tp2, tp3, sl_pips, tp1_pips, tp2_pips, tp3_pips,
+             rr1, rr2, rr3, liq_lvl, liq_pips, liq_desc
+    """
+    import numpy as _np
+    pip  = 0.0001
+    bull = direction == "LONG"
+    sign = 1 if bull else -1
+
+    # SL: 1.2×ATR (más ajustado que 1.5 → mejora R:R sin peligrar)
+    sl_dist = atr * 1.2
+    sl      = round(px - sign * sl_dist, 5)
+    sl_pips = sl_dist / pip
+
+    # Buscar todos los pivots (swing highs/lows) en las últimas 100 velas
+    h  = df["High"].values
+    lo = df["Low"].values
+    n  = len(h)
+    liq_levels = []
+    for i in range(2, min(n - 1, 100)):
+        idx = n - 1 - i
+        if idx < 1:
+            break
+        if bull:
+            if h[idx] > h[idx - 1] and h[idx] > h[idx + 1] and h[idx] > px:
+                liq_levels.append(h[idx])
+        else:
+            if lo[idx] < lo[idx - 1] and lo[idx] < lo[idx + 1] and lo[idx] < px:
+                liq_levels.append(lo[idx])
+
+    # Ordenar de más cercano a más lejano
+    liq_levels = sorted(set(round(l, 5) for l in liq_levels),
+                        key=lambda l: abs(l - px))
+
+    # TP1: primer nivel de liquidez con R:R ≥ 2.0; si no existe → 2×SL
+    min_tp1 = px + sign * sl_dist * 2.0  # mínimo 1:2
+    tp1 = round(min_tp1, 5)
+    liq_tp1 = None
+    for lvl in liq_levels:
+        dist = abs(lvl - px)
+        rr   = dist / sl_dist
+        if rr >= 2.0:
+            liq_tp1 = lvl
+            tp1 = round(lvl, 5)
+            break
+
+    # TP2: siguiente nivel de liquidez con R:R ≥ 3.0; si no → 3×SL
+    min_tp2 = px + sign * sl_dist * 3.0
+    tp2 = round(min_tp2, 5)
+    for lvl in liq_levels:
+        dist = abs(lvl - px)
+        rr   = dist / sl_dist
+        if rr >= 3.0 and ((bull and lvl > tp1) or (not bull and lvl < tp1)):
+            tp2 = round(lvl, 5)
+            break
+
+    # TP3: nivel de liquidez lejano ≥ 4.5× o fijo
+    min_tp3 = px + sign * sl_dist * 4.5
+    tp3 = round(min_tp3, 5)
+    for lvl in liq_levels:
+        dist = abs(lvl - px)
+        rr   = dist / sl_dist
+        if rr >= 4.5 and ((bull and lvl > tp2) or (not bull and lvl < tp2)):
+            tp3 = round(lvl, 5)
+            break
+
+    tp1_pips = abs(tp1 - px) / pip
+    tp2_pips = abs(tp2 - px) / pip
+    tp3_pips = abs(tp3 - px) / pip
+    rr1 = round(tp1_pips / sl_pips, 1)
+    rr2 = round(tp2_pips / sl_pips, 1)
+    rr3 = round(tp3_pips / sl_pips, 1)
+
+    # Descripción del nivel de liquidez objetivo principal
+    if liq_tp1:
+        liq_pips = round(abs(liq_tp1 - px) / pip, 0)
+        liq_desc = f"`{liq_tp1:.5f}` ({'+' if bull else '-'}{liq_pips:.0f} pips)"
+        liq_lvl  = liq_tp1
+    else:
+        liq_pips = round(tp1_pips, 0)
+        liq_desc = f"`{tp1:.5f}` ({'+' if bull else '-'}{liq_pips:.0f} pips)"
+        liq_lvl  = tp1
+
+    return (sl, tp1, tp2, tp3,
+            round(sl_pips, 0), round(tp1_pips, 0), round(tp2_pips, 0), round(tp3_pips, 0),
+            rr1, rr2, rr3, liq_lvl, liq_pips, liq_desc)
+
+
+def _update_adaptive_params(signal_log: list) -> None:
+    """
+    Calcula win-rate de las últimas 20 señales cerradas y guarda en DB
+    para que el sistema ajuste el tamaño de posición dinámicamente.
+    """
+    try:
+        import db as _db
+        closed = [s for s in signal_log if s.get("outcome") in ("TP1", "TP2", "SL")]
+        if len(closed) < 5:
+            return
+        recent = closed[-20:]
+        wins   = sum(1 for s in recent if s.get("outcome") in ("TP1", "TP2"))
+        wrate  = wins / len(recent)
+        _db.set_setting("adaptive_win_rate", str(round(wrate, 4)))
+        _log.info("Adaptive win-rate actualizado: %.1f%% (%d señales)", wrate * 100, len(recent))
+    except Exception as _ae:
+        _log.debug("adaptive params error: %s", _ae)
+
+
 def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
     """
     Motor de señales premium: evalúa 10 capas de confluencia.
@@ -1071,28 +1181,12 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
         if news_risk == "high" and score < 90:
             return   # Noticias + señal mediocre = no tocar
 
-        # ── NIVELES DE LA OPERACIÓN ───────────────────────────────────────
-        sl_dist  = atr * 1.5          # SL conservador 1.5×ATR
-        tp1_dist = atr * 1.0          # TP1 rápido para asegurar parcial
-        tp2_dist = atr * 2.0          # TP2 objetivo principal
-        tp3_dist = atr * 3.5          # TP3 para dejar correr
+        # ── NIVELES INTELIGENTES: SL + TP dinámico por liquidez (mín 1:2) ──
+        sl, tp1, tp2, tp3, sl_pips, tp1_pips, tp2_pips, tp3_pips, \
+            rr1, rr2, rr3, liq_lvl, liq_pips, liq_desc = \
+            _smart_tpsl(df_1h, direction, px, atr)
 
-        sl_pips  = round(sl_dist  / 0.0001, 0)
-        tp1_pips = round(tp1_dist / 0.0001, 0)
-        tp2_pips = round(tp2_dist / 0.0001, 0)
-        tp3_pips = round(tp3_dist / 0.0001, 0)
-
-        sign = 1 if bull else -1
-        sl   = round(px - sign * sl_dist,  5)
-        tp1  = round(px + sign * tp1_dist, 5)
-        tp2  = round(px + sign * tp2_dist, 5)
-        tp3  = round(px + sign * tp3_dist, 5)
-
-        rr1 = round(tp1_pips / sl_pips, 1)
-        rr2 = round(tp2_pips / sl_pips, 1)
-        rr3 = round(tp3_pips / sl_pips, 1)
-
-        # ── GESTIÓN DEL RIESGO según calidad ─────────────────────────────
+        # ── GESTIÓN DEL RIESGO según calidad + win-rate histórico ─────────
         risk_pct = "0.5%"
         risk_note = "señal buena — empieza conservador"
         for _min_score, _r, _n in _RISK_TABLE:
@@ -1101,13 +1195,27 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
                 risk_note = _n
                 break
 
+        # Ajustar por win-rate reciente (cargado de DB)
+        try:
+            _wrate = float(_db.get_setting("adaptive_win_rate") or "0")
+            if _wrate > 0:
+                if _wrate >= 0.65 and news_risk == "low":
+                    _pct_f = float(risk_pct.replace("%","")) * 1.25
+                    risk_pct = f"{min(_pct_f, 1.5):.2f}%".replace(".00","").replace("0.","0.")
+                    risk_note += " ↑ boost por win-rate alto"
+                elif _wrate < 0.40:
+                    _pct_f = float(risk_pct.replace("%","")) * 0.5
+                    risk_pct = f"{max(_pct_f, 0.25):.2f}%"
+                    risk_note += " ↓ reducido por rachaola negativa"
+        except Exception:
+            pass
+
         # Ajustar si hay noticia cercana
         if news_risk == "high":
             risk_pct = "0.25%"
             risk_note = "REDUCIDO por noticia próxima"
 
-        # ── LIQUIDEZ OBJETIVO ─────────────────────────────────────────────
-        liq_lvl, liq_pips, liq_desc = _find_liquidity_target(df_1h, direction)
+        # ── LIQUIDEZ OBJETIVO (ya calculada en _smart_tpsl) ───────────────
 
         # ── NARRATIVA DEL POR QUÉ ─────────────────────────────────────────
         why_text = _generate_why_narrative(

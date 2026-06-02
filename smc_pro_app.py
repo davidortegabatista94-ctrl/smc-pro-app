@@ -6019,7 +6019,12 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
     @st.cache_data(ttl=86400, show_spinner=False)
     def _run_premium_backtest_2020():
-        """Simula el filtro 7 capas sobre velas diarias EUR/USD desde 2020."""
+        """
+        Backtest EUR/USD desde 2020 con:
+        - TP/SL dinámico: SL=1.2×ATR, TP1 en primer swing ≥1:2, TP2 en swing ≥1:3
+        - Gestión parcial: cierra 50% en TP1, mueve SL a BE, deja 50% correr a TP2
+        - Optimización automática de parámetros por grid search
+        """
         import yfinance as _yf
         import numpy as _np
         import pandas as _pd
@@ -6037,188 +6042,172 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
         if isinstance(_df.columns, _pd.MultiIndex):
             _df.columns = _df.columns.get_level_values(0)
-
-        # Normalizar nombres de columnas
         _df.columns = [str(c).strip().capitalize() for c in _df.columns]
-        _needed = [col for col in ["Open", "High", "Low", "Close"] if col in _df.columns]
+        _needed = [c for c in ["Open", "High", "Low", "Close"] if c in _df.columns]
         if len(_needed) < 4:
             return None, None, {}, "columnas OHLC no encontradas"
 
-        _df = _df[_needed].copy()
-        _df = _df.dropna()
-
-        # Quitar tz para evitar problemas de comparación
+        _df = _df[_needed].dropna().copy()
         if _df.index.tz is not None:
             _df.index = _df.index.tz_localize(None)
 
-        c  = _df["Close"]
-        h  = _df["High"]
-        lo = _df["Low"]
+        c = _df["Close"]; h = _df["High"]; lo = _df["Low"]
 
-        # EMAs
+        # Indicadores
         _df["ema5"]  = c.ewm(span=5,  adjust=False).mean()
         _df["ema10"] = c.ewm(span=10, adjust=False).mean()
         _df["ema20"] = c.ewm(span=20, adjust=False).mean()
         _df["ema50"] = c.ewm(span=50, adjust=False).mean()
-
-        # ATR(14) — en velas diarias EUR/USD suele ser 60-120 pips
-        _prev_c = c.shift(1)
-        _tr = _pd.concat([
-            h - lo,
-            (h - _prev_c).abs(),
-            (lo - _prev_c).abs(),
-        ], axis=1).max(axis=1)
-        _df["atr"] = _tr.ewm(span=14, adjust=False).mean()
-
-        # RSI(14)
-        _delta = c.diff()
-        _gain  = _delta.clip(lower=0)
-        _loss  = (-_delta).clip(lower=0)
-        _avg_g = _gain.ewm(span=14, adjust=False).mean()
-        _avg_l = _loss.ewm(span=14, adjust=False).mean()
-        _rs    = _avg_g / _avg_l.replace(0, _np.nan)
-        _df["rsi"] = 100 - 100 / (1 + _rs)
-
-        # MACD (12/26/9)
-        _ema12 = c.ewm(span=12, adjust=False).mean()
-        _ema26 = c.ewm(span=26, adjust=False).mean()
-        _macd  = _ema12 - _ema26
-        _df["macd_hist"] = _macd - _macd.ewm(span=9, adjust=False).mean()
-
+        _df["ema200"]= c.ewm(span=200,adjust=False).mean()
+        _pc = c.shift(1)
+        _df["atr"]   = _pd.concat([h-lo, (h-_pc).abs(), (lo-_pc).abs()], axis=1).max(axis=1).ewm(span=14, adjust=False).mean()
+        _d  = c.diff()
+        _df["rsi"]   = 100 - 100/(1+_d.clip(lower=0).ewm(14,adjust=False).mean()/(-_d.clip(upper=0)).ewm(14,adjust=False).mean().replace(0,_np.nan))
+        _m  = c.ewm(12,adjust=False).mean()-c.ewm(26,adjust=False).mean()
+        _df["macd_hist"] = _m - _m.ewm(9,adjust=False).mean()
+        # Stochastic(14)
+        _df["stk"] = 100*(_df["Close"]-lo.rolling(14).min())/(h.rolling(14).max()-lo.rolling(14).min()+1e-9)
         _df = _df.dropna()
 
-        # ── Filtros vectorizados ──────────────────────────────────────────────
-        _bull_align  = (_df["ema5"] > _df["ema10"]) & \
-                       (_df["ema10"] > _df["ema20"]) & \
-                       (_df["ema20"] > _df["ema50"])
-        _bear_align  = (_df["ema5"] < _df["ema10"]) & \
-                       (_df["ema10"] < _df["ema20"]) & \
-                       (_df["ema20"] < _df["ema50"])
-
-        # ATR diario ≥ 40 pips  (escala daily: ~0.0040)
-        _atr_ok      = _df["atr"] >= 0.0040
-
-        _rsi_long    = (_df["rsi"] >= 45) & (_df["rsi"] <= 68)
-        _rsi_short   = (_df["rsi"] >= 32) & (_df["rsi"] <= 55)
-
-        _macd_bull   = _df["macd_hist"] > 0
-        _macd_bear   = _df["macd_hist"] < 0
-        _above_ema50 = _df["Close"] > _df["ema50"]
-        _below_ema50 = _df["Close"] < _df["ema50"]
-
-        # Score 0-90 (sin filtro sesión en daily; 6 condiciones × peso)
-        _score_l = (
-            _bull_align.astype(int)  * 25 +
-            _atr_ok.astype(int)      * 15 +
-            _rsi_long.astype(int)    * 20 +
-            _macd_bull.astype(int)   * 20 +
-            _above_ema50.astype(int) * 10
-        )
-        _score_s = (
-            _bear_align.astype(int)  * 25 +
-            _atr_ok.astype(int)      * 15 +
-            _rsi_short.astype(int)   * 20 +
-            _macd_bear.astype(int)   * 20 +
-            _below_ema50.astype(int) * 10
-        )
-
-        _cons_l = (_bull_align.astype(int) + _rsi_long.astype(int) +
-                   _macd_bull.astype(int)  + _above_ema50.astype(int) +
-                   _atr_ok.astype(int))
-        _cons_s = (_bear_align.astype(int) + _rsi_short.astype(int) +
-                   _macd_bear.astype(int)  + _below_ema50.astype(int) +
-                   _atr_ok.astype(int))
-
-        # Umbral equivalente: score ≥ 70 con daily (5 condiciones disponibles)
-        _long_signal  = (_score_l >= 70) & (_cons_l >= 4)
-        _short_signal = (_score_s >= 70) & (_cons_s >= 4)
-
-        # ── Simulación de operaciones ─────────────────────────────────────────
-        _trades = []
-        _cooldown_bars = 3      # 3 días entre señales
-        _exit_window   = 10     # max 10 días para cerrar
-        _last_bar      = -_cooldown_bars
-
-        for _i in range(50, len(_df)):
-            if _i - _last_bar < _cooldown_bars:
-                continue
-
-            _row   = _df.iloc[_i]
-            _entry = float(_row["Close"])
-            _atr_v = float(_row["atr"])
-            _sl_d  = _atr_v * 1.5
-            _tp_d  = _atr_v * 2.5
-
-            if _long_signal.iloc[_i]:
-                _dir = "LONG"
-                _sl  = _entry - _sl_d
-                _tp  = _entry + _tp_d
-            elif _short_signal.iloc[_i]:
-                _dir = "SHORT"
-                _sl  = _entry + _sl_d
-                _tp  = _entry - _tp_d
-            else:
-                continue
-
-            _hit = False
-            for _j in range(_i + 1, min(_i + _exit_window + 1, len(_df))):
-                _fh = float(_df["High"].iloc[_j])
-                _fl = float(_df["Low"].iloc[_j])
-                if _dir == "LONG":
-                    if _fl <= _sl:
-                        _pips = -_sl_d / 0.0001; _hit = True; break
-                    if _fh >= _tp:
-                        _pips =  _tp_d / 0.0001; _hit = True; break
+        def _find_swing_targets(arr_h, arr_lo, entry, direction, atr_v, lookback=60):
+            """Encuentra pivots swing como targets naturales con mínimo 1:2."""
+            bull = direction == "LONG"
+            sl_d = atr_v * 1.2
+            candidates = []
+            n = len(arr_h)
+            for k in range(2, min(lookback, n-1)):
+                if bull:
+                    if arr_h[k] > arr_h[k-1] and arr_h[k] > arr_h[k+1] and arr_h[k] > entry:
+                        candidates.append(arr_h[k])
                 else:
-                    if _fh >= _sl:
-                        _pips = -_sl_d / 0.0001; _hit = True; break
-                    if _fl <= _tp:
-                        _pips =  _tp_d / 0.0001; _hit = True; break
+                    if arr_lo[k] < arr_lo[k-1] and arr_lo[k] < arr_lo[k+1] and arr_lo[k] < entry:
+                        candidates.append(arr_lo[k])
+            candidates = sorted(set(round(x,5) for x in candidates),
+                                key=lambda x: abs(x-entry))
+            min_tp1 = entry + (1 if bull else -1)*sl_d*2
+            tp1 = round(min_tp1, 5)
+            for lvl in candidates:
+                if abs(lvl-entry)/sl_d >= 2.0:
+                    tp1 = round(lvl, 5); break
+            tp2 = round(entry + (1 if bull else -1)*sl_d*3, 5)
+            for lvl in candidates:
+                if abs(lvl-entry)/sl_d >= 3.0 and ((bull and lvl>tp1) or (not bull and lvl<tp1)):
+                    tp2 = round(lvl, 5); break
+            return tp1, tp2, sl_d
 
-            if not _hit:
-                _close_x = float(_df["Close"].iloc[min(_i + _exit_window, len(_df) - 1)])
-                _pips = ((_close_x - _entry) if _dir == "LONG" else
-                         (_entry - _close_x)) / 0.0001
+        def _simulate(score_thr, min_cons, cooldown, sl_mult=1.2):
+            """Simula con parámetros dados. Retorna lista de trades."""
+            _bull = (_df["ema5"]>_df["ema10"])&(_df["ema10"]>_df["ema20"])&(_df["ema20"]>_df["ema50"])
+            _bear = (_df["ema5"]<_df["ema10"])&(_df["ema10"]<_df["ema20"])&(_df["ema20"]<_df["ema50"])
+            _aok  = _df["atr"] >= 0.0035
+            _rl   = (_df["rsi"]>=45)&(_df["rsi"]<=70)
+            _rs   = (_df["rsi"]>=30)&(_df["rsi"]<=55)
+            _mb   = _df["macd_hist"]>0; _ms = _df["macd_hist"]<0
+            _ae   = _df["Close"]>_df["ema50"]; _be = _df["Close"]<_df["ema50"]
+            _mac  = _df["Close"]>_df["ema200"]; _mbc = _df["Close"]<_df["ema200"]
+            _stbl = _df["stk"]<75; _stbs = _df["stk"]>25
 
-            _trades.append({
-                "date":  _df.index[_i],
-                "dir":   _dir,
-                "entry": _entry,
-                "sl":    round(_sl, 5),
-                "tp":    round(_tp, 5),
-                "pips":  round(_pips, 1),
-                "win":   _pips > 0,
-            })
-            _last_bar = _i
+            _sc_l = (_bull.astype(int)*25+_aok.astype(int)*15+_rl.astype(int)*20+
+                     _mb.astype(int)*20+_ae.astype(int)*10+_mac.astype(int)*10)
+            _sc_s = (_bear.astype(int)*25+_aok.astype(int)*15+_rs.astype(int)*20+
+                     _ms.astype(int)*20+_be.astype(int)*10+_mbc.astype(int)*10)
+            _co_l = (_bull.astype(int)+_rl.astype(int)+_mb.astype(int)+_ae.astype(int)+_aok.astype(int)+_stbl.astype(int))
+            _co_s = (_bear.astype(int)+_rs.astype(int)+_ms.astype(int)+_be.astype(int)+_aok.astype(int)+_stbs.astype(int))
+            _ls = (_sc_l>=score_thr)&(_co_l>=min_cons)
+            _ss = (_sc_s>=score_thr)&(_co_s>=min_cons)
 
-        if not _trades:
-            return None, None, {}, "sin señales"
+            _trades=[]; _last=-cooldown; _h=_df["High"].values; _lo=_df["Low"].values
+            for _i in range(60, len(_df)):
+                if _i-_last < cooldown: continue
+                _row=_df.iloc[_i]; _entry=float(_row["Close"]); _atv=float(_row["atr"])
+                if _ls.iloc[_i]: _dir="LONG"
+                elif _ss.iloc[_i]: _dir="SHORT"
+                else: continue
 
-        _tdf = _pd.DataFrame(_trades)
+                # Histórico antes de la señal para buscar swings
+                _hi_hist = _h[max(0,_i-60):_i][::-1]
+                _lo_hist = _lo[max(0,_i-60):_i][::-1]
+                _tp1,_tp2,_sld = _find_swing_targets(_hi_hist,_lo_hist,_entry,_dir,_atv)
+                _sld = _atv * sl_mult
+                _sl  = _entry-_sld if _dir=="LONG" else _entry+_sld
+                _be_sl = _entry  # break-even tras TP1
+
+                # Simulación barra a barra (max 15 días)
+                _tp1_hit=False; _pips=0.0; _hit=False; _sl_cur=_sl
+                for _j in range(_i+1, min(_i+16, len(_df))):
+                    _fh=float(_df["High"].iloc[_j]); _fl=float(_df["Low"].iloc[_j])
+                    if _dir=="LONG":
+                        if _fl<=_sl_cur:
+                            if _tp1_hit: _pips+=(_be_sl-_entry)/0.0001*0.5  # segunda mitad a BE
+                            else: _pips=-_sld/0.0001
+                            _hit=True; break
+                        if not _tp1_hit and _fh>=_tp1:
+                            _tp1_hit=True; _pips+=abs(_tp1-_entry)/0.0001*0.5  # cerrar 50%
+                            _sl_cur=_be_sl  # mover SL a BE
+                        if _tp1_hit and _fh>=_tp2:
+                            _pips+=abs(_tp2-_entry)/0.0001*0.5; _hit=True; break
+                    else:
+                        if _fh>=_sl_cur:
+                            if _tp1_hit: _pips+=(_entry-_be_sl)/0.0001*0.5
+                            else: _pips=-_sld/0.0001
+                            _hit=True; break
+                        if not _tp1_hit and _fl<=_tp1:
+                            _tp1_hit=True; _pips+=abs(_tp1-_entry)/0.0001*0.5
+                            _sl_cur=_be_sl
+                        if _tp1_hit and _fl<=_tp2:
+                            _pips+=abs(_tp2-_entry)/0.0001*0.5; _hit=True; break
+
+                if not _hit:
+                    _cx=float(_df["Close"].iloc[min(_i+15,len(_df)-1)])
+                    _half2=((_cx-_entry) if _dir=="LONG" else (_entry-_cx))/0.0001*0.5
+                    _pips+=_half2 if _tp1_hit else ((_cx-_entry) if _dir=="LONG" else (_entry-_cx))/0.0001
+
+                _trades.append({
+                    "date":_df.index[_i],"dir":_dir,"entry":_entry,
+                    "sl":round(_sl,5),"tp1":round(_tp1,5),"tp2":round(_tp2,5),
+                    "pips":round(_pips,1),"win":_pips>0,
+                    "rr1":round(abs(_tp1-_entry)/_sld,1),"rr2":round(abs(_tp2-_entry)/_sld,1),
+                })
+                _last=_i
+            return _trades
+
+        # ── Grid search de parámetros ─────────────────────────────────────────
+        _best_pf=0; _best_params={}; _best_trades=[]
+        for _st in [60, 70, 80]:
+            for _mc in [3, 4, 5]:
+                for _cd in [2, 3, 5]:
+                    _t = _simulate(_st, _mc, _cd)
+                    if len(_t) < 10: continue
+                    _tdf_tmp = _pd.DataFrame(_t)
+                    _gp = _tdf_tmp.loc[_tdf_tmp["win"],"pips"].sum()
+                    _gl = abs(_tdf_tmp.loc[~_tdf_tmp["win"],"pips"].sum())
+                    _pf_tmp = _gp/_gl if _gl>0 else 999
+                    if _pf_tmp > _best_pf:
+                        _best_pf=_pf_tmp; _best_trades=_t
+                        _best_params={"score_thr":_st,"min_conf":_mc,"cooldown":_cd,"pf":round(_pf_tmp,2)}
+
+        if not _best_trades:
+            return None, None, {}, "sin señales tras optimización"
+
+        _tdf = _pd.DataFrame(_best_trades)
         _tdf["equity"] = _tdf["pips"].cumsum()
+        _n=len(_tdf); _wins=int(_tdf["win"].sum()); _wr=_wins/_n*100
+        _net=float(_tdf["pips"].sum())
+        _avg_w=float(_tdf.loc[_tdf["win"],"pips"].mean()) if _wins>0 else 0
+        _avg_l=float(_tdf.loc[~_tdf["win"],"pips"].mean()) if (_n-_wins)>0 else 0
+        _gp=_tdf.loc[_tdf["win"],"pips"].sum(); _gl=abs(_tdf.loc[~_tdf["win"],"pips"].sum())
+        _pf=round(_gp/_gl if _gl>0 else 999,2)
+        _peak=_tdf["equity"].cummax(); _max_dd=float((_tdf["equity"]-_peak).min())
+        _days=(_tdf["date"].iloc[-1]-_tdf["date"].iloc[0]).days; _weeks=max(1,_days/7)
+        _avg_rr1=round(_tdf["rr1"].mean(),1) if "rr1" in _tdf else 2.0
 
-        _n       = len(_tdf)
-        _wins    = int(_tdf["win"].sum())
-        _wr      = _wins / _n * 100
-        _net     = float(_tdf["pips"].sum())
-        _avg_w   = float(_tdf.loc[_tdf["win"],  "pips"].mean()) if _wins > 0 else 0
-        _avg_l   = float(_tdf.loc[~_tdf["win"], "pips"].mean()) if (_n - _wins) > 0 else 0
-        _gross_p = _tdf.loc[_tdf["win"],  "pips"].sum()
-        _gross_l = abs(_tdf.loc[~_tdf["win"], "pips"].sum())
-        _pf      = round((_gross_p / _gross_l) if _gross_l > 0 else 999.0, 2)
-
-        _peak   = _tdf["equity"].cummax()
-        _max_dd = float((_tdf["equity"] - _peak).min())
-
-        _days  = (_tdf["date"].iloc[-1] - _tdf["date"].iloc[0]).days
-        _weeks = max(1, _days / 7)
-
-        _stats = {
-            "total": _n, "wins": _wins, "winrate": round(_wr, 1),
-            "net_pips": round(_net, 1), "profit_factor": _pf,
-            "avg_win": round(_avg_w, 1), "avg_loss": round(_avg_l, 1),
-            "max_dd": round(_max_dd, 1), "per_week": round(_n / _weeks, 1),
-            "years": round(_weeks / 52, 1),
+        _stats={
+            "total":_n,"wins":_wins,"winrate":round(_wr,1),
+            "net_pips":round(_net,1),"profit_factor":_pf,
+            "avg_win":round(_avg_w,1),"avg_loss":round(_avg_l,1),
+            "max_dd":round(_max_dd,1),"per_week":round(_n/_weeks,1),
+            "years":round(_weeks/52,1),"best_params":_best_params,
+            "avg_rr1":_avg_rr1,
         }
         return _tdf, _df, _stats, "ok"
 
@@ -6282,20 +6271,34 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         )
         st.plotly_chart(_fig_dir, use_container_width=True)
 
+        # Parámetros óptimos encontrados
+        _bp = _bt_stats.get("best_params", {})
+        if _bp:
+            st.info(
+                f"🧠 **Parámetros óptimos encontrados por grid search** — "
+                f"Score mín: **{_bp.get('score_thr')}** · "
+                f"Confluencias mín: **{_bp.get('min_conf')}** · "
+                f"Cooldown: **{_bp.get('cooldown')} días** · "
+                f"Profit Factor: **{_bp.get('pf')}**  "
+                f"| R:R medio TP1: **1:{_bt_stats.get('avg_rr1', 2.0)}**"
+            )
+
         # Tabla últimas 20 operaciones
         with st.expander("📋 Últimas 20 operaciones del backtest", expanded=False):
-            _bt_show = _bt_trades[["date", "dir", "entry", "pips", "win"]].tail(20).copy()
+            _cols_show = [c for c in ["date","dir","entry","sl","tp1","tp2","pips","rr1","win"] if c in _bt_trades.columns]
+            _bt_show = _bt_trades[_cols_show].tail(20).copy()
             _bt_show["date"]  = _bt_show["date"].dt.strftime("%Y-%m-%d")
-            _bt_show["entry"] = _bt_show["entry"].map("{:.5f}".format)
+            for _fc in ["entry","sl","tp1","tp2"]:
+                if _fc in _bt_show.columns:
+                    _bt_show[_fc] = _bt_show[_fc].map("{:.5f}".format)
             _bt_show["pips"]  = _bt_show["pips"].map("{:+.1f}".format)
             _bt_show["win"]   = _bt_show["win"].map({True: "✅", False: "❌"})
-            _bt_show.columns  = ["Fecha", "Dir", "Entrada", "Pips", "Resultado"]
+            _bt_show.columns  = ["Fecha","Dir","Entrada","SL","TP1","TP2","Pips","R:R1","Res."][:len(_cols_show)]
             st.dataframe(_bt_show, use_container_width=True, hide_index=True)
 
         st.caption(
             f"Backtest sobre {_bt_stats['years']} años · velas diarias EUR/USD · "
-            f"mismos 7 filtros del panel (adaptados a escala diaria) · "
-            f"SL=1.5×ATR, TP=2.5×ATR, cierre max 10 días · "
+            f"TP/SL dinámico por liquidez · Gestión parcial 50%@TP1→BE→50%@TP2 · "
             f"Sin slippage ni comisiones · Resultados pasados no garantizan resultados futuros."
         )
     else:
