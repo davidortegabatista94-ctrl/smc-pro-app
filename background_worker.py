@@ -951,9 +951,23 @@ def _check_definitiva_entry(df_1h, signal: dict, price: float) -> None:
         if atr_pips < 6:
             return   # Volatilidad insuficiente
 
-        ribbon_ok = (e5>e10>e20>e50) if bull else (e5<e10<e20<e50)
-        if not ribbon_ok:
-            return   # EMA ribbon debe estar PERFECTAMENTE alineado
+        # Ribbon 4H alineado (resample de 1H)
+        ribbon_1h_ok = (e5>e10>e20>e50) if bull else (e5<e10<e20<e50)
+        if not ribbon_1h_ok:
+            return   # 1H ribbon no alineado
+
+        ribbon_4h_ok = False
+        if has_4h:
+            ribbon_4h_ok = (px4h>e21_4h>e50_4h) if bull else (px4h<e21_4h<e50_4h)
+        if not ribbon_4h_ok:
+            return   # 4H ribbon no confirmado — FILTRO CLAVE
+
+        # PULLBACK AL RIBBON: precio cerca de EMA21 en 1H (entrada de valor)
+        # Si precio está muy lejos del ribbon, es un breakout tardío — NO entrar
+        _dist_to_ribbon = abs(px - e20)       # distancia al ribbon medio (EMA20 ≈ EMA21)
+        _pb_zone = atr * 0.8                   # zona de pullback = 0.8×ATR del ribbon
+        if _dist_to_ribbon > _pb_zone:
+            return   # Precio demasiado extendido — esperar pullback
 
         macro_ok = (px > e200) if bull else (px < e200)
         if not macro_ok:
@@ -961,6 +975,10 @@ def _check_definitiva_entry(df_1h, signal: dict, price: float) -> None:
 
         if news_risk == "high":
             return   # Sin noticias de alto impacto
+
+        # ADX mínimo en 4H
+        if adx < 18:
+            return   # Mercado lateral — no operar
 
         # ── CONFLUENCIAS SOFT ─────────────────────────────────────────────────
         confs = []; score = 0
