@@ -6041,10 +6041,9 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         if isinstance(_df.columns, _pd.MultiIndex):
             _df.columns = _df.columns.get_level_values(0)
         _df.columns = [str(c).strip().capitalize() for c in _df.columns]
-        _needed = [c for c in ["Open", "High", "Low", "Close"] if c in _df.columns]
+        _needed = [c for c in ["Open","High","Low","Close"] if c in _df.columns]
         if len(_needed) < 4:
             return None, None, {}, "columnas OHLC no encontradas"
-
         _df = _df[_needed].dropna().copy()
         if _df.index.tz is not None:
             _df.index = _df.index.tz_localize(None)
@@ -6052,158 +6051,133 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         c = _df["Close"]; h = _df["High"]; lo = _df["Low"]
 
         # ── Indicadores ───────────────────────────────────────────────────────
-        _df["ema5"]  = c.ewm(span=5,  adjust=False).mean()
-        _df["ema10"] = c.ewm(span=10, adjust=False).mean()
-        _df["ema20"] = c.ewm(span=20, adjust=False).mean()
-        _df["ema50"] = c.ewm(span=50, adjust=False).mean()
-        _df["ema200"]= c.ewm(span=200,adjust=False).mean()
+        for _sp, _nm in [(5,"ema5"),(10,"ema10"),(20,"ema20"),(50,"ema50"),(200,"ema200")]:
+            _df[_nm] = c.ewm(span=_sp, adjust=False).mean()
         _pc = c.shift(1)
-        _tr_s = _pd.concat([h-lo,(h-_pc).abs(),(lo-_pc).abs()],axis=1).max(axis=1)
-        _df["atr"]   = _tr_s.ewm(span=14, adjust=False).mean()
-        _d  = c.diff()
-        _df["rsi"]   = 100-100/(1+_d.clip(lower=0).ewm(14,adjust=False).mean()/(-_d.clip(upper=0)).ewm(14,adjust=False).mean().replace(0,_np.nan))
-        _m  = c.ewm(12,adjust=False).mean()-c.ewm(26,adjust=False).mean()
-        _df["macd_hist"] = _m - _m.ewm(9,adjust=False).mean()
-        _df["stk"]   = 100*(_df["Close"]-lo.rolling(14).min())/(h.rolling(14).max()-lo.rolling(14).min()+1e-9)
-        # ADX(14)
-        _pdm = h.diff().clip(lower=0); _ndm = (-lo.diff()).clip(lower=0)
-        _pdm2 = _pdm.where(_pdm>_ndm, 0.0); _ndm2 = _ndm.where(_ndm>_pdm, 0.0)
-        _atr14 = _tr_s.ewm(span=14,adjust=False).mean()
-        _pdi = 100*_pdm2.ewm(14,adjust=False).mean()/(_atr14+1e-9)
-        _ndi = 100*_ndm2.ewm(14,adjust=False).mean()/(_atr14+1e-9)
-        _df["adx"] = (100*abs(_pdi-_ndi)/(_pdi+_ndi+1e-9)).ewm(14,adjust=False).mean()
-        # Tendencia semanal (EMA20 semanal)
-        _df["ema20w"] = c.ewm(span=100, adjust=False).mean()  # ~20 semanas en daily
+        _tr = _pd.concat([h-lo,(h-_pc).abs(),(lo-_pc).abs()],axis=1).max(axis=1)
+        _df["atr"] = _tr.ewm(span=14, adjust=False).mean()
+        _d = c.diff()
+        _rs_ = _d.clip(lower=0).ewm(14,adjust=False).mean() / \
+               (-_d.clip(upper=0)).ewm(14,adjust=False).mean().replace(0,_np.nan)
+        _df["rsi"] = 100 - 100/(1+_rs_)
+        _mc_ = c.ewm(12,adjust=False).mean()-c.ewm(26,adjust=False).mean()
+        _df["macd_hist"] = _mc_ - _mc_.ewm(9,adjust=False).mean()
+        _df["stk"] = 100*(c-lo.rolling(14).min())/(h.rolling(14).max()-lo.rolling(14).min()+1e-9)
         _df = _df.dropna()
 
-        def _find_swing_targets(arr_h, arr_lo, entry, direction, sl_d, lookback=60):
-            bull = direction == "LONG"
-            candidates = []
+        def _swing_tp(arr_h, arr_lo, entry, bull, sl_d):
+            """Busca swing highs/lows como objetivos de precio (mínimo 2:1)."""
+            cands = []
             n = len(arr_h)
-            for k in range(2, min(lookback, n-1)):
+            for k in range(2, min(60, n-1)):
                 if bull:
                     if arr_h[k]>arr_h[k-1] and arr_h[k]>arr_h[k+1] and arr_h[k]>entry:
-                        candidates.append(arr_h[k])
+                        cands.append(arr_h[k])
                 else:
                     if arr_lo[k]<arr_lo[k-1] and arr_lo[k]<arr_lo[k+1] and arr_lo[k]<entry:
-                        candidates.append(arr_lo[k])
-            candidates = sorted(set(round(x,5) for x in candidates), key=lambda x: abs(x-entry))
-            tp1 = round(entry+(1 if bull else -1)*sl_d*2.5, 5)  # mínimo 2.5:1
-            for lvl in candidates:
-                if abs(lvl-entry)/sl_d >= 2.5:
-                    tp1 = round(lvl, 5); break
-            tp2 = round(entry+(1 if bull else -1)*sl_d*4.0, 5)
-            for lvl in candidates:
-                if abs(lvl-entry)/sl_d>=4.0 and ((bull and lvl>tp1) or (not bull and lvl<tp1)):
-                    tp2 = round(lvl, 5); break
+                        cands.append(arr_lo[k])
+            cands = sorted(set(round(x,5) for x in cands), key=lambda x: abs(x-entry))
+            sign = 1 if bull else -1
+            tp1 = round(entry + sign*sl_d*2.0, 5)
+            for lvl in cands:
+                if abs(lvl-entry)/sl_d >= 2.0:
+                    tp1 = round(lvl,5); break
+            tp2 = round(entry + sign*sl_d*3.5, 5)
+            for lvl in cands:
+                if abs(lvl-entry)/sl_d >= 3.5 and ((bull and lvl>tp1) or (not bull and lvl<tp1)):
+                    tp2 = round(lvl,5); break
             return tp1, tp2
 
-        def _simulate(score_thr, min_cons, cooldown, sl_mult=1.0):
-            """Simula con parámetros dados. Filtros: ADX>20, semanal alineado, R:R≥2.5."""
-            _bull  = (_df["ema5"]>_df["ema10"])&(_df["ema10"]>_df["ema20"])&(_df["ema20"]>_df["ema50"])
-            _bear  = (_df["ema5"]<_df["ema10"])&(_df["ema10"]<_df["ema20"])&(_df["ema20"]<_df["ema50"])
-            _aok   = _df["atr"] >= 0.0040
-            _adxok = _df["adx"] >= 20          # solo mercados en tendencia
-            _rl    = (_df["rsi"]>=48)&(_df["rsi"]<=65)
-            _rs    = (_df["rsi"]>=35)&(_df["rsi"]<=52)
-            _mb    = _df["macd_hist"]>0; _ms = _df["macd_hist"]<0
-            _ae    = _df["Close"]>_df["ema50"]; _be = _df["Close"]<_df["ema50"]
-            _mac   = _df["Close"]>_df["ema200"]; _mbc = _df["Close"]<_df["ema200"]
-            _stbl  = _df["stk"]<65; _stbs = _df["stk"]>35
-            _wbull = _df["Close"]>_df["ema20w"]; _wbear = _df["Close"]<_df["ema20w"]
+        def _simulate(score_thr, min_cons, cooldown):
+            _bull = (_df["ema5"]>_df["ema10"])&(_df["ema10"]>_df["ema20"])&(_df["ema20"]>_df["ema50"])
+            _bear = (_df["ema5"]<_df["ema10"])&(_df["ema10"]<_df["ema20"])&(_df["ema20"]<_df["ema50"])
+            _aok  = _df["atr"] >= 0.0035
+            _rl   = (_df["rsi"]>=45)&(_df["rsi"]<=68)
+            _rs   = (_df["rsi"]>=32)&(_df["rsi"]<=55)
+            _mb   = _df["macd_hist"]>0; _ms = _df["macd_hist"]<0
+            _ae   = _df["Close"]>_df["ema50"]; _be = _df["Close"]<_df["ema50"]
+            _mac  = _df["Close"]>_df["ema200"]; _mbc = _df["Close"]<_df["ema200"]
+            _stbl = _df["stk"]<72; _stbs = _df["stk"]>28
 
-            _sc_l = (_bull.astype(int)*25+_aok.astype(int)*15+_rl.astype(int)*18+
-                     _mb.astype(int)*18+_ae.astype(int)*10+_mac.astype(int)*12+
-                     _stbl.astype(int)*8+_adxok.astype(int)*12)
-            _sc_s = (_bear.astype(int)*25+_aok.astype(int)*15+_rs.astype(int)*18+
-                     _ms.astype(int)*18+_be.astype(int)*10+_mbc.astype(int)*12+
-                     _stbs.astype(int)*8+_adxok.astype(int)*12)
-            _co_l = (_bull.astype(int)+_rl.astype(int)+_mb.astype(int)+_ae.astype(int)+
-                     _aok.astype(int)+_stbl.astype(int)+_mac.astype(int)+_adxok.astype(int))
-            _co_s = (_bear.astype(int)+_rs.astype(int)+_ms.astype(int)+_be.astype(int)+
-                     _aok.astype(int)+_stbs.astype(int)+_mbc.astype(int)+_adxok.astype(int))
-            # Solo señales alineadas con la tendencia semanal
-            _ls = (_sc_l>=score_thr)&(_co_l>=min_cons)&_wbull
-            _ss = (_sc_s>=score_thr)&(_co_s>=min_cons)&_wbear
+            _sc_l = (_bull.astype(int)*25+_aok.astype(int)*12+_rl.astype(int)*18+
+                     _mb.astype(int)*18+_ae.astype(int)*12+_mac.astype(int)*15)
+            _sc_s = (_bear.astype(int)*25+_aok.astype(int)*12+_rs.astype(int)*18+
+                     _ms.astype(int)*18+_be.astype(int)*12+_mbc.astype(int)*15)
+            _co_l = _bull.astype(int)+_rl.astype(int)+_mb.astype(int)+_ae.astype(int)+_mac.astype(int)+_stbl.astype(int)
+            _co_s = _bear.astype(int)+_rs.astype(int)+_ms.astype(int)+_be.astype(int)+_mbc.astype(int)+_stbs.astype(int)
+            _ls = (_sc_l>=score_thr)&(_co_l>=min_cons)
+            _ss = (_sc_s>=score_thr)&(_co_s>=min_cons)
 
-            _trades=[]; _last=-cooldown; _h=_df["High"].values; _lo=_df["Low"].values
+            _trades=[]; _last=-cooldown
+            _h_=_df["High"].values; _lo_=_df["Low"].values
             for _i in range(60, len(_df)):
                 if _i-_last < cooldown: continue
-                _row=_df.iloc[_i]; _entry=float(_row["Close"]); _atv=float(_row["atr"])
-                # ADX hard block en barra actual
-                if float(_row["adx"]) < 20: continue
-                if _ls.iloc[_i]: _dir="LONG"
+                _row=_df.iloc[_i]; _en=float(_row["Close"]); _at=float(_row["atr"])
+                if   _ls.iloc[_i]: _dir="LONG"
                 elif _ss.iloc[_i]: _dir="SHORT"
                 else: continue
 
-                _sld = _atv * sl_mult
-                _sl  = _entry-_sld if _dir=="LONG" else _entry+_sld
-                _hi_hist = _h[max(0,_i-60):_i][::-1]
-                _lo_hist = _lo[max(0,_i-60):_i][::-1]
-                _tp1,_tp2 = _find_swing_targets(_hi_hist,_lo_hist,_entry,_dir,_sld)
+                _bull_d = _dir=="LONG"
+                _sld = _at * 1.2
+                _sl  = _en - _sld if _bull_d else _en + _sld
+                _hh  = _h_[max(0,_i-60):_i][::-1]
+                _ll  = _lo_[max(0,_i-60):_i][::-1]
+                _tp1, _tp2 = _swing_tp(_hh, _ll, _en, _bull_d, _sld)
 
-                # Filtro R:R mínimo 2.5:1 — si no hay espacio, skip
-                if abs(_tp1-_entry)/_sld < 2.5: continue
-
-                _be_sl = _entry  # break-even tras TP1
-
-                # Simulación barra a barra (max 15 días)
-                _tp1_hit=False; _pips=0.0; _hit=False; _sl_cur=_sl
-                for _j in range(_i+1, min(_i+16, len(_df))):
+                # Salida: 50% en TP1 → SL a BE+buffer; 50% a TP2; stop 12 días
+                _tp1h=False; _pips=0.0; _hit=False; _slc=_sl; _buf=_sld*0.15
+                for _j in range(_i+1, min(_i+13, len(_df))):
                     _fh=float(_df["High"].iloc[_j]); _fl=float(_df["Low"].iloc[_j])
-                    if _dir=="LONG":
-                        if _fl<=_sl_cur:
-                            if _tp1_hit: _pips+=(_be_sl-_entry)/0.0001*0.5  # segunda mitad a BE
-                            else: _pips=-_sld/0.0001
+                    if _bull_d:
+                        if _fl<=_slc:
+                            _pips += (_en-_slc)/0.0001*0.5 if _tp1h else -_sld/0.0001
                             _hit=True; break
-                        if not _tp1_hit and _fh>=_tp1:
-                            _tp1_hit=True; _pips+=abs(_tp1-_entry)/0.0001*0.5  # cerrar 50%
-                            _sl_cur=_be_sl  # mover SL a BE
-                        if _tp1_hit and _fh>=_tp2:
-                            _pips+=abs(_tp2-_entry)/0.0001*0.5; _hit=True; break
+                        if not _tp1h and _fh>=_tp1:
+                            _tp1h=True; _pips+=abs(_tp1-_en)/0.0001*0.5
+                            _slc = _en+_buf  # SL a BE+buffer (no BE exacto)
+                        if _tp1h and _fh>=_tp2:
+                            _pips+=abs(_tp2-_en)/0.0001*0.5; _hit=True; break
                     else:
-                        if _fh>=_sl_cur:
-                            if _tp1_hit: _pips+=(_entry-_be_sl)/0.0001*0.5
-                            else: _pips=-_sld/0.0001
+                        if _fh>=_slc:
+                            _pips += (_slc-_en)/0.0001*0.5 if _tp1h else -_sld/0.0001
                             _hit=True; break
-                        if not _tp1_hit and _fl<=_tp1:
-                            _tp1_hit=True; _pips+=abs(_tp1-_entry)/0.0001*0.5
-                            _sl_cur=_be_sl
-                        if _tp1_hit and _fl<=_tp2:
-                            _pips+=abs(_tp2-_entry)/0.0001*0.5; _hit=True; break
-
+                        if not _tp1h and _fl<=_tp1:
+                            _tp1h=True; _pips+=abs(_tp1-_en)/0.0001*0.5
+                            _slc = _en-_buf
+                        if _tp1h and _fl<=_tp2:
+                            _pips+=abs(_tp2-_en)/0.0001*0.5; _hit=True; break
                 if not _hit:
-                    _cx=float(_df["Close"].iloc[min(_i+15,len(_df)-1)])
-                    _half2=((_cx-_entry) if _dir=="LONG" else (_entry-_cx))/0.0001*0.5
-                    _pips+=_half2 if _tp1_hit else ((_cx-_entry) if _dir=="LONG" else (_entry-_cx))/0.0001
+                    _cx=float(_df["Close"].iloc[min(_i+12,len(_df)-1)])
+                    _rem=((_cx-_en) if _bull_d else (_en-_cx))/0.0001
+                    _pips += _rem*0.5 if _tp1h else _rem
 
                 _trades.append({
-                    "date":_df.index[_i],"dir":_dir,"entry":_entry,
+                    "date":_df.index[_i],"dir":_dir,"entry":_en,
                     "sl":round(_sl,5),"tp1":round(_tp1,5),"tp2":round(_tp2,5),
                     "pips":round(_pips,1),"win":_pips>0,
-                    "rr1":round(abs(_tp1-_entry)/_sld,1),"rr2":round(abs(_tp2-_entry)/_sld,1),
+                    "rr1":round(abs(_tp1-_en)/_sld,1),"rr2":round(abs(_tp2-_en)/_sld,1),
                 })
                 _last=_i
             return _trades
 
-        # ── Grid search de parámetros — rangos estrictos (ADX+semanal ya filtran) ──
-        _best_score=0; _best_params={}; _best_trades=[]
-        for _st in [70, 80, 90]:           # score mínimo
-            for _mc in [5, 6, 7]:          # confluencias mínimas
-                for _cd in [3, 5, 7]:      # cooldown en días
+        # ── Grid search — equilibrio entre PF y muestra suficiente ───────────
+        _best_s=0; _best_params={}; _best_trades=[]
+        for _st in [55, 65, 75, 82]:
+            for _mc in [3, 4, 5]:
+                for _cd in [2, 3, 5]:
                     _t = _simulate(_st, _mc, _cd)
-                    if len(_t) < 8: continue
+                    if len(_t) < 20: continue   # mínimo 20 trades para ser válido
                     _tdf_tmp = _pd.DataFrame(_t)
                     _gp = _tdf_tmp.loc[_tdf_tmp["win"],"pips"].sum()
                     _gl = abs(_tdf_tmp.loc[~_tdf_tmp["win"],"pips"].sum())
-                    _pf_tmp = _gp/_gl if _gl>0 else 999
+                    _pf_tmp = _gp/(_gl+1e-9)
                     _wr_tmp = _tdf_tmp["win"].mean()
-                    # Optimizar por combinación de PF y win-rate (no solo PF)
-                    _composite = _pf_tmp * _wr_tmp
-                    if _composite > _best_score:
-                        _best_score=_composite; _best_trades=_t
+                    # Score compuesto: premia PF alto Y muestra grande
+                    _s = _pf_tmp * _wr_tmp * (_np.log10(len(_t)+1))
+                    if _s > _best_s and _pf_tmp > 1.0:  # solo guarda si es rentable
+                        _best_s=_s; _best_trades=_t
                         _best_params={"score_thr":_st,"min_conf":_mc,"cooldown":_cd,
-                                      "pf":round(_pf_tmp,2),"wr":round(_wr_tmp*100,1)}
+                                      "pf":round(_pf_tmp,2),"wr":round(_wr_tmp*100,1),"n":len(_t)}
 
         if not _best_trades:
             return None, None, {}, "sin señales tras optimización"
