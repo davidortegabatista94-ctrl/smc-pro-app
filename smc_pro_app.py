@@ -2459,20 +2459,6 @@ else:
     current_user      = st.session_state.current_user
     current_user_name = _USER_NAMES.get(current_user, current_user.capitalize())
 
-    # ── Auto-refresh: registrado ANTES de cualquier st.stop() ───────────────
-    # run_every=20s mantiene el WebSocket vivo en Railway (timeout ~60s).
-    # IMPORTANTE: solo hace rerun si last_analysis_time ya está SETEADO y han
-    # pasado ≥175s — evita bucle infinito en el primer arranque.
-    @st.fragment(run_every=20)
-    def _autorefresh():
-        if st.session_state.get("app_mode") != "trading":
-            return
-        _t = st.session_state.get("last_analysis_time")
-        if _t and (time.time() - float(_t)) >= 175:
-            st.rerun()
-
-    _autorefresh()
-
     # ── Selector de modo: Trading o Inversión a Largo Plazo ──────────────────
     if st.session_state.get("app_mode") == "investment":
         try:
@@ -2540,6 +2526,17 @@ else:
                 st.rerun()
 
         st.stop()
+
+    # ── Solo se llega aquí en modo TRADING ──────────────────────────────────
+    # Fragment de auto-refresh: fires cada 20s, rerun solo si ≥175s desde
+    # el último análisis. No interfiere con el selector porque ese termina en st.stop().
+    @st.fragment(run_every=20)
+    def _autorefresh():
+        _t = st.session_state.get("last_analysis_time")
+        if _t and (time.time() - float(_t)) >= 175:
+            st.rerun()
+
+    _autorefresh()
 
     # ── Cargar credenciales MT5 del usuario desde DB (solo una vez) ──────────
     _mt5_load_key = f"mt5_loaded_{current_user}"
