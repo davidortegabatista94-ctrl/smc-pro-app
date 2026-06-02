@@ -6414,8 +6414,10 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
     def _run_backtest_2008():
         # Misma lógica exacta que _run_ribbon_backtest pero desde 2008
         import yfinance as _yf, numpy as _np, pandas as _pd
+        # Descargamos desde 2005 para calentar EMA200 correctamente,
+        # pero solo generamos señales desde 2008-01-01
         try:
-            _df = _yf.download("EURUSD=X", start="2008-01-01", interval="1d",
+            _df = _yf.download("EURUSD=X", start="2005-01-01", interval="1d",
                                auto_adjust=True, progress=False, timeout=25)
         except Exception as _e:
             return None, None, {}, str(_e)
@@ -6443,10 +6445,15 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         _df["adx"]=(100*abs(_pdi-_ndi)/(_pdi+_ndi+1e-9)).ewm(14,adjust=False).mean()
         _df=_df.dropna()
 
+        import datetime as _dt
+        _start_trades = _pd.Timestamp("2008-01-01")  # señales solo desde 2008
         _trades=[]; _last=-3
         for _i in range(220, len(_df)):
             if _i-_last < 3: continue
-            _row=_df.iloc[_i]; _px=float(_row["Close"]); _atr=float(_row["atr"])
+            _row=_df.iloc[_i]
+            # Saltar barras anteriores a 2008 (solo para calentar indicadores)
+            if _df.index[_i] < _start_trades: continue
+            _px=float(_row["Close"]); _atr=float(_row["atr"])
             if _np.isnan(_atr) or _atr==0: continue
             _e50=float(_row["e50"]); _e200=float(_row["e200"])
             _sl=float(_row["slope"]); _adx=float(_row["adx"]); _rsi=float(_row["rsi"])
