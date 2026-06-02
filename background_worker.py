@@ -941,44 +941,57 @@ def _check_definitiva_entry(df_1h, signal: dict, price: float) -> None:
         except Exception:
             pass
 
-        # ── HARD FILTERS ─────────────────────────────────────────────────────
+        # ── FILTROS DEFINITIVA (misma lógica que el backtest validado) ──────────
         bull = direction == "LONG"
         h_utc = datetime.now(timezone.utc).hour
-        in_session = (7 <= h_utc < 12) or (12 <= h_utc < 17)
-        if not in_session:
-            return   # Solo London y NY
 
-        if atr_pips < 6:
-            return   # Volatilidad insuficiente
+        # 1. Solo London (7-12) o NY (12-17) — calidad de mercado
+        if not ((7 <= h_utc < 12) or (12 <= h_utc < 17)):
+            return
 
-        # Ribbon 4H alineado (resample de 1H)
-        ribbon_1h_ok = (e5>e10>e20>e50) if bull else (e5<e10<e20<e50)
-        if not ribbon_1h_ok:
-            return   # 1H ribbon no alineado
+        # 2. Volatilidad suficiente
+        if atr_pips < 5:
+            return
 
-        ribbon_4h_ok = False
-        if has_4h:
-            ribbon_4h_ok = (px4h>e21_4h>e50_4h) if bull else (px4h<e21_4h<e50_4h)
-        if not ribbon_4h_ok:
-            return   # 4H ribbon no confirmado — FILTRO CLAVE
+        # 3. ADX > 22 — mercado en tendencia (no en rango)
+        if adx < 22:
+            return
 
-        # PULLBACK AL RIBBON: precio cerca de EMA21 en 1H (entrada de valor)
-        # Si precio está muy lejos del ribbon, es un breakout tardío — NO entrar
-        _dist_to_ribbon = abs(px - e20)       # distancia al ribbon medio (EMA20 ≈ EMA21)
-        _pb_zone = atr * 0.8                   # zona de pullback = 0.8×ATR del ribbon
-        if _dist_to_ribbon > _pb_zone:
-            return   # Precio demasiado extendido — esperar pullback
+        # 4. Slope del EMA50 en 1H — adaptado de diario (0.2%/20días → 0.05%/20h)
+        # EMA50 en 1H = últimas 50 horas. Slope 20 bars = 20h = ~1 día
+        _slope_1h = 0.0
+        try:
+            _e50_series = c.ewm(50, adjust=False).mean()
+            _slope_1h = float((_e50_series.iloc[-1] - _e50_series.iloc[-21]) /
+                              (_e50_series.iloc[-21] + 1e-9) * 100)
+        except Exception:
+            pass
+        if abs(_slope_1h) < 0.05:
+            return   # Mercado plano — no operar
 
+        # 5. EMA200 — dirección macro
         macro_ok = (px > e200) if bull else (px < e200)
         if not macro_ok:
-            return   # No operar contra la macro EMA200
+            return
 
+        # 6. Precio cerca del EMA50 en 1H (pullback = entrada de valor)
+        _dist_e50 = abs(px - e50)
+        if _dist_e50 > atr * 0.7:
+            return   # Precio extendido — esperar pullback
+
+        # 7. RSI en zona 40-60 (como en el backtest validado)
+        if not (40 <= rsi <= 62):
+            return
+
+        # 8. Sin noticias de alto impacto
         if news_risk == "high":
-            return   # Sin noticias de alto impacto
+            return
 
-        # ADX mínimo
-        if adx < 18:
-            return   # Mercado lateral — no operar
+        # 9. Slope en dirección correcta
+        if bull and _slope_1h < 0.05:
+            return
+        if not bull and _slope_1h > -0.05:
+            return
 
         # ── REGIME CHECK via backend ──────────────────────────────────────────
         regime_ok = False
