@@ -6018,15 +6018,9 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
     @st.cache_data(ttl=86400, show_spinner=False)
     def _run_ribbon_backtest():
         """
-        BACKTEST RIBBON PULLBACK — Estrategia rentable basada en EMA ribbon 1H/4H.
-        Lógica: Entrar SOLO en pullbacks al ribbon EMA (no en breakouts).
-        - 4H ribbon perfectamente alineado (EMA8 > EMA21 > EMA55)
-        - 1H precio toca zona EMA21 (pullback al ribbon = entrada de valor)
-        - RSI en zona 40-58 (pullback sano, no sobrevendido)
-        - ADX > 18 en 4H (mercado en tendencia)
-        - SL: bajo EMA55 en 1H (SL ajustado = mejor R:R)
-        - TP1 25% a 2.5:1 → trail → TP2 75% a 5:1
-        En daily: EMA3/7/14/34 aproximan el ribbon 4H.
+        BACKTEST RIBBON — Filtro de régimen semanal + pullback al ribbon 1H/4H.
+        SOLO opera cuando la tendencia semanal ES CLARA (ADX semanal > 25 Y slope > 0.4%).
+        Elimina rangos 2015-2023. EMA ribbon 1H/4H para timing de entrada.
         """
         import yfinance as _yf, numpy as _np, pandas as _pd
         try:
@@ -6073,91 +6067,95 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
         _ndi=100*_ndm2.ewm(14,adjust=False).mean()/(_atr14+1e-9)
         _df["adx"]=(100*abs(_pdi-_ndi)/(_pdi+_ndi+1e-9)).ewm(14,adjust=False).mean()
 
-        _df=_df.dropna()
+        # ── Filtro de régimen semanal ─────────────────────────────────────────
+        # EMA20 semanal ≈ EMA100 diario. Slope = cambio % en 20 días.
+        # Si slope < umbral → mercado en rango → NO OPERAR.
+        _df["ema100"] = c.ewm(span=100, adjust=False).mean()
+        _df["slope"]  = (_df["ema100"] - _df["ema100"].shift(20)) / (_df["ema100"].shift(20) + 1e-9) * 100
+        # ADX semanal ≈ resample weekly y recalcular
+        _w_close = c.resample("W").last().reindex(c.index, method="ffill")
+        _w_ema10 = _w_close.ewm(span=10, adjust=False).mean()
+        _w_ema20 = _w_close.ewm(span=20, adjust=False).mean()
+        _df["w_trend_bull"] = (_w_ema10 > _w_ema20).astype(int)   # tendencia semanal alcista
+        _df["w_trend_bear"] = (_w_ema10 < _w_ema20).astype(int)
 
-        def _simulate_ribbon(rsi_lo=40, rsi_hi=60, adx_min=18, pb_factor=0.5, tp1r=2.5, tp2r=5.0, cooldown=3):
+        _df = _df.dropna()
+
+        def _sim(adx_min=25, slope_thr=0.35, rsi_lo=42, rsi_hi=60, pb=0.5, cd=3, tp1r=2.5, tp2r=5.0):
             """
-            Pullback al ribbon: entrada cuando precio toca zona EMA7 (ribbon medio)
-            pb_factor: precio dentro de pb_factor×ATR del EMA7 = "en el ribbon"
+            Simula con filtro de régimen semanal DURO:
+            - slope de EMA100 diario debe ser > slope_thr% en 20 días (tendencia clara)
+            - ADX diario > adx_min (dirección fuerte)
+            - Ribbon alineado + precio cerca del ribbon (pullback)
+            - Solo en dirección de la tendencia semanal
             """
-            trades=[]; last=-cooldown
-            _h=_df["High"].values; _lo_=_df["Low"].values
-            for i in range(50, len(_df)):
-                if i-last < cooldown: continue
+            trades=[]; last=-cd
+            for i in range(120, len(_df)):
+                if i-last < cd: continue
                 row=_df.iloc[i]
                 px=float(row["Close"]); atr=float(row["atr"])
-                r3=float(row["r3"]); r7=float(row["r7"]); r14=float(row["r14"])
-                r34=float(row["r34"]); r200=float(row["r200"])
-                rsi_=float(row["rsi"]); adx_=float(row["adx"])
-                macd_=float(row["macd_h"])
+                r3=float(row["r3"]); r7=float(row["r7"]); r14=float(row["r14"]); r34=float(row["r34"])
+                r200=float(row["r200"]); rsi_=float(row["rsi"]); adx_=float(row["adx"])
+                macd_=float(row["macd_h"]); slope_=float(row["slope"])
+                wtb=bool(row["w_trend_bull"]); wtbr=bool(row["w_trend_bear"])
                 if _np.isnan(atr) or atr==0: continue
 
-                # 4H ribbon alineado?
-                bull_ribbon = r3>r7>r14 and r14>r34
-                bear_ribbon = r3<r7<r14 and r14<r34
+                # FILTRO DE RÉGIMEN: tendencia semanal clara y slope suficiente
+                trending_up   = abs(slope_) >= slope_thr and slope_ > 0 and wtb and adx_ >= adx_min
+                trending_down = abs(slope_) >= slope_thr and slope_ < 0 and wtbr and adx_ >= adx_min
 
-                # Precio toca zona del ribbon (EMA7 ± pb_factor×ATR)?
-                near_ribbon = abs(px-r7) < atr*pb_factor
+                # Ribbon alineado
+                bull_rib = r3>r7>r14 and r14>r34
+                bear_rib = r3<r7<r14 and r14<r34
 
-                if bull_ribbon and near_ribbon and rsi_lo<=rsi_<=rsi_hi and adx_>=adx_min \
-                   and macd_>0 and px>r200:
+                # Pullback al ribbon (precio cerca de EMA7)
+                near = abs(px-r7) < atr*pb
+
+                # Solo LONG si tendencia semanal alcista; solo SHORT si bajista
+                if trending_up  and bull_rib and near and rsi_lo<=rsi_<=rsi_hi and macd_>0 and px>r200:
                     d_="LONG"
-                elif bear_ribbon and near_ribbon and rsi_lo<=rsi_<=rsi_hi and adx_>=adx_min \
-                     and macd_<0 and px<r200:
+                elif trending_down and bear_rib and near and rsi_lo<=rsi_<=rsi_hi and macd_<0 and px<r200:
                     d_="SHORT"
                 else:
                     continue
 
-                sign = 1 if d_=="LONG" else -1
-                # SL: bajo EMA14 (ribbon lento) + pequeño buffer
-                sl_dist = abs(px - r14) + atr*0.2
-                sl_dist = max(sl_dist, atr*0.6)  # mínimo 0.6×ATR
-                sl = round(px - sign*sl_dist, 5)
-                tp1 = round(px + sign*sl_dist*tp1r, 5)
-                tp2 = round(px + sign*sl_dist*tp2r, 5)
+                sign=1 if d_=="LONG" else -1
+                sl_dist=max(abs(px-r14)+atr*0.15, atr*0.5)
+                sl=round(px-sign*sl_dist,5)
+                tp1=round(px+sign*sl_dist*tp1r,5)
+                tp2=round(px+sign*sl_dist*tp2r,5)
 
-                # Simular barra a barra (max 20 días)
-                tp1h=False; pips=0.0; hit=False; slc=sl; buf=sl_dist*0.1
-                for j in range(i+1, min(i+21,len(_df))):
+                # Simulación: 25%@TP1→BE / 75%@TP2 / stop 15 días
+                tp1h=False; pips=0.0; hit=False; slc=sl; buf=sl_dist*0.08
+                for j in range(i+1, min(i+16,len(_df))):
                     fh=float(_df["High"].iloc[j]); fl=float(_df["Low"].iloc[j])
                     if d_=="LONG":
-                        if fl<=slc:
-                            pips += 0.0 if tp1h else -sl_dist/0.0001
-                            hit=True; break
-                        if not tp1h and fh>=tp1:
-                            tp1h=True; pips+=sl_dist*tp1r/0.0001*0.25; slc=px+buf
-                        if tp1h and fh>=tp2:
-                            pips+=sl_dist*tp2r/0.0001*0.75; hit=True; break
+                        if fl<=slc: pips+=0.0 if tp1h else -sl_dist/0.0001; hit=True; break
+                        if not tp1h and fh>=tp1: tp1h=True; pips+=sl_dist*tp1r/0.0001*0.25; slc=px+buf
+                        if tp1h and fh>=tp2: pips+=sl_dist*tp2r/0.0001*0.75; hit=True; break
                     else:
-                        if fh>=slc:
-                            pips += 0.0 if tp1h else -sl_dist/0.0001
-                            hit=True; break
-                        if not tp1h and fl<=tp1:
-                            tp1h=True; pips+=sl_dist*tp1r/0.0001*0.25; slc=px-buf
-                        if tp1h and fl<=tp2:
-                            pips+=sl_dist*tp2r/0.0001*0.75; hit=True; break
-
+                        if fh>=slc: pips+=0.0 if tp1h else -sl_dist/0.0001; hit=True; break
+                        if not tp1h and fl<=tp1: tp1h=True; pips+=sl_dist*tp1r/0.0001*0.25; slc=px-buf
+                        if tp1h and fl<=tp2: pips+=sl_dist*tp2r/0.0001*0.75; hit=True; break
                 if not hit:
-                    cx=float(_df["Close"].iloc[min(i+20,len(_df)-1)])
+                    cx=float(_df["Close"].iloc[min(i+15,len(_df)-1)])
                     rem=((cx-px) if d_=="LONG" else (px-cx))/0.0001
-                    pips += rem*0.75 if tp1h else rem
+                    pips+=rem*0.75 if tp1h else rem
 
-                trades.append({"date":_df.index[i],"dir":d_,
-                               "pips":round(pips,1),"win":pips>0,
-                               "entry":px,"sl":round(sl,5),"tp1":round(tp1,5),"tp2":round(tp2,5),
-                               "sl_pips":round(sl_dist/0.0001,0),
-                               "rr2":round(tp2r,1)})
+                trades.append({"date":_df.index[i],"dir":d_,"pips":round(pips,1),"win":pips>0,
+                                "entry":px,"sl":round(sl,5),"tp1":round(tp1,5),"tp2":round(tp2,5),
+                                "sl_pips":round(sl_dist/0.0001,0)})
                 last=i
             return trades
 
-        # Grid search sobre parámetros del ribbon pullback
+        # Grid search
         _best_s=0; _bp={}; _best_t=[]
-        for _rlo,_rhi in [(40,58),(42,60),(38,55)]:
-            for _adx in [18, 22, 25]:
-                for _pb in [0.4, 0.6, 0.8]:
-                    for _cd in [2, 3, 5]:
-                        _t=_simulate_ribbon(rsi_lo=_rlo,rsi_hi=_rhi,adx_min=_adx,pb_factor=_pb,cooldown=_cd)
-                        if len(_t)<15: continue
+        for _adx in [22,25,28]:
+            for _slope in [0.25,0.35,0.50]:
+                for _pb in [0.4,0.6,0.8]:
+                    for _cd in [3,5,7]:
+                        _t=_sim(adx_min=_adx,slope_thr=_slope,pb=_pb,cd=_cd)
+                        if len(_t)<10: continue
                         _tdf_=_pd.DataFrame(_t)
                         _gp=_tdf_.loc[_tdf_["win"],"pips"].sum()
                         _gl=abs(_tdf_.loc[~_tdf_["win"],"pips"].sum())
@@ -6165,8 +6163,8 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
                         _s=_pf*_wr*_np.log10(len(_t)+1)
                         if _s>_best_s and _pf>1.0:
                             _best_s=_s; _best_t=_t
-                            _bp={"rsi_lo":_rlo,"rsi_hi":_rhi,"adx_min":_adx,"pb_factor":_pb,
-                                 "cooldown":_cd,"pf":round(_pf,2),"wr":round(_wr*100,1),"n":len(_t)}
+                            _bp={"adx_min":_adx,"slope_thr":_slope,"pb":_pb,"cooldown":_cd,
+                                 "pf":round(_pf,2),"wr":round(_wr*100,1),"n":len(_t)}
 
         if not _best_t:
             return None,None,{},"sin señales rentables"
