@@ -988,6 +988,40 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
         _stk   = 100 * (c - _lo14) / (_hi14 - _lo14 + 1e-9)
         stk    = float(_stk.iloc[-1])
 
+        # ADX(14) — fuerza direccional: bloquea señales en mercado lateral
+        try:
+            _pdm = h.diff().clip(lower=0)
+            _ndm = (-lo.diff()).clip(lower=0)
+            _pdm2 = _pdm.where(_pdm > _ndm, 0.0)
+            _ndm2 = _ndm.where(_ndm > _pdm, 0.0)
+            _atr14 = _tr.ewm(span=14, adjust=False).mean()
+            _pdi = 100 * _pdm2.ewm(span=14, adjust=False).mean() / (_atr14 + 1e-9)
+            _ndi = 100 * _ndm2.ewm(span=14, adjust=False).mean() / (_atr14 + 1e-9)
+            _dx  = 100 * abs(_pdi - _ndi) / (_pdi + _ndi + 1e-9)
+            adx  = float(_dx.ewm(span=14, adjust=False).mean().iloc[-1])
+        except Exception:
+            adx = 25.0  # asumir mercado tendencial si falla
+
+        # BLOQUEO DURO: ADX < 18 = mercado lateral, no operar
+        if adx < 18:
+            return
+
+        # Tendencia semanal (resample 1H → W para filtro macro)
+        try:
+            _df_w  = df_1h.resample("W").agg({"Close": "last"}).dropna()
+            _cw    = _df_w["Close"]
+            _e50w  = float(_cw.ewm(span=50, adjust=False).mean().iloc[-1])
+            _e20w  = float(_cw.ewm(span=20, adjust=False).mean().iloc[-1])
+            _pw    = float(_cw.iloc[-1])
+            weekly_bull = _pw > _e50w
+            weekly_bear = _pw < _e50w
+            weekly_trending = abs(_pw - _e50w) / (_e50w + 1e-9) > 0.003
+            has_weekly = True
+        except Exception:
+            weekly_bull = weekly_bear = False
+            weekly_trending = True
+            has_weekly = False
+
         # 4H (resample de 1H)
         try:
             df_4h   = df_1h.resample("4h").agg(
@@ -1050,7 +1084,7 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
         except Exception:
             pass
 
-        # ── EVALUACIÓN DE 10 CONFLUENCIAS ─────────────────────────────────
+        # ── EVALUACIÓN DE 13 CONFLUENCIAS ─────────────────────────────────
         bull = direction == "LONG"
         confluences = []
         score = 0
@@ -1087,23 +1121,23 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
                 confluences.append("⚡ MACD negativo — momentum bajista confirmado")
                 score += 10
 
-        # 3. RSI en zona limpia — ni sobrecomprado ni sobrevendido en la dirección
+        # 3. RSI en zona limpia — ni sobrecomprado ni sobrevendido
         if bull:
-            if 50 <= rsi <= 65:
-                confluences.append(f"📈 RSI {rsi:.0f} en zona ALCISTA limpia (50-65)")
+            if 48 <= rsi <= 63:
+                confluences.append(f"📈 RSI {rsi:.0f} en zona ALCISTA limpia (48-63)")
                 score += 14
-            elif 42 <= rsi < 50:
+            elif 40 <= rsi < 48:
                 confluences.append(f"📈 RSI {rsi:.0f} — pullback limpio, listo para subir")
-                score += 10
+                score += 8
         else:
-            if 35 <= rsi <= 50:
-                confluences.append(f"📉 RSI {rsi:.0f} en zona BAJISTA limpia (35-50)")
+            if 37 <= rsi <= 52:
+                confluences.append(f"📉 RSI {rsi:.0f} en zona BAJISTA limpia (37-52)")
                 score += 14
-            elif 50 < rsi <= 58:
+            elif 52 < rsi <= 60:
                 confluences.append(f"📉 RSI {rsi:.0f} — rebote limpio, listo para caer")
-                score += 10
+                score += 8
 
-        # 4. Confirmación en 4H — la tendencia madre manda
+        # 4. Confirmación en 4H — tendencia madre
         if has_4h:
             if bull and px4h > e21_4h > e50_4h and 40 <= rsi_4h <= 70:
                 confluences.append("🕯 Tendencia 4H ALCISTA confirmada (EMA21+50+RSI)")
@@ -1118,7 +1152,7 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
                 confluences.append("🕯 Precio bajo EMA50 en 4H — sesgo bajista")
                 score += 10
 
-        # 5. Sesión de máxima liquidez — London o NY, no Asia
+        # 5. Sesión de máxima liquidez — London o NY ÚNICAMENTE
         h_utc = datetime.now(timezone.utc).hour
         if 7 <= h_utc < 12:
             confluences.append("🌍 Sesión London — máxima actividad institucional europea")
@@ -1126,56 +1160,79 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
         elif 12 <= h_utc < 17:
             confluences.append("🗽 Sesión NY — máxima liquidez USD + overlap")
             score += 10
-        elif 12 <= h_utc < 8:
-            confluences.append("⚠️ Sesión NY tardía — liquidez moderada")
-            score += 5
+        else:
+            score -= 8   # Asia/off-session: penalización fuerte
 
-        # 6. ATR y volatilidad — sin rango, sin operación
+        # 6. ATR y volatilidad
         if atr_pips >= 10:
-            confluences.append(f"💥 ATR {atr_pips:.1f} pips — volatilidad EXCELENTE para el movimiento")
+            confluences.append(f"💥 ATR {atr_pips:.1f} pips — volatilidad EXCELENTE")
             score += 10
-        elif atr_pips >= 6:
-            confluences.append(f"✅ ATR {atr_pips:.1f} pips — volatilidad SUFICIENTE")
+        elif atr_pips >= 7:
+            confluences.append(f"✅ ATR {atr_pips:.1f} pips — volatilidad suficiente")
             score += 6
-        elif atr_pips < 4:
-            score -= 5   # penalizar si ATR demasiado bajo
+        elif atr_pips < 5:
+            score -= 8
 
-        # 7. EMA200 — filtro macro tendencia principal
+        # 7. EMA200 — filtro macro
         if (bull and px > e200) or (not bull and px < e200):
             confluences.append("🌐 Precio al lado correcto de EMA200 — macro a favor")
             score += 8
 
-        # 8. Volumen institucional — actividad superior a la media
+        # 8. ADX — fuerza de la tendencia (nuevo)
+        if adx >= 30:
+            confluences.append(f"💪 ADX {adx:.0f} — tendencia FUERTE, momentum sólido")
+            score += 12
+        elif adx >= 22:
+            confluences.append(f"✅ ADX {adx:.0f} — tendencia confirmada")
+            score += 7
+
+        # 9. Stochastic — zona de entrada óptima (nuevo)
+        if bull and stk < 65:
+            confluences.append(f"📉 Stoch {stk:.0f} — sin sobrecompra, zona ALCISTA válida")
+            score += 8
+        elif not bull and stk > 35:
+            confluences.append(f"📈 Stoch {stk:.0f} — sin sobreventa, zona BAJISTA válida")
+            score += 8
+
+        # 10. Tendencia semanal (nuevo — filtro macro crítico)
+        if has_weekly:
+            if (bull and weekly_bull) or (not bull and weekly_bear):
+                confluences.append("📅 Tendencia SEMANAL alineada — macro en la misma dirección")
+                score += 12
+            else:
+                score -= 10  # Contra-tendencia semanal: penalización severa
+
+        # 11. Volumen institucional
         if vol_ratio >= 1.8:
-            confluences.append(f"📊 Volumen {vol_ratio:.1f}x la media — actividad institucional ALTA")
+            confluences.append(f"📊 Volumen {vol_ratio:.1f}x — actividad institucional ALTA")
             score += 10
         elif vol_ratio >= 1.3:
-            confluences.append(f"📊 Volumen {vol_ratio:.1f}x la media — actividad superior a lo normal")
-            score += 6
+            confluences.append(f"📊 Volumen {vol_ratio:.1f}x — actividad superior a media")
+            score += 5
 
-        # 9. COT institucional confirma dirección
+        # 12. COT institucional
         if (bull and cot_bias == "bullish") or (not bull and cot_bias == "bearish"):
-            confluences.append("🏦 COT institucional CONFIRMA la dirección — grandes en el mismo lado")
+            confluences.append("🏦 COT institucional CONFIRMA — grandes en el mismo lado")
             score += 10
         elif cot_bias == "neutral":
             score += 2
 
-        # 10. Noticias — riesgo macroeconómico
+        # 13. Noticias — riesgo macroeconómico
         if news_risk == "high":
-            confluences.append("⚠️ NOTICIA HIGH IMPACT en <60min — esperar o reducir tamaño al 50%")
-            score -= 15   # penalización severa: las noticias destruyen señales técnicas
+            confluences.append("⚠️ NOTICIA HIGH IMPACT en <60min — esperar")
+            score -= 20
         elif news_risk == "medium":
-            confluences.append("⚠️ Evento macro próximo — SL más ajustado recomendado")
-            score -= 5
+            confluences.append("⚠️ Evento macro próximo — SL ajustado")
+            score -= 8
         else:
             confluences.append("✅ Sin noticias de alto impacto próximas — entorno limpio")
             score += 5
 
-        # ── UMBRAL: score ≥ 82 Y ≥ 5 confluencias positivas ─────────────
+        # ── UMBRAL ESTRICTO: score ≥ 87, ≥ 6 confluencias, sin noticias ────
         _positive_conf = [c for c in confluences if not c.startswith("⚠️")]
-        _log.info(f"Premium check: dir={direction} score={score} conf={len(_positive_conf)}")
+        _log.info(f"Premium check: dir={direction} score={score} adx={adx:.0f} conf={len(_positive_conf)}")
 
-        if score < 82 or len(_positive_conf) < 5:
+        if score < 87 or len(_positive_conf) < 6:
             return   # No es suficientemente buena — silencio total
 
         if news_risk == "high" and score < 90:
@@ -1185,6 +1242,11 @@ def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
         sl, tp1, tp2, tp3, sl_pips, tp1_pips, tp2_pips, tp3_pips, \
             rr1, rr2, rr3, liq_lvl, liq_pips, liq_desc = \
             _smart_tpsl(df_1h, direction, px, atr)
+
+        # FILTRO R:R mínimo 2.5:1 — si el mercado no da espacio, no operamos
+        if rr1 < 2.5:
+            _log.info("Premium signal descartada: R:R insuficiente (%.1f < 2.5)", rr1)
+            return
 
         # ── GESTIÓN DEL RIESGO según calidad + win-rate histórico ─────────
         risk_pct = "0.5%"
