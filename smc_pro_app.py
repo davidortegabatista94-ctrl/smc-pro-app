@@ -2459,6 +2459,19 @@ else:
     current_user      = st.session_state.current_user
     current_user_name = _USER_NAMES.get(current_user, current_user.capitalize())
 
+    # ── Auto-refresh: registrado aquí, ANTES de cualquier st.stop() ──────────
+    # run_every=20s mantiene el WebSocket vivo en Railway (timeout ~60s).
+    # Solo llama st.rerun() cuando han pasado >=175s Y el modo es trading.
+    @st.fragment(run_every=20)
+    def _autorefresh():
+        if st.session_state.get("app_mode") != "trading":
+            return
+        _t = st.session_state.get("last_analysis_time")
+        if not _t or (time.time() - float(_t)) >= 175:
+            st.rerun()
+
+    _autorefresh()
+
     # ── Selector de modo: Trading o Inversión a Largo Plazo ──────────────────
     if st.session_state.get("app_mode") == "investment":
         try:
@@ -6295,16 +6308,3 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 _refresh_str = st.session_state.get("last_refresh_str", "—")
 st.caption(f"🔄 Último análisis: {_refresh_str}  |  ⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
 
-# ── Auto-refresh cada 3 min — definido a nivel módulo para que Streamlit
-#    lo registre correctamente. Solo actúa cuando app_mode == "trading".
-@st.fragment(run_every=30)
-def _trading_autorefresh():
-    if st.session_state.get("app_mode") != "trading":
-        return
-    _last = st.session_state.get("last_analysis_time")
-    _now  = time.time()
-    _elapsed = (_now - float(_last)) if _last else 999
-    if _elapsed >= 175:
-        st.rerun()
-
-_trading_autorefresh()
