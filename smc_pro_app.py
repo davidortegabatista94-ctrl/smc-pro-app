@@ -6089,8 +6089,8 @@ solo los movimientos direccionales más claros y con mayor probabilidad de éxit
 
         _macd_bull   = _df["macd_hist"] > 0
         _macd_bear   = _df["macd_hist"] < 0
-        _above_ema50 = c > _df["ema50"]
-        _below_ema50 = c < _df["ema50"]
+        _above_ema50 = _df["Close"] > _df["ema50"]
+        _below_ema50 = _df["Close"] < _df["ema50"]
 
         # Score 0-90 (sin filtro sesión en daily; 6 condiciones × peso)
         _score_l = (
