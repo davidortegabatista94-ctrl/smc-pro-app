@@ -2513,6 +2513,16 @@ else:
 
     if st.session_state.get("app_mode") == "orchestrator":
         # ── MODO ORQUESTADOR — renderiza directamente sin tabs de trading ────
+        # Inicializar session_state aquí porque este bloque corre antes
+        # del bloque global de inicialización (líneas ~2700+)
+        if "orch_mode"          not in st.session_state: st.session_state.orch_mode          = "paper"
+        if "orch_analysis_mode" not in st.session_state: st.session_state.orch_analysis_mode = "intraday"
+        if "orch_pairs"         not in st.session_state: st.session_state.orch_pairs          = ["EURUSD","GBPUSD","USDJPY","AUDUSD"]
+        if "orch_min_score"     not in st.session_state: st.session_state.orch_min_score      = 70
+        if "orch_results"       not in st.session_state: st.session_state.orch_results        = None
+        if "orch_last_run"      not in st.session_state: st.session_state.orch_last_run       = 0.0
+        if "orch_bt_results"    not in st.session_state: st.session_state.orch_bt_results     = None
+        if "orch_sweep_df"      not in st.session_state: st.session_state.orch_sweep_df       = None
         import time as _orch_time_home
         _oc_back, _oc_title = st.columns([1, 6])
         if _oc_back.button("← Volver", key="orch_home_back"):
