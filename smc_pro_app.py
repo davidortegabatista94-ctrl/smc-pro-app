@@ -47,7 +47,6 @@ import pandas as pd
 import numpy as np
 import logging
 import time
-import feedparser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
@@ -1528,6 +1527,21 @@ def _get_tg_credentials():
     return tok, cid
 
 
+def _get_cached_calendar() -> list:
+    import time as _t
+    cached = st.session_state.get("economic_calendar")
+    ts     = st.session_state.get("_cal_fetched_ts", 0.0)
+    if cached and (_t.time() - ts) < 3600:
+        return cached
+    try:
+        cal = get_economic_calendar()
+        st.session_state.economic_calendar = cal
+        st.session_state._cal_fetched_ts   = _t.time()
+        return cal
+    except Exception:
+        return cached or []
+
+
 def send_telegram_raw(msg: str) -> bool:
     tok, cid = _get_tg_credentials()
     return _svc_telegram_raw(msg, token=tok, chat_id=cid)
@@ -1888,8 +1902,6 @@ def detect_swing_points(df, lookback=50):
                 all(lows.iloc[i] < lows.iloc[i+j] for j in range(1, 5))):
             sls.append(("FRACTAL LOW", lows.iloc[i], "🟢"))
     return shs[-5:], sls[-5:]
-    return tp, sl, rr, viable, risk_pips, liquidity_warnings
-    return usd_score, eur_score, news, analyze_consensus(news)
 
 # ============================================
 # SEÑAL GLOBAL
@@ -1964,7 +1976,7 @@ def generate_signal():
     _cot_sig    = None   # COT no disponible en generate_signal (viene del session_state en UI)
     _cal_sig    = None
     try:
-        _cal_sig = get_economic_calendar()
+        _cal_sig = _get_cached_calendar()
     except Exception:
         pass
 
@@ -2423,14 +2435,24 @@ else:
     if st.session_state.current_user is None:
         st.markdown("""
         <style>
-        .block-container{max-width:500px!important;padding-top:80px!important}
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
+        .stApp {{ background:#04080f!important; font-family:'Inter',sans-serif!important; }}
+        .block-container {{ max-width:420px!important; padding-top:100px!important; }}
+        #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{{display:none!important}}
+        [data-testid="stWidgetLabel"] label {{font-size:.62rem!important;font-weight:700!important;color:#57697c!important;text-transform:uppercase!important;letter-spacing:.1em!important;}}
+        .stTextInput input,.stSelectbox>div>div {{background:#080d17!important;border:1px solid #172032!important;border-radius:4px!important;color:#c8d3e0!important;font-family:'JetBrains Mono',monospace!important;font-size:.85rem!important;}}
+        button[kind="primaryFormSubmit"],button[kind="primary"] {{background:#1566d3!important;border:none!important;border-radius:4px!important;font-weight:700!important;letter-spacing:.06em!important;text-transform:uppercase!important;font-size:.76rem!important;padding:10px 20px!important;}}
         </style>""", unsafe_allow_html=True)
-        st.title("⚡ SMC Pro v2")
-        st.subheader("Iniciar Sesión")
+        st.markdown("""
+        <div style="margin-bottom:32px;text-align:center">
+          <div style="font-size:1.6rem;font-weight:900;color:#c8d3e0;letter-spacing:-.04em;font-family:Inter,sans-serif">SMC Pro</div>
+          <div style="font-size:.62rem;color:#57697c;letter-spacing:.18em;text-transform:uppercase;margin-top:4px;font-family:Inter,sans-serif">Trading Terminal · EUR/USD</div>
+          <div style="width:40px;height:2px;background:#1566d3;margin:12px auto 0"></div>
+        </div>""", unsafe_allow_html=True)
         with st.form("_login_form"):
             _lu = st.selectbox("Usuario", ["david", "javi"])
-            _lp = st.text_input("Contraseña", type="password", placeholder="tu nombre")
-            _ls = st.form_submit_button("🔐 Entrar", use_container_width=True)
+            _lp = st.text_input("Contraseña", type="password", placeholder="••••••••")
+            _ls = st.form_submit_button("ACCEDER", use_container_width=True)
         if _ls:
             _auth_ok = False
             if _DB_OK:
@@ -2602,6 +2624,8 @@ else:
         st.session_state.market_context_reasons = None
     if "economic_calendar" not in st.session_state:
         st.session_state.economic_calendar = None
+    if "_cal_fetched_ts" not in st.session_state:
+        st.session_state._cal_fetched_ts = 0.0
     if "cot_data" not in st.session_state:
         st.session_state.cot_data = None
     cfg = load_user_config()
@@ -2620,166 +2644,195 @@ else:
         st.session_state.symbol = SYMBOL
 
     st.markdown("""<style>
-/* ══════════════════════════════════════════════════════
-   SMC Pro — Design System v2
-   Dark trading terminal aesthetic
-══════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════
+   SMC Pro — Terminal Design v3  ·  Bloomberg / TradingView Aesthetic
+   Professional dark trading terminal — precision, clarity, density
+══════════════════════════════════════════════════════════════════ */
 
-/* ── Layout ── */
-.main .block-container{padding-top:.6rem!important;padding-bottom:2rem!important;max-width:100%!important}
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+/* ── Design tokens ────────────────────────────────────────── */
+:root {
+  --bg:         #04080f;
+  --surface:    #080d17;
+  --surface-2:  #0c1220;
+  --border:     #172032;
+  --border-2:   #1f2e44;
+  --blue:       #1566d3;
+  --blue-light: #3d8ef5;
+  --blue-glow:  rgba(21,102,211,.16);
+  --green:      #00b87c;
+  --green-dim:  rgba(0,184,124,.08);
+  --green-bd:   rgba(0,184,124,.28);
+  --red:        #e03c50;
+  --red-dim:    rgba(224,60,80,.07);
+  --red-bd:     rgba(224,60,80,.3);
+  --amber:      #c97d0a;
+  --amber-dim:  rgba(201,125,10,.07);
+  --amber-bd:   rgba(201,125,10,.25);
+  --text:       #c8d3e0;
+  --text-2:     #57697c;
+  --text-3:     #2e3f50;
+  --mono:       'JetBrains Mono','Courier New',monospace;
+  --sans:       'Inter',-apple-system,'Segoe UI',sans-serif;
+  --radius:     5px;
+}
+
+/* ── Base layout ── */
+.main .block-container{padding-top:.5rem!important;padding-bottom:2.5rem!important;max-width:100%!important}
 #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important}
-.stApp{background:#060a10!important}
+.stApp{background:var(--bg)!important;font-family:var(--sans)!important}
+p,li,span,label,caption{font-family:var(--sans)!important}
 
 /* ── Sidebar ── */
-[data-testid="stSidebar"]{background:#07090f!important;border-right:1px solid #151d2e!important}
+[data-testid="stSidebar"]{background:#06090f!important;border-right:1px solid var(--border)!important}
 [data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3{
-  color:#3d7eff!important;font-size:.72rem!important;font-weight:700!important;
-  letter-spacing:.1em!important;text-transform:uppercase!important;margin-bottom:6px!important}
-[data-testid="stSidebar"] .stMarkdown p{font-size:.8rem!important;color:#6e7a8a!important}
+  color:var(--blue-light)!important;font-size:.65rem!important;font-weight:700!important;
+  letter-spacing:.12em!important;text-transform:uppercase!important;margin-bottom:8px!important;font-family:var(--sans)!important}
+[data-testid="stSidebar"] .stMarkdown p{font-size:.77rem!important;color:var(--text-2)!important;line-height:1.55!important}
 [data-testid="stSidebarNavItems"]{padding-top:0!important}
 
 /* ── Metrics ── */
 [data-testid="metric-container"]{
-  background:#0b0f18!important;border:1px solid #151d2e!important;
-  border-radius:10px!important;padding:12px 14px!important}
-[data-testid="metric-container"]:hover{border-color:#3d7eff!important}
-[data-testid="stMetricValue"]{
-  font-size:1.2rem!important;font-weight:800!important;
-  font-family:'JetBrains Mono','Courier New',monospace!important;color:#e6edf3!important}
-[data-testid="stMetricLabel"]{
-  font-size:.68rem!important;font-weight:700!important;
-  color:#4d5966!important;text-transform:uppercase!important;letter-spacing:.07em!important}
+  background:var(--surface)!important;border:1px solid var(--border)!important;
+  border-radius:var(--radius)!important;padding:13px 15px!important;position:relative!important;overflow:hidden!important}
+[data-testid="metric-container"]::after{content:'';position:absolute;bottom:0;left:0;width:100%;height:2px;
+  background:var(--blue);transform:scaleX(0);transition:transform .2s ease;transform-origin:left}
+[data-testid="metric-container"]:hover{border-color:var(--border-2)!important}
+[data-testid="metric-container"]:hover::after{transform:scaleX(1)}
+[data-testid="stMetricValue"]{font-size:1.1rem!important;font-weight:700!important;
+  font-family:var(--mono)!important;color:var(--text)!important;letter-spacing:-.01em!important}
+[data-testid="stMetricLabel"]{font-size:.62rem!important;font-weight:600!important;
+  color:var(--text-2)!important;text-transform:uppercase!important;letter-spacing:.1em!important;font-family:var(--sans)!important}
 [data-testid="stMetricDelta"] svg{display:none!important}
-[data-testid="stMetricDelta"]{font-size:.75rem!important}
+[data-testid="stMetricDelta"]{font-size:.7rem!important;font-family:var(--mono)!important}
 
 /* ── Buttons ── */
-button[kind="primary"]{
-  background:linear-gradient(135deg,#1a56db,#1643b0)!important;
-  border:none!important;border-radius:8px!important;
-  font-weight:800!important;letter-spacing:.04em!important;
-  font-size:.85rem!important;padding:10px 20px!important;
-  box-shadow:0 2px 12px rgba(26,86,219,.35)!important;transition:all .2s!important}
-button[kind="primary"]:hover{
-  background:linear-gradient(135deg,#2563eb,#1a56db)!important;
-  box-shadow:0 4px 20px rgba(26,86,219,.55)!important;transform:translateY(-1px)!important}
-button[kind="secondary"]{
-  background:#0d1117!important;border:1px solid #1e2d3d!important;
-  border-radius:8px!important;color:#8b9ab0!important;font-size:.8rem!important}
+button[kind="primary"]{background:var(--blue)!important;border:none!important;border-radius:var(--radius)!important;
+  font-weight:700!important;letter-spacing:.05em!important;font-size:.76rem!important;padding:8px 16px!important;
+  font-family:var(--sans)!important;text-transform:uppercase!important;box-shadow:none!important;transition:background .15s,box-shadow .15s,transform .1s!important}
+button[kind="primary"]:hover{background:#1a72ec!important;box-shadow:0 4px 18px var(--blue-glow)!important;transform:translateY(-1px)!important}
+button[kind="secondary"]{background:var(--surface)!important;border:1px solid var(--border)!important;
+  border-radius:var(--radius)!important;color:var(--text-2)!important;font-size:.76rem!important;
+  font-family:var(--sans)!important;box-shadow:none!important}
+button[kind="secondary"]:hover{border-color:var(--border-2)!important;color:var(--text)!important}
 
 /* ── Expanders ── */
-[data-testid="stExpander"]{
-  background:#0b0f18!important;border:1px solid #151d2e!important;border-radius:10px!important}
-details summary{
-  font-weight:600!important;font-size:.82rem!important;
-  color:#8b9ab0!important;padding:10px 14px!important}
-details summary:hover{color:#e6edf3!important}
+[data-testid="stExpander"]{background:var(--surface)!important;border:1px solid var(--border)!important;border-radius:var(--radius)!important}
+details summary{font-weight:600!important;font-size:.72rem!important;color:var(--text-2)!important;
+  padding:9px 13px!important;font-family:var(--sans)!important;text-transform:uppercase!important;letter-spacing:.07em!important}
+details summary:hover{color:var(--text)!important}
+details[open] summary{color:var(--text)!important;border-bottom:1px solid var(--border)!important}
 
 /* ── Alerts ── */
-[data-testid="stAlert"]{border-radius:8px!important;padding:10px 14px!important;font-size:.82rem!important}
-.stSuccess{background:rgba(5,150,105,.08)!important;border-color:rgba(5,150,105,.3)!important}
-.stWarning{background:rgba(217,119,6,.08)!important;border-color:rgba(217,119,6,.3)!important}
-.stInfo{background:rgba(26,86,219,.08)!important;border-color:rgba(26,86,219,.3)!important}
-.stError{background:rgba(185,28,28,.08)!important;border-color:rgba(185,28,28,.3)!important}
+[data-testid="stAlert"]{border-radius:var(--radius)!important;padding:9px 14px!important;font-size:.76rem!important;
+  font-family:var(--sans)!important;border-left-width:3px!important;border-top-width:0!important;border-right-width:0!important;border-bottom-width:0!important}
+.stSuccess{background:var(--green-dim)!important;border-color:var(--green)!important;color:#8de5c7!important}
+.stWarning{background:var(--amber-dim)!important;border-color:var(--amber)!important;color:#e6b86a!important}
+.stInfo{background:rgba(21,102,211,.06)!important;border-color:var(--blue)!important;color:#7ab5f5!important}
+.stError{background:var(--red-dim)!important;border-color:var(--red)!important;color:#f08090!important}
 
 /* ── DataFrames ── */
-[data-testid="stDataFrame"]{border:1px solid #151d2e!important;border-radius:8px!important;overflow:hidden!important}
+[data-testid="stDataFrame"]{border:1px solid var(--border)!important;border-radius:var(--radius)!important;overflow:hidden!important}
 
 /* ── Dividers ── */
-hr{border-color:#151d2e!important;margin:14px 0!important}
+hr{border-color:var(--border)!important;margin:14px 0!important}
 
 /* ── Inputs ── */
-[data-testid="stWidgetLabel"] label{
-  font-size:.72rem!important;font-weight:700!important;
-  color:#4d5966!important;text-transform:uppercase!important;letter-spacing:.06em!important}
-.stTextInput input,.stSelectbox select{
-  background:#0b0f18!important;border-color:#1e2d3d!important;
-  border-radius:6px!important;color:#c9d1d9!important}
+[data-testid="stWidgetLabel"] label{font-size:.62rem!important;font-weight:700!important;
+  color:var(--text-2)!important;text-transform:uppercase!important;letter-spacing:.1em!important;font-family:var(--sans)!important}
+.stTextInput input,.stSelectbox select{background:var(--surface)!important;border-color:var(--border)!important;
+  border-radius:var(--radius)!important;color:var(--text)!important;font-family:var(--mono)!important;font-size:.82rem!important}
+.stTextInput input:focus{border-color:var(--blue)!important;box-shadow:0 0 0 2px var(--blue-glow)!important}
 
-/* ── Plotly chart ── */
-.js-plotly-plot{border:1px solid #151d2e!important;border-radius:10px!important;overflow:hidden!important}
+/* ── Plotly ── */
+.js-plotly-plot{border:1px solid var(--border)!important;border-radius:var(--radius)!important;overflow:hidden!important}
 
-/* ══════ Custom component classes ══════ */
+/* ── Headings ── */
+h1,h2,h3{color:var(--text)!important;font-family:var(--sans)!important;font-weight:700!important;letter-spacing:-.02em!important}
+h3{font-size:.9rem!important;text-transform:uppercase;letter-spacing:.04em!important;color:var(--text-2)!important}
 
-/* Header */
-.smc-header{
-  display:flex;justify-content:space-between;align-items:center;
-  padding:10px 0 12px;border-bottom:1px solid #151d2e;margin-bottom:10px}
-.smc-logo{font-size:1.25rem;font-weight:900;color:#e6edf3;letter-spacing:-.03em}
-.smc-pair{font-size:.85rem;font-weight:700;color:#3d7eff;font-family:monospace}
-.smc-time{font-size:.75rem;color:#4d5966;font-family:monospace}
-.smc-version{font-size:.62rem;font-weight:700;color:#4d5966;background:#0d1117;
-  border:1px solid #1e2d3d;padding:1px 6px;border-radius:3px;margin-left:6px;vertical-align:middle}
-.smc-hbrand{display:flex;align-items:center;gap:8px}
-.smc-hinfo{display:flex;align-items:center;gap:10px}
+/* ═══ TERMINAL COMPONENTS ═══ */
+
+/* Header bar */
+.smc-header{display:flex;justify-content:space-between;align-items:center;padding:8px 0 11px;border-bottom:1px solid var(--border);margin-bottom:12px}
+.smc-logo{font-size:1.05rem;font-weight:900;color:var(--text);letter-spacing:-.04em;font-family:var(--sans)}
+.smc-pair{font-size:.88rem;font-weight:700;color:var(--blue-light);font-family:var(--mono);letter-spacing:.04em}
+.smc-time{font-size:.72rem;color:var(--text-2);font-family:var(--mono)}
+.smc-version{font-size:.56rem;font-weight:700;color:var(--text-3);background:var(--surface);border:1px solid var(--border);
+  padding:2px 6px;border-radius:3px;margin-left:6px;vertical-align:middle;font-family:var(--mono);text-transform:uppercase;letter-spacing:.08em}
+.smc-hbrand{display:flex;align-items:center;gap:10px}
+.smc-hinfo{display:flex;align-items:center;gap:14px}
 
 /* Badges */
-.bdg{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;
-     font-size:.68rem;font-weight:800;letter-spacing:.04em;vertical-align:middle}
-.bdg-g{background:rgba(5,150,105,.12);color:#10b981;border:1px solid rgba(5,150,105,.25)}
-.bdg-r{background:rgba(220,38,38,.12);color:#f87171;border:1px solid rgba(220,38,38,.25)}
-.bdg-y{background:rgba(217,119,6,.12);color:#f59e0b;border:1px solid rgba(217,119,6,.25)}
-.bdg-b{background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.25)}
-.bdg-x{background:rgba(107,114,128,.12);color:#9ca3af;border:1px solid rgba(107,114,128,.25)}
+.bdg{display:inline-flex;align-items:center;gap:3px;padding:2px 7px;border-radius:3px;
+  font-size:.6rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;vertical-align:middle;font-family:var(--sans)}
+.bdg-g{background:rgba(0,184,124,.1);color:#00c98a;border:1px solid var(--green-bd)}
+.bdg-r{background:rgba(224,60,80,.1);color:#f06070;border:1px solid var(--red-bd)}
+.bdg-y{background:rgba(201,125,10,.1);color:#d48c22;border:1px solid var(--amber-bd)}
+.bdg-b{background:rgba(21,102,211,.1);color:#5599ee;border:1px solid rgba(21,102,211,.3)}
+.bdg-x{background:rgba(50,70,90,.1);color:var(--text-2);border:1px solid rgba(50,70,90,.3)}
 
-/* Section headers */
-.smc-sec{display:flex;align-items:center;gap:8px;padding:16px 0 10px;
-  border-bottom:1px solid #151d2e;margin-bottom:12px}
-.smc-sec span:first-child{font-size:1rem}
-.smc-sec-title{font-size:.72rem;font-weight:800;color:#4d5966;
-  letter-spacing:.1em;text-transform:uppercase}
+/* Section dividers */
+.smc-sec{display:flex;align-items:center;gap:10px;padding:18px 0 10px;border-bottom:1px solid var(--border);margin-bottom:14px}
+.smc-sec::before{content:'';display:block;width:3px;height:14px;background:var(--blue);border-radius:2px;flex-shrink:0}
+.smc-sec span:first-child{font-size:.9rem}
+.smc-sec-title{font-size:.62rem;font-weight:800;color:var(--text-2);letter-spacing:.14em;text-transform:uppercase;font-family:var(--sans)}
 
-/* Signal hero card */
-.smc-signal{border-radius:12px;padding:18px 22px;margin:6px 0;
-  display:flex;align-items:center;justify-content:space-between}
-.smc-sig-b{background:linear-gradient(135deg,#011a0a,#012d10);
-  border:1px solid rgba(5,150,105,.5);box-shadow:0 0 24px rgba(5,150,105,.08)}
-.smc-sig-s{background:linear-gradient(135deg,#1a0505,#2d0a0a);
-  border:1px solid rgba(220,38,38,.5);box-shadow:0 0 24px rgba(220,38,38,.08)}
-.smc-sig-n{background:linear-gradient(135deg,#151206,#221b08);
-  border:1px solid rgba(217,119,6,.3)}
-.sig-dir{font-size:1.7rem;font-weight:900;letter-spacing:-.02em;line-height:1}
-.sig-dir-b{color:#10b981}.sig-dir-s{color:#f87171}.sig-dir-n{color:#f59e0b}
-.sig-price{font-size:1.1rem;font-weight:700;font-family:'JetBrains Mono','Courier New',monospace;
-  color:#c9d1d9;margin-top:4px}
-.sig-right{display:flex;flex-direction:column;align-items:flex-end;gap:5px}
-.sig-pill{font-size:.72rem;color:#6e7a8a;background:#0d1117;
-  border:1px solid #1e2d3d;border-radius:6px;padding:3px 9px}
+/* Signal card */
+.smc-signal{border-radius:var(--radius)!important;padding:18px 22px;margin:8px 0;
+  display:flex;align-items:center;justify-content:space-between;position:relative;overflow:hidden}
+.smc-signal::before{content:'';position:absolute;top:0;left:0;width:4px;height:100%}
+.smc-sig-b{background:var(--green-dim);border:1px solid var(--green-bd)}
+.smc-sig-b::before{background:var(--green)}
+.smc-sig-s{background:var(--red-dim);border:1px solid var(--red-bd)}
+.smc-sig-s::before{background:var(--red)}
+.smc-sig-n{background:var(--amber-dim);border:1px solid var(--amber-bd)}
+.smc-sig-n::before{background:var(--amber)}
+.sig-dir{font-size:1.55rem;font-weight:900;letter-spacing:-.02em;line-height:1;font-family:var(--sans)}
+.sig-dir-b{color:var(--green)}.sig-dir-s{color:var(--red)}.sig-dir-n{color:var(--amber)}
+.sig-price{font-size:.95rem;font-weight:600;font-family:var(--mono);color:var(--text-2);margin-top:5px;letter-spacing:.04em}
+.sig-right{display:flex;flex-direction:column;align-items:flex-end;gap:4px}
+.sig-pill{font-size:.65rem;color:var(--text-2);background:rgba(4,8,15,.7);border:1px solid var(--border);border-radius:3px;padding:2px 8px;font-family:var(--mono);letter-spacing:.04em}
 
 /* Score card */
-.smc-score{background:#0b0f18;border:1px solid #151d2e;
-  border-radius:12px;padding:16px 18px}
-.sc-num{font-size:2.6rem;font-weight:900;font-family:monospace;line-height:1}
-.sc-den{font-size:1rem;font-weight:400;color:#4d5966}
-.sc-lbl{font-size:.68rem;font-weight:800;letter-spacing:.1em;
-  text-transform:uppercase;margin:4px 0 10px}
-.sc-track{height:5px;background:#151d2e;border-radius:3px;overflow:hidden}
+.smc-score{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden}
+.smc-score::before{content:'';position:absolute;top:0;left:0;width:100%;height:2px;background:linear-gradient(90deg,var(--blue) 0%,transparent 100%)}
+.sc-num{font-size:2.8rem;font-weight:900;font-family:var(--mono);line-height:1;letter-spacing:-.04em}
+.sc-den{font-size:.85rem;font-weight:400;color:var(--text-3);font-family:var(--mono)}
+.sc-lbl{font-size:.58rem;font-weight:800;letter-spacing:.16em;text-transform:uppercase;margin:5px 0 12px;font-family:var(--sans)}
+.sc-track{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
 .sc-fill{height:100%;border-radius:3px;transition:width .6s ease}
 
-/* Position banner */
-.smc-pos{display:flex;align-items:center;justify-content:space-between;
-  background:#0b0f18;border:1px solid #151d2e;border-radius:10px;
-  padding:11px 16px;margin:6px 0;font-size:.8rem}
-.smc-pos-open{border-left:3px solid #3d7eff!important;background:rgba(26,86,219,.04)!important}
-.smc-pos-b{border-left:3px solid #10b981!important}
-.smc-pos-s{border-left:3px solid #f87171!important}
-.pos-vals{display:flex;gap:18px;font-family:monospace;font-size:.78rem}
-.pos-val-tp{color:#10b981}.pos-val-sl{color:#f87171}.pos-val-x{color:#6e7a8a}
+/* Position bar */
+.smc-pos{display:flex;align-items:center;justify-content:space-between;background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:10px 16px;margin:5px 0;font-size:.77rem;font-family:var(--sans)}
+.smc-pos-open{background:rgba(21,102,211,.04)!important}
+.smc-pos-b{border-left:3px solid var(--green)!important}
+.smc-pos-s{border-left:3px solid var(--red)!important}
+.pos-vals{display:flex;gap:20px;font-family:var(--mono);font-size:.72rem}
+.pos-val-tp{color:var(--green)}.pos-val-sl{color:var(--red)}.pos-val-x{color:var(--text-2)}
 
-/* Window status */
-.smc-win{display:flex;align-items:center;gap:8px;padding:8px 14px;
-  border-radius:8px;margin-bottom:8px;font-size:.8rem;font-weight:600}
-.smc-win-on{background:rgba(5,150,105,.06);border:1px solid rgba(5,150,105,.2);color:#10b981}
-.smc-win-off{background:rgba(217,119,6,.06);border:1px solid rgba(217,119,6,.2);color:#f59e0b}
+/* Trading window */
+.smc-win{display:flex;align-items:center;gap:8px;padding:6px 13px;border-radius:var(--radius);
+  margin-bottom:8px;font-size:.72rem;font-weight:600;font-family:var(--sans);letter-spacing:.05em;text-transform:uppercase}
+.smc-win-on{background:var(--green-dim);border:1px solid var(--green-bd);color:var(--green)}
+.smc-win-off{background:var(--amber-dim);border:1px solid var(--amber-bd);color:var(--amber)}
 
 /* Legacy compat */
-.big-signal{font-size:1.8rem;font-weight:800;text-align:center;
-  padding:.8rem;border-radius:10px;margin-bottom:.5rem}
-.sl{background:#011a0a;color:#10b981;border:1px solid rgba(5,150,105,.4)}
-.ss{background:#1a0505;color:#f87171;border:1px solid rgba(220,38,38,.4)}
-.sw{background:#151206;color:#f59e0b;border:1px solid rgba(217,119,6,.3)}
-.scalp-box{border:1px solid #1e2d3d;border-radius:8px;padding:.8rem;background:#0b0f18;margin-top:.5rem}
-.score-box{border-radius:10px;padding:.8rem;text-align:center;font-size:1.6rem;font-weight:800;margin:.3rem 0}
-.vol-bar{height:14px;border-radius:3px;background:#10b981;margin:2px 0}
+.big-signal{font-size:1.45rem;font-weight:800;text-align:center;padding:.85rem 1rem;border-radius:var(--radius);margin-bottom:.5rem;font-family:var(--sans);letter-spacing:-.01em}
+.sl{background:var(--green-dim);color:var(--green);border:1px solid var(--green-bd)}
+.ss{background:var(--red-dim);color:var(--red);border:1px solid var(--red-bd)}
+.sw{background:var(--amber-dim);color:var(--amber);border:1px solid var(--amber-bd)}
+.scalp-box{border:1px solid var(--border);border-radius:var(--radius);padding:.8rem;background:var(--surface);margin-top:.5rem}
+.score-box{border-radius:var(--radius);padding:.8rem;text-align:center;font-size:1.55rem;font-weight:800;margin:.3rem 0;font-family:var(--mono)}
+.vol-bar{height:10px;border-radius:2px;background:var(--green);margin:2px 0}
+
+/* Weight bars & data rows */
+.t-row{display:flex;justify-content:space-between;align-items:center;padding:6px 12px;border-radius:3px;font-size:.76rem;color:var(--text-2);border-bottom:1px solid var(--border)}
+.t-row:hover{background:var(--surface-2);color:var(--text)}
+.t-val{font-family:var(--mono);font-weight:600;color:var(--text);font-size:.78rem}
+.t-green{color:var(--green)}.t-red{color:var(--red)}.t-amber{color:var(--amber)}.t-blue{color:var(--blue-light)}
 </style>""", unsafe_allow_html=True)
 
     mt5_login = st.session_state.mt5_login or None
@@ -2827,13 +2880,14 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
 
     # ── Indicador de refresco (fecha + precio en vivo) ──────────────────────
     st.markdown(f"""<div style="
-        display:inline-flex;align-items:center;gap:14px;
-        background:#0d1117;border:1px solid #30363d;border-radius:8px;
-        padding:6px 16px;margin-bottom:8px;font-family:monospace">
-      <span style="color:#8b949e;font-size:11px">ÚLTIMO REFRESCO</span>
-      <span style="color:#e6edf3;font-size:13px;font-weight:600">{_live_dt_str}</span>
-      <span style="color:#8b949e;font-size:11px">EUR/USD</span>
-      <span style="color:#3fb950;font-size:15px;font-weight:700">{_live_px_str}</span>
+        display:inline-flex;align-items:center;gap:16px;
+        background:#080d17;border:1px solid #172032;border-radius:5px;
+        padding:5px 14px;margin-bottom:8px;font-family:'JetBrains Mono','Courier New',monospace">
+      <span style="color:#57697c;font-size:10px;letter-spacing:.1em;text-transform:uppercase">REFRESCO</span>
+      <span style="color:#c8d3e0;font-size:12px;font-weight:600">{_live_dt_str}</span>
+      <span style="color:#57697c;font-size:10px">·</span>
+      <span style="color:#57697c;font-size:10px;letter-spacing:.08em">EUR/USD</span>
+      <span style="color:#00b87c;font-size:13px;font-weight:700;letter-spacing:.04em">{_live_px_str}</span>
     </div>""", unsafe_allow_html=True)
 
     # ── Banner modo local (extensión MT5) ────────────────────────────────────
@@ -2915,20 +2969,20 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
   css.id = 'smc-nav-css';
   css.textContent = [
     '#smc-nav{position:fixed;right:0;top:50%;transform:translateY(-50%);',
-    'z-index:99999;background:#0d1117;border:1px solid #30363d;',
-    'border-left:3px solid #1f6feb;border-radius:8px 0 0 8px;',
-    'padding:10px 6px;width:148px;max-height:90vh;overflow-y:auto;',
-    'font-family:-apple-system,sans-serif;box-shadow:-4px 0 20px #0006;}',
-    '#smc-nav::-webkit-scrollbar{width:3px;}',
-    '#smc-nav::-webkit-scrollbar-thumb{background:#30363d;border-radius:2px;}',
-    '#smc-nav .n-title{color:#1f6feb;font-size:0.65rem;font-weight:700;',
-    'letter-spacing:.08em;text-transform:uppercase;padding:0 6px 6px;',
-    'border-bottom:1px solid #21262d;margin-bottom:4px;display:block;}',
-    '#smc-nav a{display:block;color:#c9d1d9;font-size:0.72rem;',
-    'padding:4px 8px;border-radius:5px;text-decoration:none;',
-    'cursor:pointer;white-space:nowrap;margin:1px 0;transition:all .15s;}',
-    '#smc-nav a:hover{background:#1f6feb;color:#fff;padding-left:12px;}',
-    '#smc-nav .n-sep{border-top:1px solid #21262d;margin:5px 4px;}'
+    'z-index:99999;background:#080d17;border:1px solid #172032;',
+    'border-left:3px solid #1566d3;border-radius:6px 0 0 6px;',
+    'padding:8px 5px;width:140px;max-height:90vh;overflow-y:auto;',
+    'font-family:Inter,-apple-system,sans-serif;box-shadow:-3px 0 18px rgba(0,0,0,.5);}',
+    '#smc-nav::-webkit-scrollbar{width:2px;}',
+    '#smc-nav::-webkit-scrollbar-thumb{background:#172032;border-radius:2px;}',
+    '#smc-nav .n-title{color:#3d8ef5;font-size:0.58rem;font-weight:800;',
+    'letter-spacing:.14em;text-transform:uppercase;padding:0 6px 7px;',
+    'border-bottom:1px solid #172032;margin-bottom:3px;display:block;}',
+    '#smc-nav a{display:block;color:#57697c;font-size:0.68rem;',
+    'padding:4px 8px;border-radius:3px;text-decoration:none;',
+    'cursor:pointer;white-space:nowrap;margin:1px 0;transition:all .12s;font-weight:500;}',
+    '#smc-nav a:hover{background:rgba(21,102,211,.15);color:#c8d3e0;padding-left:11px;}',
+    '#smc-nav .n-sep{border-top:1px solid #172032;margin:4px 4px;}'
   ].join('');
   p.head.appendChild(css);
 
@@ -2942,26 +2996,26 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
   var nav = p.createElement('div');
   nav.id = 'smc-nav';
   nav.innerHTML =
-    '<span class="n-title">⚡ SMC Nav</span>' +
-    '<a onclick="smcGo(\'sec-precio\')">📡 Precio</a>' +
-    '<a onclick="smcGo(\'sec-senal\')">🧠 Señal</a>' +
-    '<a onclick="smcGo(\'sec-score\')">🎯 Score</a>' +
-    '<a onclick="smcGo(\'sec-chart\')">📈 Gráfico</a>' +
-    '<a onclick="smcGo(\'sec-dna\')">🧬 DNA</a>' +
-    '<a onclick="smcGo(\'sec-vol\')">📊 Volumen</a>' +
-    '<a onclick="smcGo(\'sec-scalping\')">🎯 Scalping</a>' +
-    '<a onclick="smcGo(\'sec-estructura\')">🏗️ Estructura</a>' +
-    '<a onclick="smcGo(\'sec-manipulacion\')">🕵️ Liquidez</a>' +
-    '<a onclick="smcGo(\'sec-cot\')">🏦 COT</a>' +
-    '<a onclick="smcGo(\'sec-ia\')">🤖 Motor IA</a>' +
+    '<span class="n-title">SMC Terminal</span>' +
+    '<a onclick="smcGo(\'sec-precio\')">Precio</a>' +
+    '<a onclick="smcGo(\'sec-senal\')">Señal</a>' +
+    '<a onclick="smcGo(\'sec-score\')">Score</a>' +
+    '<a onclick="smcGo(\'sec-chart\')">Gráfico</a>' +
+    '<a onclick="smcGo(\'sec-dna\')">DNA</a>' +
+    '<a onclick="smcGo(\'sec-vol\')">Volumen</a>' +
+    '<a onclick="smcGo(\'sec-scalping\')">Scalping</a>' +
+    '<a onclick="smcGo(\'sec-estructura\')">Estructura</a>' +
+    '<a onclick="smcGo(\'sec-manipulacion\')">Liquidez</a>' +
+    '<a onclick="smcGo(\'sec-cot\')">COT</a>' +
+    '<a onclick="smcGo(\'sec-ia\')">Motor IA</a>' +
     '<div class="n-sep"></div>' +
-    '<a onclick="smcGo(\'sec-backtest\')">📊 Backtest</a>' +
-    '<a onclick="smcGo(\'sec-backtest2008\')">🌍 2008</a>' +
+    '<a onclick="smcGo(\'sec-backtest\')">Backtest 60d</a>' +
+    '<a onclick="smcGo(\'sec-backtest2008\')">2008+</a>' +
     '<div class="n-sep"></div>' +
-    '<a onclick="smcGo(\'sec-porq\')">🔍 Por qué</a>' +
-    '<a onclick="smcGo(\'sec-bot\')">🤖 Bot</a>' +
-    '<a onclick="smcGo(\'sec-dashboard\')">📋 Dashboard</a>' +
-    '<a onclick="smcGo(\'sec-dxy\')">💱 DXY</a>' +
+    '<a onclick="smcGo(\'sec-porq\')">Por qué</a>' +
+    '<a onclick="smcGo(\'sec-bot\')">Bot</a>' +
+    '<a onclick="smcGo(\'sec-dashboard\')">Dashboard</a>' +
+    '<a onclick="smcGo(\'sec-dxy\')">DXY</a>' +
     '<a onclick="smcGo(\'sec-accion\')">🎯 Acción</a>' +
     '<a onclick="smcGo(\'sec-autoimprove\')">🔬 Auto-Mejora</a>' +
     '<a onclick="smcGo(\'sec-advisor\')">💬 Advisor</a>';
@@ -3015,8 +3069,16 @@ hr{border-color:#151d2e!important;margin:14px 0!important}
                     _db.invalidate_session(st.session_state.session_token)
                 except Exception:
                     pass
-            st.session_state.current_user  = None
-            st.session_state.session_token = None
+            _keys_to_clear = [
+                "current_user", "session_token", "active_dna", "_analysis_cache",
+                "macro_context", "market_context_reasons", "economic_calendar",
+                "_cal_fetched_ts", "cot_data", "last_analysis_time",
+                "analysis_executed", "backtest_result", "strategy_comparison",
+                f"advisor_chat_{st.session_state.get('current_user', '')}",
+                f"advisor_session_{st.session_state.get('current_user', '')}",
+            ]
+            for _k in _keys_to_clear:
+                st.session_state.pop(_k, None)
             st.query_params.clear()
             st.rerun()
         st.markdown("---")
@@ -3364,7 +3426,7 @@ if st.session_state.analysis_executed:
             if _kb_dir != "NO TRADE":
                 try:
                     _cot_rec = st.session_state.get("cot_data")
-                    _cal_rec = st.session_state.get("economic_calendar") or get_economic_calendar()
+                    _cal_rec = _get_cached_calendar()
                     kb_record_pending_signal(
                         _kb_dir, _cur_price, _kb_strat, _kb_rsn,
                         df=df_1h, cot=_cot_rec, calendar=_cal_rec
@@ -3375,7 +3437,7 @@ if st.session_state.analysis_executed:
         # ── Contexto fundamental automático ─────────────────────────────────
         try:
             _cot_auto = st.session_state.get("cot_data")
-            _cal_auto = st.session_state.get("economic_calendar") or get_economic_calendar()
+            _cal_auto = _get_cached_calendar()
             _news_auto = signal.get("news", [])
             _ctx_auto  = explain_market_context(df_1h, cot=_cot_auto, calendar=_cal_auto, news=_news_auto)
             st.session_state.market_context_reasons = _ctx_auto
@@ -3612,12 +3674,12 @@ if st.session_state.analysis_executed:
     _ema_dn  = (_tv_ema20 and _tv_ema50 and _tv_ema20 < _tv_ema50)
     _macd_up = (_tv_macd and _tv_macd_sig and _tv_macd > _tv_macd_sig)
     _trend_lbl = "▲ Alcista" if _ema_up else ("▼ Bajista" if _ema_dn else "→ Lateral")
-    _trend_col = "#3fb950" if _ema_up else ("#f85149" if _ema_dn else "#e3b341")
+    _trend_col = "#00b87c" if _ema_up else ("#e03c50" if _ema_dn else "#c97d0a")
     _macd_lbl  = "▲ Alcista" if _macd_up else ("▼ Bajista" if (_tv_macd and _tv_macd_sig) else "—")
-    _macd_col  = "#3fb950" if _macd_up else "#f85149"
+    _macd_col  = "#00b87c" if _macd_up else "#e03c50"
     st.markdown(
         f'<div style="display:flex;gap:12px;margin-top:6px">'
-        f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px 16px">'
+        f'<div style="background:#080d17;border:1px solid #172032;border-radius:4px;padding:5px 13px">'
         f'<span style="color:#8b949e;font-size:11px">EMA20/50 · </span>'
         f'<span style="color:{_trend_col};font-weight:700;font-size:13px">{_trend_lbl}</span></div>'
         f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px 16px">'
@@ -3773,7 +3835,7 @@ if st.session_state.analysis_executed:
     label, color = score_label(score)
     col_sc1, col_sc2 = st.columns([1, 2])
     with col_sc1:
-        _sc_colors = {"green": "#10b981", "lightgreen": "#4ade80", "orange": "#f59e0b", "red": "#f87171"}
+        _sc_colors = {"green": "#00b87c", "lightgreen": "#00c98a", "orange": "#c97d0a", "red": "#e03c50"}
         _sc = _sc_colors.get(color, "#6b7280")
         st.markdown(f"""<div class="smc-score">
   <div class="sc-num" style="color:{_sc}">{score}<span class="sc-den">/100</span></div>
@@ -4335,12 +4397,21 @@ if st.session_state.analysis_executed:
         long_sc   = ai_bias.get("long_score", 0)
         short_sc  = ai_bias.get("short_score", 0)
         evidence  = ai_bias.get("evidence", [])
-        bias_color = "#0f5132" if bias_dir == "LONG" else ("#842029" if bias_dir == "SHORT" else "#333")
-        bias_emoji = "📈" if bias_dir == "LONG" else ("📉" if bias_dir == "SHORT" else "⚪")
+        _bias_bg  = "rgba(0,184,124,.07)" if bias_dir == "LONG" else ("rgba(224,60,80,.07)" if bias_dir == "SHORT" else "rgba(201,125,10,.06)")
+        _bias_bd  = "#00b87c" if bias_dir == "LONG" else ("#e03c50" if bias_dir == "SHORT" else "#c97d0a")
+        _bias_col = "#00b87c" if bias_dir == "LONG" else ("#e03c50" if bias_dir == "SHORT" else "#c97d0a")
+        bias_emoji = "▲" if bias_dir == "LONG" else ("▼" if bias_dir == "SHORT" else "–")
         st.markdown(
-            f'<div class="score-box" style="background:{bias_color};color:white;font-size:1.4rem">'
-            f'{bias_emoji} BIAS IA: {bias_dir} — Confianza {conf}%'
-            f'<br><small>LONG score: {long_sc} | SHORT score: {short_sc}</small></div>',
+            f'<div style="background:{_bias_bg};border:1px solid {_bias_bd};border-left:4px solid {_bias_bd};'
+            f'border-radius:5px;padding:14px 18px;margin:6px 0">'
+            f'<div style="display:flex;align-items:center;justify-content:space-between">'
+            f'<span style="font-size:1.3rem;font-weight:900;color:{_bias_col};font-family:monospace;letter-spacing:-.02em">'
+            f'{bias_emoji} BIAS IA: {bias_dir}</span>'
+            f'<span style="font-size:.68rem;color:#57697c;font-family:monospace">CONFIANZA <span style="color:{_bias_col};font-size:.9rem;font-weight:700">{conf}%</span></span>'
+            f'</div>'
+            f'<div style="font-size:.68rem;color:#57697c;font-family:monospace;margin-top:4px">'
+            f'LONG {long_sc} &nbsp;·&nbsp; SHORT {short_sc}'
+            f'</div></div>',
             unsafe_allow_html=True
         )
         ia_c1, ia_c2 = st.columns(2)
@@ -4422,7 +4493,7 @@ with _t_bt:
                             pass
                     # Contexto de mercado sobre los mismos datos del backtest
                     cot_snap  = st.session_state.get("cot_data")
-                    cal_snap  = st.session_state.get("economic_calendar") or get_economic_calendar()
+                    cal_snap  = _get_cached_calendar()
                     news_snap = st.session_state.get("current_news") or []
                     ctx_snap  = explain_market_context(bt_df, cot=cot_snap, calendar=cal_snap, news=news_snap)
                     st.session_state.market_context_reasons = ctx_snap
@@ -5186,13 +5257,27 @@ with _t_mejora:
                 # Pesos de señal
                 _sw = _master.get("signal_weights") or {}
                 if _sw:
-                    st.markdown("**⚖️ Pesos de señal aprendidos:**")
-                    _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
-                    _sc1.metric("Técnico",      f"{_sw.get('technical',0)*100:.0f}%")
-                    _sc2.metric("DXY",          f"{_sw.get('dxy',0)*100:.0f}%")
-                    _sc3.metric("Volumen",      f"{_sw.get('volume',0)*100:.0f}%")
-                    _sc4.metric("Sentimiento",  f"{_sw.get('sentiment',0)*100:.0f}%")
-                    _sc5.metric("Fundamental",  f"{_sw.get('fundamental',0)*100:.0f}%")
+                    st.markdown('<p style="font-size:.62rem;font-weight:800;letter-spacing:.12em;color:#57697c;text-transform:uppercase;margin:10px 0 6px">PESOS DE SEÑAL APRENDIDOS</p>', unsafe_allow_html=True)
+                    _weight_items = [
+                        ("Técnico",     _sw.get("technical", 0),   "#1566d3"),
+                        ("DXY",         _sw.get("dxy", 0),         "#3d8ef5"),
+                        ("Fundamental", _sw.get("fundamental", 0), "#00b87c"),
+                        ("Sentimiento", _sw.get("sentiment", 0),   "#c97d0a"),
+                        ("Volumen",     _sw.get("volume", 0),      "#57697c"),
+                    ]
+                    _whtml = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:6px">'
+                    for _wlbl, _wval, _wcol in _weight_items:
+                        _wpct = round(_wval * 100)
+                        _whtml += (
+                            f'<div style="background:#080d17;border:1px solid #172032;border-radius:4px;padding:8px 10px">'
+                            f'<div style="font-size:.58rem;font-weight:700;color:#57697c;letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px">{_wlbl}</div>'
+                            f'<div style="font-size:1.1rem;font-weight:800;color:{_wcol};font-family:monospace;letter-spacing:-.02em">{_wpct}<span style="font-size:.6rem;color:#2e3f50">%</span></div>'
+                            f'<div style="height:3px;background:#172032;border-radius:2px;margin-top:5px;overflow:hidden">'
+                            f'<div style="height:100%;width:{_wpct}%;background:{_wcol};border-radius:2px;transition:width .4s"></div></div>'
+                            f'</div>'
+                        )
+                    _whtml += '</div>'
+                    st.markdown(_whtml, unsafe_allow_html=True)
 
                 # Mejores condiciones
                 _bc = _master.get("best_conditions") or []
@@ -5255,35 +5340,58 @@ with _t_mejora:
                     _rk3.metric("📅 Ganan 2008+", _n_lt, help="Probadas rentables en datos históricos desde 2008")
                     st.markdown("")
 
-                    _rank_cols = st.columns([3, 1, 1, 1, 1, 1])
-                    _rank_cols[0].markdown("**Estrategia**")
-                    _rank_cols[1].markdown("**WR 60d**")
-                    _rank_cols[2].markdown("**PF 60d**")
-                    _rank_cols[3].markdown("**WR 2008**")
-                    _rank_cols[4].markdown("**PF 2008**")
-                    _rank_cols[5].markdown("**Estado**")
+                    _tbl_hdr = (
+                        '<div style="display:grid;grid-template-columns:2.5fr 1fr 1fr 1fr 1fr 0.7fr;'
+                        'gap:4px;padding:5px 10px;background:#080d17;border:1px solid #172032;'
+                        'border-radius:4px 4px 0 0;margin-top:8px">'
+                        '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">ESTRATEGIA</span>'
+                        '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">WR 60D</span>'
+                        '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">PF 60D</span>'
+                        '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">WR 2008</span>'
+                        '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">PF 2008</span>'
+                        '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">ESTADO</span>'
+                        '</div>'
+                    )
+                    _tbl_rows = ""
                     for _ri, _r in enumerate(_ranking[:12]):
-                        _rc = st.columns([3, 1, 1, 1, 1, 1])
-                        if _r.get("badge"):
-                            _emoji = _r["badge"]
-                        elif _r.get("is_certified"):
-                            _emoji = "🏆"
+                        _bg = "#0a0e18" if _ri % 2 == 0 else "#080d17"
+                        if _r.get("is_certified") or _r.get("badge") == "🏆":
+                            _badge_txt, _badge_col = "CERT", "#00b87c"
+                            _bd_left = "border-left:3px solid #00b87c;"
                         elif _r.get("is_winner_60d") or _r.get("is_winner"):
-                            _emoji = "✅"
+                            _badge_txt, _badge_col = "60D", "#1566d3"
+                            _bd_left = "border-left:3px solid #1566d3;"
                         else:
-                            _emoji = "❌"
-                        _lbl = _r.get("label", _r.get("name", "?"))[:30]
-                        _pos = "🥇" if _ri==0 else "🥈" if _ri==1 else "🥉" if _ri==2 else f"{_ri+1}."
-                        _rc[0].caption(f"{_pos} {_lbl}")
-                        _wr  = _r.get("winrate", 0)
-                        _pf  = _r.get("profit_factor", 0)
-                        _lt_wr = _r.get("lt_winrate", 0)
-                        _lt_pf = _r.get("lt_profit_factor", 0)
-                        _rc[1].caption(f"{'🟢' if _wr >= 55 else '🟡' if _wr >= 52 else '🔴'} {_wr:.0f}%")
-                        _rc[2].caption(f"{_pf:.2f}")
-                        _rc[3].caption(f"{'🟢' if _lt_wr >= 55 else '🟡' if _lt_wr >= 52 else '—'} {_lt_wr:.0f}%" if _lt_wr > 0 else "—")
-                        _rc[4].caption(f"{_lt_pf:.2f}" if _lt_pf > 0 else "—")
-                        _rc[5].caption(_emoji)
+                            _badge_txt, _badge_col, _bd_left = "—", "#2e3f50", ""
+                        _lbl     = _r.get("label", _r.get("name", "?"))[:28]
+                        _pos_txt = ["01", "02", "03"][_ri] if _ri < 3 else f"{_ri+1:02d}"
+                        _pos_col = ["#c97d0a", "#57697c", "#57697c"][_ri] if _ri < 3 else "#2e3f50"
+                        _wr      = _r.get("winrate", 0)
+                        _pf      = _r.get("profit_factor", 0)
+                        _lt_wr   = _r.get("lt_winrate", 0)
+                        _lt_pf   = _r.get("lt_profit_factor", 0)
+                        _wr_col  = "#00b87c" if _wr >= 55 else ("#c97d0a" if _wr >= 52 else "#e03c50")
+                        _lt_col  = "#00b87c" if _lt_wr >= 55 else ("#c97d0a" if _lt_wr >= 52 else "#57697c")
+                        _tbl_rows += (
+                            f'<div style="display:grid;grid-template-columns:2.5fr 1fr 1fr 1fr 1fr 0.7fr;'
+                            f'gap:4px;padding:6px 10px;background:{_bg};{_bd_left}'
+                            f'border-bottom:1px solid #172032;align-items:center">'
+                            f'<span style="font-size:.72rem;color:#c8d3e0;font-weight:600">'
+                            f'<span style="color:{_pos_col};font-family:monospace;font-size:.6rem;margin-right:5px">{_pos_txt}</span>'
+                            f'{_lbl}</span>'
+                            f'<span style="font-size:.72rem;color:{_wr_col};font-family:monospace;font-weight:700">{_wr:.0f}%</span>'
+                            f'<span style="font-size:.72rem;color:#c8d3e0;font-family:monospace">{_pf:.2f}</span>'
+                            f'<span style="font-size:.72rem;color:{_lt_col};font-family:monospace;font-weight:700">{f"{_lt_wr:.0f}%" if _lt_wr > 0 else "—"}</span>'
+                            f'<span style="font-size:.72rem;color:#c8d3e0;font-family:monospace">{f"{_lt_pf:.2f}" if _lt_pf > 0 else "—"}</span>'
+                            f'<span style="font-size:.6rem;color:{_badge_col};font-weight:800;letter-spacing:.06em">{_badge_txt}</span>'
+                            f'</div>'
+                        )
+                    st.markdown(
+                        _tbl_hdr +
+                        f'<div style="border:1px solid #172032;border-top:none;border-radius:0 0 4px 4px;overflow:hidden">'
+                        + _tbl_rows + '</div>',
+                        unsafe_allow_html=True
+                    )
                 else:
                     st.info("⏳ El servidor está calculando el ranking en background (primera vez puede tardar ~2 min). Se actualizará automáticamente.")
             except Exception:
@@ -5449,7 +5557,7 @@ with _t_ia:
     import os as _os
 
     # API key: env var (Railway) o input de sesión
-    _ant_key = _os.environ.get("GROQ_API_KEY", "gsk_0r0JRGjnYIAsgkfey3UWwWGdyb3FYjGb4Q5RKJICkoPGHM4pdQRlY").strip()
+    _ant_key = _os.environ.get("GROQ_API_KEY", "").strip()
 
     # Session_id estable por usuario (aislado entre David y Javi)
     _adv_sess_key = f"advisor_session_{current_user}"
