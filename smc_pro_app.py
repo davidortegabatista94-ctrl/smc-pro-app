@@ -2537,16 +2537,22 @@ else:
             st.error("Módulo orchestrator no disponible. Revisa backend/orchestrator.py.")
             st.stop()
 
-        # ── Arrancar worker de paper trading en vivo 24/7 (una vez/proceso) ──
-        @st.cache_resource
-        def _ensure_paper_worker():
-            try:
-                import backend.paper_worker as _pw
-                _pw.start_background_worker(min_score=70, interval=600)
-                return True
-            except Exception:
-                return False
-        _worker_on = _ensure_paper_worker()
+        # ── Worker de paper trading en vivo ──────────────────────────────────
+        # En Railway hay un PROCESO worker dedicado (start.sh) → el dashboard NO
+        # arranca otro (evita dos escritores sobre paper_trades.jsonl).
+        # En local/dev (sin proceso dedicado) sí arranca uno interno por comodidad.
+        import os as _os
+        _dedicated = _os.environ.get("PAPER_WORKER_DEDICATED") == "1"
+        if not _dedicated:
+            @st.cache_resource
+            def _ensure_paper_worker():
+                try:
+                    import backend.paper_worker as _pw
+                    _pw.start_background_worker(min_score=70, interval=600)
+                    return True
+                except Exception:
+                    return False
+            _ensure_paper_worker()
 
         # Estado del worker (heartbeat)
         try:
@@ -2608,16 +2614,22 @@ else:
                         dxy_dir=_ad, news_list=_an,
                     )
                     # ── BUCLE DE APRENDIZAJE ──────────────────────────────────
-                    # 1) Cerrar/evaluar trades en papel contra el mercado real
+                    # Si hay worker dedicado (Railway), ÉL escribe los trades en
+                    # papel; el dashboard solo lee y muestra. En local, el dashboard
+                    # hace ambas cosas. Así nunca hay dos escritores a la vez.
                     try:
                         import backend.learning as _L
-                        st.session_state.orch_eval = _L.evaluate_open_trades()
-                    except Exception as _le:
+                    except Exception:
                         _L = None
+                    if _L is not None and not _dedicated:
+                        try:
+                            st.session_state.orch_eval = _L.evaluate_open_trades()
+                        except Exception:
+                            pass
                     for _as, _ad2 in _ar.items():
                         _ad2["trading_mode"] = st.session_state.orch_mode
                         _ad2["min_score"]    = st.session_state.orch_min_score
-                        # 2) Ajuste de score según lo aprendido (acotado, honesto)
+                        # Ajuste de score según lo aprendido (acotado) — solo lectura
                         if _L is not None:
                             try:
                                 _adj, _adj_why = _L.edge_adjustment(_ad2)
@@ -2628,15 +2640,16 @@ else:
                                     _ad2["learn_adj"] = _adj
                             except Exception:
                                 pass
-                        _orch.log_decision(_ad2)
-                        # 3) Registrar como trade en papel si es operable (≥ umbral)
-                        if (_L is not None
-                                and _ad2.get("direction") in ("LONG", "SHORT")
-                                and int(_ad2.get("score") or 0) >= st.session_state.orch_min_score):
-                            try:
-                                _L.open_paper_trade(_ad2)
-                            except Exception:
-                                pass
+                        # Escrituras SOLO si no hay worker dedicado
+                        if not _dedicated:
+                            _orch.log_decision(_ad2)
+                            if (_L is not None
+                                    and _ad2.get("direction") in ("LONG", "SHORT")
+                                    and int(_ad2.get("score") or 0) >= st.session_state.orch_min_score):
+                                try:
+                                    _L.open_paper_trade(_ad2)
+                                except Exception:
+                                    pass
                     st.session_state.orch_results  = _ar
                     st.session_state.orch_last_run = _ot.time()
                 except Exception as _ae:

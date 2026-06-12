@@ -172,3 +172,18 @@ def start_background_worker(pairs: list[str] | None = None,
     th.start()
     _log.info("paper_worker arrancado (interval=%ss, min_score=%s)", interval, min_score)
     return True
+
+
+# ── Entry point como PROCESO dedicado (24/7, independiente del dashboard) ─────
+# Uso: python -m backend.paper_worker   (lo lanza start.sh junto a Streamlit)
+if __name__ == "__main__":
+    import os
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [paper_worker] %(levelname)s: %(message)s",
+    )
+    _interval = int(os.environ.get("PAPER_WORKER_INTERVAL", DEFAULT_INTERVAL))
+    _min_sc   = int(os.environ.get("PAPER_WORKER_MIN_SCORE", DEFAULT_MIN_SCORE))
+    _log.info("Arrancando worker dedicado (interval=%ss, min_score=%s)", _interval, _min_sc)
+    # Bloqueante (este proceso solo existe para el worker)
+    _loop(DEFAULT_PAIRS, _min_sc, _interval)
