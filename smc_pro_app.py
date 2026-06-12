@@ -100,6 +100,15 @@ from services.telegram import (
     _build_hourly_telegram_message, _build_urgent_telegram_message,
 )
 
+# ── Multi-pair analysis engine ────────────────────────────────────────────────
+try:
+    import backend.multi_pair as _multi_pair
+    _MULTI_PAIR_OK = True
+except Exception as _mpe:
+    _multi_pair = None
+    _MULTI_PAIR_OK = False
+    logging.warning("multi_pair import error: %s", _mpe)
+
 # Lazy-load MetaTrader5 / yfinance
 _mt5 = None
 _yf = None
@@ -2632,6 +2641,14 @@ else:
         st.session_state.decision_mode = "intraday"
     if "decision_cache" not in st.session_state:
         st.session_state.decision_cache = None
+    if "multi_pair_results" not in st.session_state:
+        st.session_state.multi_pair_results = None
+    if "multi_pair_last_run" not in st.session_state:
+        st.session_state.multi_pair_last_run = 0.0
+    if "multi_pair_mode" not in st.session_state:
+        st.session_state.multi_pair_mode = "intraday"
+    if "multi_pair_selected" not in st.session_state:
+        st.session_state.multi_pair_selected = "EURUSD"
     cfg = load_user_config()
 
     if "mt5_login" not in st.session_state:
@@ -4657,13 +4674,337 @@ else:
 
 # Navegacion principal
 st.markdown("---")
-_t_bt, _t_bot, _t_mejora, _t_ia, _t_prem = st.tabs([
-    "📊 Backtest & Mercado",
-    "🤖 Bot & Posiciones",
-    "🔬 Auto-Mejora",
-    "🧠 Asesor IA",
-    "🏹 Señales Premium",
+_t_pares, _t_bt, _t_bot, _t_mejora, _t_ia, _t_prem = st.tabs([
+    "7 Pares",
+    "Backtest & Mercado",
+    "Bot & Posiciones",
+    "Auto-Mejora",
+    "Asesor IA",
+    "Señales Premium",
 ])
+
+with _t_pares:
+    # ══════════════════════════════════════════════════════════════════════════
+    # ── 7 PARES PRINCIPALES — Análisis individual y completamente independiente
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown("### 7 Pares Principales — Decisión Independiente por Par")
+    st.caption(
+        "Cada par analiza sus propios datos técnicos, noticias de sus divisas y DXY ajustado "
+        "para generar una decisión sin mezclar información entre pares."
+    )
+
+    if not _MULTI_PAIR_OK:
+        st.error("Motor multi-par no disponible. Comprueba la instalación de yfinance.")
+    else:
+        # ── Controles ─────────────────────────────────────────────────────────
+        _mp_col1, _mp_col2, _mp_col3, _mp_col4 = st.columns([2, 1, 1, 1])
+        with _mp_col1:
+            _mp_mode_opts = {"intraday": "Intraday 1h", "scalping": "Scalping 15m", "swing": "Swing 4h"}
+            _mp_mode_sel = st.selectbox(
+                "Modo de análisis",
+                options=list(_mp_mode_opts.keys()),
+                format_func=lambda x: _mp_mode_opts[x],
+                index=list(_mp_mode_opts.keys()).index(st.session_state.multi_pair_mode),
+                key="_mp_mode_select",
+            )
+            if _mp_mode_sel != st.session_state.multi_pair_mode:
+                st.session_state.multi_pair_mode = _mp_mode_sel
+                st.session_state.multi_pair_results = None
+
+        with _mp_col2:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            _mp_run = st.button("Analizar 7 pares", type="primary", use_container_width=True, key="_mp_run_btn")
+        with _mp_col3:
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            _mp_force = st.button("Actualizar", use_container_width=True, key="_mp_force_btn")
+        with _mp_col4:
+            _mp_elapsed = time.time() - st.session_state.multi_pair_last_run
+            st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+            if st.session_state.multi_pair_results:
+                _mp_mins = int(_mp_elapsed / 60)
+                st.caption(f"Último análisis: hace {_mp_mins}m" if _mp_mins < 60 else "hace >1h")
+
+        # Auto-invalidate after 15 minutes
+        if _mp_elapsed > 900:
+            st.session_state.multi_pair_results = None
+
+        if _mp_run or _mp_force:
+            st.session_state.multi_pair_results = None
+
+        # ── Run analysis ──────────────────────────────────────────────────────
+        if st.session_state.multi_pair_results is None:
+            _mp_news = signal.get("news", []) if signal else []
+            with st.spinner("Analizando 7 pares en paralelo… (~10-15s)"):
+                try:
+                    _mp_res = _multi_pair.analyze_all_pairs(
+                        dxy_dir=dxy_dir or "",
+                        news=_mp_news,
+                        mode=st.session_state.multi_pair_mode,
+                        max_workers=4,
+                    )
+                    st.session_state.multi_pair_results = _mp_res
+                    st.session_state.multi_pair_last_run = time.time()
+                except Exception as _mpe_err:
+                    st.error(f"Error en análisis multi-par: {_mpe_err}")
+
+        _mp_results = st.session_state.multi_pair_results
+
+        if _mp_results:
+            # ── GRID RESUMEN — 7 tarjetas compactas ─────────────────────────
+            st.markdown("---")
+            st.markdown("#### Resumen — Decisión por par")
+            _mp_grid_cols = st.columns(4)
+            _mp_pair_list = list(_multi_pair.PAIR_LIST)
+
+            for _mp_i, _mp_sym in enumerate(_mp_pair_list):
+                _mpr = _mp_results.get(_mp_sym, {})
+                _mp_col = _mp_grid_cols[_mp_i % 4]
+                with _mp_col:
+                    _mp_dir  = _mpr.get("direction")
+                    _mp_conf = _mpr.get("confidence", 0)
+                    _mp_px   = _mpr.get("price")
+                    _mp_chg  = _mpr.get("change_pct")
+                    _mp_err  = _mpr.get("error")
+                    _mp_clr  = _mpr.get("color", "#3d8ef5")
+                    _mp_fb   = _mpr.get("flag_base", "")
+                    _mp_fq   = _mpr.get("flag_quote", "")
+                    _mp_nm   = _mpr.get("name", _mp_sym)
+                    _mp_score= _mpr.get("score", 0)
+
+                    if _mp_dir == "LONG":
+                        _mp_d_col, _mp_d_ico, _mp_d_txt = "#00b87c", "▲", "LONG"
+                    elif _mp_dir == "SHORT":
+                        _mp_d_col, _mp_d_ico, _mp_d_txt = "#e03c50", "▼", "SHORT"
+                    else:
+                        _mp_d_col, _mp_d_ico, _mp_d_txt = "#c97d0a", "—", "ESPERAR"
+
+                    _mp_chg_str = ""
+                    if _mp_chg is not None:
+                        _mp_chg_col = "#00b87c" if _mp_chg >= 0 else "#e03c50"
+                        _mp_chg_str = (f'<span style="color:{_mp_chg_col};font-size:10px">'
+                                       f'{_mp_chg:+.4f}%</span>')
+
+                    _mp_is_sel = (st.session_state.multi_pair_selected == _mp_sym)
+                    _mp_card_border = f"2px solid {_mp_clr}" if _mp_is_sel else "1px solid var(--border)"
+                    _mp_card_bg = f"rgba(0,0,0,0.15)" if _mp_is_sel else "var(--surface)"
+
+                    st.markdown(f"""<div style="
+                        background:{_mp_card_bg};border:{_mp_card_border};
+                        border-radius:var(--radius);padding:12px 14px;margin-bottom:8px;
+                        border-left:3px solid {_mp_clr}">
+                      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                        <span style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text)">{_mp_fb}{_mp_fq} {_mp_nm}</span>
+                        <span style="font-family:var(--mono);font-size:9px;color:var(--text-3)">{_mp_score}/100</span>
+                      </div>
+                      <div style="font-family:var(--mono);font-size:18px;font-weight:800;color:{_mp_d_col};margin-bottom:4px">
+                        {_mp_d_ico} {_mp_d_txt}
+                      </div>
+                      <div style="display:flex;justify-content:space-between;align-items:center">
+                        <span style="font-family:var(--mono);font-size:11px;color:var(--text-2)">
+                          {f'{_mp_px:.5f}' if _mp_px else '—'}
+                        </span>
+                        <span style="font-family:var(--mono);font-size:11px;color:{_mp_d_col}">{_mp_conf}%</span>
+                      </div>
+                      {f'<div style="margin-top:4px">{_mp_chg_str}</div>' if _mp_chg_str else ''}
+                      {f'<div style="font-size:9px;color:var(--red);margin-top:4px">⚠ {_mp_err[:40]}</div>' if _mp_err else ''}
+                    </div>""", unsafe_allow_html=True)
+
+                    if st.button(
+                        "Ver análisis",
+                        key=f"_mp_sel_{_mp_sym}",
+                        use_container_width=True,
+                    ):
+                        st.session_state.multi_pair_selected = _mp_sym
+                        st.rerun()
+
+            # ── ANÁLISIS DETALLADO — Par seleccionado ─────────────────────────
+            st.markdown("---")
+            _mp_sel_sym = st.session_state.multi_pair_selected
+            _mp_sel_res = _mp_results.get(_mp_sel_sym, {})
+            _mp_cfg     = _multi_pair.PAIRS.get(_mp_sel_sym, {})
+
+            if _mp_sel_res:
+                _mp_s_name  = _mp_sel_res.get("name", _mp_sel_sym)
+                _mp_s_fb    = _mp_sel_res.get("flag_base", "")
+                _mp_s_fq    = _mp_sel_res.get("flag_quote", "")
+                _mp_s_clr   = _mp_sel_res.get("color", "#3d8ef5")
+                _mp_s_desc  = _mp_sel_res.get("desc", "")
+                _mp_s_dir   = _mp_sel_res.get("direction")
+                _mp_s_conf  = _mp_sel_res.get("confidence", 0)
+                _mp_s_vl    = _mp_sel_res.get("votes_long", 0)
+                _mp_s_vs    = _mp_sel_res.get("votes_short", 0)
+                _mp_s_vlog  = _mp_sel_res.get("vote_log", [])
+                _mp_s_tfs   = _mp_sel_res.get("timeframes", {})
+                _mp_s_news  = _mp_sel_res.get("news_sentiment", {})
+                _mp_s_score = _mp_sel_res.get("score", 0)
+                _mp_s_px    = _mp_sel_res.get("price")
+                _mp_s_chg   = _mp_sel_res.get("change_pct")
+                _mp_s_rsi   = _mp_sel_res.get("rsi")
+                _mp_s_atr   = _mp_sel_res.get("atr_pips")
+                _mp_s_tp1   = _mp_sel_res.get("tp1")
+                _mp_s_tp2   = _mp_sel_res.get("tp2")
+                _mp_s_sl    = _mp_sel_res.get("sl")
+                _mp_s_rr    = _mp_sel_res.get("rr")
+                _mp_s_dxy   = _mp_sel_res.get("dxy_signal_dir", "")
+                _mp_s_err   = _mp_sel_res.get("error")
+
+                # Header
+                st.markdown(
+                    f'<div style="border-left:4px solid {_mp_s_clr};padding:2px 14px;margin-bottom:12px">'
+                    f'<div style="font-size:1.4rem;font-weight:800;color:var(--text)">'
+                    f'{_mp_s_fb}{_mp_s_fq} {_mp_s_name}</div>'
+                    f'<div style="font-size:11px;color:var(--text-2);margin-top:2px">{_mp_s_desc}</div>'
+                    f'</div>',
+                    unsafe_allow_html=True
+                )
+
+                if _mp_s_err:
+                    st.warning(f"Error en análisis: {_mp_s_err}")
+
+                # Métricas rápidas
+                _mp_m1, _mp_m2, _mp_m3, _mp_m4, _mp_m5 = st.columns(5)
+                _mp_m1.metric(
+                    "Precio",
+                    f"{_mp_s_px:.5f}" if _mp_s_px else "—",
+                    delta=f"{_mp_s_chg:+.4f}%" if _mp_s_chg is not None else None,
+                )
+                _mp_m2.metric("RSI 1H", f"{_mp_s_rsi:.1f}" if _mp_s_rsi else "—")
+                _mp_m3.metric("ATR 1H (pips)", f"{_mp_s_atr:.1f}" if _mp_s_atr else "—")
+                _mp_m4.metric("Score", f"{_mp_s_score}/100")
+                _mp_m5.metric(
+                    "DXY →",
+                    _mp_s_dxy if _mp_s_dxy else "Neutral",
+                    help=f"DXY direction adjusted for {_mp_sel_sym} ({_mp_cfg.get('dxy_mode', 'inverse')})"
+                )
+
+                # DECISIÓN ANALIZADA para este par
+                _mp_s_tot = _mp_s_vl + _mp_s_vs or 1
+                _mp_s_pctl = round(_mp_s_vl / _mp_s_tot * 100)
+                _mp_s_pcts = round(_mp_s_vs / _mp_s_tot * 100)
+
+                _mp_s_dircss = {"LONG": "de-dir-long", "SHORT": "de-dir-short"}.get(_mp_s_dir or "", "de-dir-wait")
+                _mp_s_cardcss= {"LONG": "de-card-long", "SHORT": "de-card-short"}.get(_mp_s_dir or "", "de-card-wait")
+                _mp_s_confcol= {"LONG": "#00b87c", "SHORT": "#e03c50"}.get(_mp_s_dir or "", "#c97d0a")
+                _mp_s_dirtxt = {"LONG": "▲ LONG", "SHORT": "▼ SHORT"}.get(_mp_s_dir or "", "– ESPERAR")
+
+                def _mp_fmt(v, p=5): return f"{v:.{p}f}" if v else "—"
+                def _mp_fmtrr(v): return f"{v:.1f}R" if v else "—"
+
+                # Noticias sentiment
+                _mp_ns_base = _mp_s_news.get("base_score", 0)
+                _mp_ns_quote= _mp_s_news.get("quote_score", 0)
+                _mp_ns_dir  = _mp_s_news.get("direction", "NEUTRAL")
+                _mp_ns_bc   = _mp_s_news.get("base_count", 0)
+                _mp_ns_qc   = _mp_s_news.get("quote_count", 0)
+                _mp_ns_col  = {"LONG": "#00b87c", "SHORT": "#e03c50", "NEUTRAL": "#c97d0a"}.get(_mp_ns_dir, "#c97d0a")
+
+                st.markdown(f"""<div class="de-card {_mp_s_cardcss}" style="margin-top:14px">
+  <div class="de-header">
+    <span class="de-title">DECISIÓN ANALIZADA — {_mp_s_name}</span>
+    <span class="de-mode-badge">{_mp_mode_opts.get(st.session_state.multi_pair_mode,'').upper()}</span>
+  </div>
+  <div class="de-main">
+    <div class="de-dir {_mp_s_dircss}">{_mp_s_dirtxt}</div>
+    <div class="de-votes">
+      <div class="de-vote-lbl">Votos ponderados ({_mp_s_vl}L vs {_mp_s_vs}S)</div>
+      <div class="de-vrow">
+        <span class="de-vname" style="color:var(--green)">LONG</span>
+        <div class="de-vtrack"><div class="de-vfill-l" style="width:{_mp_s_pctl}%"></div></div>
+        <span class="de-vcount" style="color:var(--green)">{_mp_s_vl}</span>
+      </div>
+      <div class="de-vrow">
+        <span class="de-vname" style="color:var(--red)">SHORT</span>
+        <div class="de-vtrack"><div class="de-vfill-s" style="width:{_mp_s_pcts}%"></div></div>
+        <span class="de-vcount" style="color:var(--red)">{_mp_s_vs}</span>
+      </div>
+    </div>
+    <div class="de-conf">
+      <div class="de-conf-num" style="color:{_mp_s_confcol}">{_mp_s_conf}%</div>
+      <div class="de-conf-lbl">Confianza</div>
+    </div>
+  </div>
+  <div class="de-levels">
+    <div class="de-lv"><span class="de-lv-k">Entrada</span><span class="de-lv-v" style="color:var(--text)">{_mp_fmt(_mp_s_px)}</span></div>
+    <div class="de-lv"><span class="de-lv-k">TP 1</span><span class="de-lv-v" style="color:var(--green)">{_mp_fmt(_mp_s_tp1)}</span></div>
+    <div class="de-lv"><span class="de-lv-k">TP 2</span><span class="de-lv-v" style="color:#00c98a">{_mp_fmt(_mp_s_tp2)}</span></div>
+    <div class="de-lv"><span class="de-lv-k">SL / RR</span><span class="de-lv-v" style="color:var(--red)">{_mp_fmt(_mp_s_sl)} / {_mp_fmtrr(_mp_s_rr)}</span></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
+    <div>
+      <div class="de-vote-lbl" style="margin-bottom:6px">Señal técnica por timeframe</div>
+      {"".join(
+          f'<div class="t-row"><span>{tf}</span>'
+          f'<span class="t-val" style="color:' + ("#00b87c" if data.get("signal")=="COMPRA" else ("#e03c50" if data.get("signal")=="VENTA" else "#c97d0a")) + '">'
+          f'{data.get("signal","NEUTRAL")}</span></div>'
+          for tf, data in _mp_s_tfs.items()
+      )}
+    </div>
+    <div>
+      <div class="de-vote-lbl" style="margin-bottom:6px">Sentimiento noticias divisas</div>
+      <div class="t-row">
+        <span>{_mp_cfg.get("base","")}</span>
+        <span class="t-val" style="color:{"#00b87c" if _mp_ns_base>0 else "#e03c50"}">{_mp_ns_base:+.3f} ({_mp_ns_bc} noticias)</span>
+      </div>
+      <div class="t-row">
+        <span>{_mp_cfg.get("quote","")}</span>
+        <span class="t-val" style="color:{"#00b87c" if _mp_ns_quote>0 else "#e03c50"}">{_mp_ns_quote:+.3f} ({_mp_ns_qc} noticias)</span>
+      </div>
+      <div class="t-row">
+        <span>Sesgo noticias</span>
+        <span class="t-val" style="color:{_mp_ns_col}">{_mp_ns_dir}</span>
+      </div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+                # Vote breakdown
+                if _mp_s_vlog:
+                    with st.expander("Desglose de votos", expanded=False):
+                        for _mp_vitem in _mp_s_vlog:
+                            _mp_vcol = "#00b87c" if "LONG" in _mp_vitem else "#e03c50"
+                            st.markdown(
+                                f'<div class="t-row" style="border-color:{_mp_vcol}22">'
+                                f'<span style="color:{_mp_vcol}">{_mp_vitem}</span></div>',
+                                unsafe_allow_html=True
+                            )
+
+                # AI detailed synthesis on demand
+                if _AI_ENGINE_OK:
+                    if st.button(
+                        "Generar veredicto IA para este par",
+                        key=f"_mp_ai_{_mp_sel_sym}",
+                        help="Llama a la IA para sintetizar las 3 razones clave en lenguaje natural"
+                    ):
+                        _mp_ai_ctx = {
+                            "mode":       st.session_state.multi_pair_mode,
+                            "timeframes": _mp_s_tfs,
+                            "dxy_dir":    dxy_dir or "",
+                            "cot_dir":    "",
+                            "kb_dir":     "",
+                            "score":      _mp_s_score,
+                            "score_dir":  _mp_s_dir or "",
+                            "ai_bias_dir": "",
+                            "macro_dir":  "",
+                            "price":      _mp_s_px,
+                            "session":    session or "",
+                            "regime":     "",
+                            "atr_pips":   _mp_s_atr,
+                            "tp1": _mp_s_tp1, "tp2": _mp_s_tp2,
+                            "sl":  _mp_s_sl,  "rr":  _mp_s_rr,
+                            "context_reasons": [],
+                        }
+                        with st.spinner("Consultando IA…"):
+                            _mp_ai_res = _ai_engine.synthesize_trading_decision(_mp_ai_ctx)
+                        st.markdown("**Veredicto IA:**")
+                        for _mp_r in _mp_ai_res.get("reasons", []):
+                            st.markdown(f"- {_mp_r}")
+                        if _mp_ai_res.get("verdict"):
+                            st.info(_mp_ai_res["verdict"])
+                        if _mp_ai_res.get("risk_note"):
+                            st.warning(_mp_ai_res["risk_note"])
+
+        elif not (_mp_run or _mp_force):
+            st.info("Pulsa **Analizar 7 pares** para iniciar el análisis independiente de cada par.")
 
 with _t_bt:
     # ── BACKTEST + COMPARACIÓN DE ESTRATEGIAS + CONTEXTO DE MERCADO ───────────────
