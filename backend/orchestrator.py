@@ -176,20 +176,21 @@ def cooldown_sweep(
     cooldowns: Optional[list[int]] = None,
     use_windows: bool = True,
     utc_offset: int = 2,
+    news_score: float = 0.0,
+    news_dir: str = "",
+    news_available: bool = False,
+    cot_dir: str = "",
+    cot_available: bool = False,
 ) -> pd.DataFrame:
     """
-    Runs run_hf_backtest() (15m pullback strategy) with different cooldown values.
-    Shows the ops/day vs quality tradeoff clearly.
+    Runs run_adaptive_backtest() with different cooldown values on 15m data.
 
-    df should be 15m data (use get_hf_data() to download it).
-    Cooldown = number of 15m bars to skip after each entry.
-    cooldown=1 → ~1 op each 15min (aggressive)
-    cooldown=4 → ~1 op each hour (balanced)
-    cooldown=8 → ~1 op each 2h (conservative)
+    Muestra la tabla: cooldown → ops/día, WR, PF, pips.
+    df debe ser datos 15m (usa get_hf_data() para descargarlo).
 
-    Returns DataFrame with ops/day, winrate, profit_factor per cooldown.
+    Si se pasan news/cot, se usan como filtros primarios (igual que en live).
     """
-    from backend.strategies import run_hf_backtest
+    from backend.strategies import run_adaptive_backtest
 
     if cooldowns is None:
         cooldowns = [1, 2, 3, 4, 6, 8, 10, 12, 16]
@@ -206,20 +207,33 @@ def cooldown_sweep(
     rows = []
     for cd in cooldowns:
         try:
-            result = run_hf_backtest(
-                df, cooldown=cd, use_windows=use_windows, utc_offset=utc_offset
+            result = run_adaptive_backtest(
+                df,
+                news_score=news_score,
+                news_dir=news_dir,
+                news_available=news_available,
+                cot_dir=cot_dir,
+                cot_available=cot_available,
+                cooldown=cd,
+                use_windows=use_windows,
+                utc_offset=utc_offset,
             )
             if result is None:
                 continue
+            ops_day = round(result["total"] / n_days, 1)
             rows.append({
                 "Cooldown (velas 15m)": cd,
                 "= cada (min)":         cd * 15,
                 "Ops totales":          result["total"],
-                "Ops/día":              round(result["total"] / n_days, 1),
+                "Ops/día":              ops_day,
                 "Win Rate %":           result["winrate"],
                 "Profit Factor":        result["profit_factor"],
                 "Pips netos":           result["net_pips"],
                 "Max DD %":             result["max_dd"],
+                "Régimen % trending":   round(
+                    100 * sum(v for k, v in result.get("regime_dist", {}).items()
+                              if "trending" in k) / max(result["total"], 1), 0
+                ),
             })
         except Exception as e:
             _log.warning("cooldown_sweep cd=%d error: %s", cd, e)
@@ -254,27 +268,31 @@ PERIOD_NOTES = {
 }
 
 
-def backtest_multiperiod() -> dict[str, dict]:
+def backtest_multiperiod(live_news_score: float = 0.0,
+                         live_news_dir: str = "",
+                         live_cot_dir: str = "") -> dict[str, dict]:
     """
-    Backtest multi-periodo con dos estrategias:
-    - Periodos históricos (2008/2020/2022): datos diarios + run_full_backtest() v2
-      (SL escalado por ATR sin cap de pips + filtro EMA200)
-    - Último mes (15m): run_hf_backtest() — EMA21 pullback, objetivo 30 ops/día
+    Backtest multi-periodo usando run_adaptive_backtest() — estrategia variable.
 
-    Nota honesta: sin spread/slippage real. Resultados indicativos.
-    Los 30 ops/día son un objetivo para datos 15m intraday.
-    En periodos históricos solo hay datos diarios → ops/día siempre < 1.
+    Señal primaria: NOTICIAS (si disponibles) + COT / posiciones reales
+    Señal secundaria: régimen de mercado → estrategia técnica adaptativa
+
+    Periodos históricos (2008/2020/2022): datos diarios, sin noticias reales →
+      usa COT proxy (posicionamiento implícito en precio) + régimen variable
+    Último año (1h): sin noticias históricas → COT proxy + régimen
+    Último mes (15m): PUEDE usar noticias ACTUALES si se pasan como parámetro
+      → muestra diferencia de rendimiento cuando las noticias están disponibles
 
     Returns {period_name: result_dict | error_dict}
     """
     from backend.strategies import (
-        run_full_backtest, run_hf_backtest,
+        run_adaptive_backtest,
         get_longterm_data_2008, get_backtest_data, get_hf_data,
     )
 
     results: dict[str, dict] = {}
 
-    # ── Datos diarios históricos (descarga única) ─────────────────────────────
+    # ── Datos diarios históricos ──────────────────────────────────────────────
     _log.info("Descargando datos EUR/USD diarios desde 2008...")
     df_all_daily = pd.DataFrame()
     try:
@@ -284,9 +302,9 @@ def backtest_multiperiod() -> dict[str, dict]:
         _log.warning("get_longterm_data_2008 error: %s", e)
 
     daily_periods = {
-        "2008 — Crisis financiera":    ("2008-01-01", "2009-12-31"),
-        "2020 — COVID crash":          ("2020-01-01", "2021-06-30"),
-        "2022 — Subidas Fed agresivas":("2022-01-01", "2022-12-31"),
+        "2008 — Crisis financiera":     ("2008-01-01", "2009-12-31"),
+        "2020 — COVID crash":           ("2020-01-01", "2021-06-30"),
+        "2022 — Subidas Fed agresivas": ("2022-01-01", "2022-12-31"),
     }
 
     for name, (s, e) in daily_periods.items():
@@ -297,73 +315,117 @@ def backtest_multiperiod() -> dict[str, dict]:
         try:
             df_p = df_all_daily[(df_all_daily.index >= s) & (df_all_daily.index <= e)].copy()
             if df_p.empty or len(df_p) < 60:
-                results[name] = {"error": f"Datos insuficientes ({len(df_p)} barras para {s}→{e}).",
+                results[name] = {"error": f"Datos insuficientes ({len(df_p)} barras).",
                                  "note": PERIOD_NOTES.get(name, "")}
                 continue
 
-            # v2: SL sin cap fijo + filtro EMA200 + cooldown=2 días
-            r = run_full_backtest(df_p, use_windows=False, utc_offset=0, cooldown=2)
+            # Sin noticias históricas, sin COT histórico real →
+            # run_adaptive_backtest usará COT proxy (precio vs EMA50/EMA200)
+            r = run_adaptive_backtest(
+                df_p,
+                news_available=False,
+                cot_available=False,
+                cooldown=2,
+                use_windows=False,
+                utc_offset=0,
+            )
             if r is None:
                 results[name] = {"error": "Backtest retornó None.", "note": PERIOD_NOTES.get(name, "")}
                 continue
 
-            idx    = df_p.index
-            n_days = max(1, (idx[-1].date() - idx[0].date()).days) if hasattr(idx[0], "date") else max(1, len(df_p))
-            r["ops_per_day"] = round(r["total"] / n_days, 2)
-            r["n_days"]      = n_days
-            r["bars"]        = len(df_p)
-            r["note"]        = PERIOD_NOTES.get(name, "")
-            r["tf"]          = "1d diario — estrategia EMA+EMA200+MACD"
-            r["freq_note"]   = "Datos diarios: max ~1 op/día. Los 30 ops/día requieren datos 15m (solo disponibles últimos 60 días)"
-            results[name]    = r
+            r["bars"]      = len(df_p)
+            r["note"]      = PERIOD_NOTES.get(name, "")
+            r["tf"]        = "1d diario"
+            r["signals"]   = "Régimen variable + COT proxy (sin noticias históricas)"
+            results[name]  = r
 
         except Exception as ex:
             results[name] = {"error": str(ex), "note": PERIOD_NOTES.get(name, "")}
 
     # ── Último año con datos 1h ───────────────────────────────────────────────
-    name_1h = "Último año (1h intraday)"
+    name_1h = "Último año (1h)"
     try:
-        _log.info("Descargando datos EUR/USD 1h (último año)...")
+        _log.info("Descargando datos EUR/USD 1h...")
         df_1h = get_backtest_data("1h")
         if df_1h.empty or len(df_1h) < 100:
-            results[name_1h] = {"error": f"Datos 1h insuficientes ({len(df_1h)} barras).",
-                                "note": PERIOD_NOTES.get(name_1h, "")}
+            results[name_1h] = {"error": f"Datos 1h insuficientes ({len(df_1h)} barras)."}
         else:
-            r = run_full_backtest(df_1h, use_windows=True, utc_offset=2, cooldown=4)
+            r = run_adaptive_backtest(
+                df_1h,
+                news_available=False,
+                cot_available=False,
+                cooldown=3,
+                use_windows=True,
+                utc_offset=2,
+            )
             if r is None:
-                results[name_1h] = {"error": "Backtest 1h retornó None.", "note": PERIOD_NOTES.get(name_1h, "")}
+                results[name_1h] = {"error": "Backtest 1h retornó None."}
             else:
-                idx    = df_1h.index
-                n_days = max(1, (idx[-1].date() - idx[0].date()).days) if hasattr(idx[0], "date") else max(1, len(df_1h) // 24)
-                r["ops_per_day"] = round(r["total"] / n_days, 2)
-                r["n_days"]      = n_days
-                r["bars"]        = len(df_1h)
-                r["note"]        = PERIOD_NOTES.get(name_1h, "")
-                r["tf"]          = "1h intraday — EMA+EMA200+MACD"
-                r["freq_note"]   = "1h: objetivo ~1-3 ops/día con calidad alta"
+                r["bars"]    = len(df_1h)
+                r["note"]    = PERIOD_NOTES.get(name_1h, "~1 año de datos horarios reales.")
+                r["tf"]      = "1h intraday"
+                r["signals"] = "Régimen variable + COT proxy (sin noticias históricas)"
                 results[name_1h] = r
     except Exception as ex:
-        results[name_1h] = {"error": str(ex), "note": PERIOD_NOTES.get(name_1h, "")}
+        results[name_1h] = {"error": str(ex)}
 
-    # ── Último mes con datos 15m (estrategia HF pullback) ────────────────────
-    name_hf = "Último mes — 15m HF Pullback"
+    # ── Último mes con datos 15m — CON noticias si están disponibles ──────────
+    name_15m_base = "Último mes (15m) — sin noticias"
+    name_15m_news = "Último mes (15m) — CON noticias actuales"
     try:
-        _log.info("Descargando datos EUR/USD 15m (último mes)...")
+        _log.info("Descargando datos EUR/USD 15m...")
         df_15m = get_hf_data("EURUSD=X", days=55)
+
         if df_15m.empty or len(df_15m) < 100:
-            results[name_hf] = {"error": f"Datos 15m insuficientes ({len(df_15m)} barras).",
-                                "note": "Estrategia EMA21 Pullback alta frecuencia"}
+            results[name_15m_base] = {"error": f"Datos 15m insuficientes ({len(df_15m)} barras)."}
         else:
-            r = run_hf_backtest(df_15m, cooldown=2, use_windows=True, utc_offset=2)
-            if r is None:
-                results[name_hf] = {"error": "HF backtest retornó None.",
-                                    "note": "Estrategia EMA21 Pullback alta frecuencia"}
+            # Versión sin noticias (base de comparación)
+            r_base = run_adaptive_backtest(
+                df_15m,
+                news_available=False,
+                cot_available=False,
+                cooldown=2,
+                use_windows=True,
+                utc_offset=2,
+            )
+            if r_base:
+                r_base["bars"]    = len(df_15m)
+                r_base["note"]    = "Solo régimen + COT proxy. Sin noticias."
+                r_base["tf"]      = "15m intraday"
+                r_base["signals"] = "Régimen variable + COT proxy"
+                results[name_15m_base] = r_base
+
+            # Versión CON noticias actuales (si se pasaron)
+            if live_news_dir and live_news_dir != "NEUTRAL":
+                r_news = run_adaptive_backtest(
+                    df_15m,
+                    news_score=live_news_score,
+                    news_dir=live_news_dir,
+                    news_available=True,
+                    cot_dir=live_cot_dir,
+                    cot_available=bool(live_cot_dir),
+                    cooldown=2,
+                    use_windows=True,
+                    utc_offset=2,
+                )
+                if r_news:
+                    r_news["bars"]    = len(df_15m)
+                    r_news["note"]    = (
+                        f"Noticias: {live_news_dir} (score {live_news_score:+.2f}) | "
+                        f"COT: {live_cot_dir or 'N/A'}. "
+                        "Nota: noticias ACTUALES aplicadas a barras históricas — "
+                        "no refleja las noticias de cada momento histórico."
+                    )
+                    r_news["tf"]      = "15m intraday"
+                    r_news["signals"] = f"Régimen + Noticias ({live_news_dir}) + COT ({live_cot_dir or 'N/A'})"
+                    results[name_15m_news] = r_news
             else:
-                r["note"]      = "EMA21 Pullback en 15m | SL=1×ATR | TP=3×SL | Cooldown=2 barras (30 min)"
-                r["tf"]        = "15m intraday — EMA21 Pullback"
-                r["freq_note"] = "Objetivo ~15-25 ops/día por par | ~30 ops/día cruzando 2 pares"
-                results[name_hf] = r
+                results[name_15m_news] = {
+                    "error": "Noticias no disponibles en este momento. Pulsa 'Analizar todos los pares' primero.",
+                    "note": "El orquestador recoge noticias en tiempo real antes de cada análisis.",
+                }
+
     except Exception as ex:
-        results[name_hf] = {"error": str(ex), "note": "EMA21 Pullback HF"}
+        results[name_15m_base] = {"error": str(ex)}
 
     return results

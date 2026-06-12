@@ -2724,12 +2724,29 @@ else:
                 )
 
         with st.expander("Backtest multi-periodo (2008, 2020, 2022, último año)"):
+            st.caption(
+                "Estrategia adaptativa: régimen variable + noticias (si disponibles) + COT. "
+                "Para los periodos históricos no hay noticias reales — el motor usa COT proxy. "
+                "Para el último mes (15m) usa las noticias actuales si pulsaste 'Analizar pares' antes."
+            )
             _oc_bt_btn_h = st.button("Ejecutar backtest histórico", key="orch_bt_home",
-                help="Descarga datos y ejecuta 4 backtests. ~1-2 minutos.")
+                help="Descarga datos y ejecuta hasta 6 backtests comparativos. ~1-2 minutos.")
             if _oc_bt_btn_h:
                 with st.spinner("Descargando datos históricos y ejecutando backtests..."):
                     try:
-                        st.session_state.orch_bt_results = _orch.backtest_multiperiod()
+                        # Pasar noticias/COT actuales si el usuario ya analizó los pares
+                        _bt_ns = 0.0; _bt_nd = ""; _bt_cd = ""
+                        if st.session_state.orch_results:
+                            _eu = st.session_state.orch_results.get("EURUSD", {})
+                            _bt_ns = float(_eu.get("news_sentiment", {}).get("direction", "") == "LONG") \
+                                   - float(_eu.get("news_sentiment", {}).get("direction", "") == "SHORT")
+                            _bt_nd = _eu.get("news_sentiment", {}).get("direction", "NEUTRAL")
+                            _bt_cd = _eu.get("dxy_signal_dir", "")
+                        st.session_state.orch_bt_results = _orch.backtest_multiperiod(
+                            live_news_score=_bt_ns,
+                            live_news_dir=_bt_nd,
+                            live_cot_dir=_bt_cd,
+                        )
                     except Exception as _bte_h:
                         st.error(f"Error: {_bte_h}")
             if st.session_state.orch_bt_results:
