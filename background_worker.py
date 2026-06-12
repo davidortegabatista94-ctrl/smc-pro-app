@@ -27,11 +27,8 @@ _MT5_API_TOKEN   = os.environ.get("MT5_API_TOKEN", "")
 _SYMBOL          = "EURUSD"
 _BOT_VOLUME      = float(os.environ.get("BOT_DEFAULT_VOLUME", "0.01"))
 
-TELEGRAM_TOKEN   = os.environ.get(
-    "TELEGRAM_BOT_TOKEN",
-    "7967414683:AAGmyLDjobQOvpU_OVzlwHJ-Tf1o9GjbIlE"
-).strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "1442582228").strip()
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -111,8 +108,8 @@ def _cycle() -> None:
             },
             user_id="system",
         )
-    except Exception:
-        pass
+    except Exception as _snap_e:
+        _log.debug("snapshot save error: %s", _snap_e)
 
     # 2 — Observación para mining de patrones
     try:
@@ -121,8 +118,8 @@ def _cycle() -> None:
             signal=signal, score=score,
             session=sess, dxy_dir=signal.get("dxy_dir", ""),
         )
-    except Exception:
-        pass
+    except Exception as _obs_e:
+        _log.debug("market observation error: %s", _obs_e)
 
     # 3 — Fundamental: FRED + 20 fuentes RSS de noticias (caché 30 min)
     _fund: dict = {}
@@ -150,11 +147,11 @@ def _cycle() -> None:
             _dna = {}
             try:
                 _dna = _db.load_active_strategy() or {}
-            except Exception:
-                pass
+            except Exception as _dna_e:
+                _log.debug("load DNA error: %s", _dna_e)
             _si.run_heal_cycle(active_dna=_dna, current_user="system")
-    except Exception:
-        pass
+    except Exception as _heal_e:
+        _log.debug("self-heal error: %s", _heal_e)
 
     # 4b — Meta-aprendizaje: estrategia maestra adaptativa (máx 1 vez/6h)
     try:
@@ -365,7 +362,8 @@ def _service_get(path: str) -> dict | list | None:
         headers = {"Authorization": f"Bearer {_MT5_API_TOKEN}"} if _MT5_API_TOKEN else {}
         r = requests.get(f"{_MT5_SERVICE_URL}{path}", headers=headers, timeout=8)
         return r.json() if r.ok else None
-    except Exception:
+    except Exception as _e:
+        _log.debug("service GET %s error: %s", path, _e)
         return None
 
 
@@ -378,7 +376,8 @@ def _service_post(path: str, body: dict) -> dict | None:
             headers["Authorization"] = f"Bearer {_MT5_API_TOKEN}"
         r = requests.post(f"{_MT5_SERVICE_URL}{path}", json=body, headers=headers, timeout=10)
         return r.json() if r.ok else None
-    except Exception:
+    except Exception as _e:
+        _log.debug("service POST %s error: %s", path, _e)
         return None
 
 
@@ -483,7 +482,8 @@ def _send_tg(msg: str) -> bool:
             timeout=10,
         )
         return r.status_code == 200
-    except Exception:
+    except Exception as _tg_e:
+        _log.debug("telegram send error: %s", _tg_e)
         return False
 
 

@@ -33,15 +33,15 @@ def _get_providers() -> list[tuple]:
     """Return all available AI providers in priority order as (name, key, model) tuples."""
     providers = []
 
-    groq_key = os.environ.get("GROQ_API_KEY", "gsk_0r0JRGjnYIAsgkfey3UWwWGdyb3FYjGb4Q5RKJICkoPGHM4pdQRlY").strip()
+    groq_key = os.environ.get("GROQ_API_KEY", "").strip()
     if groq_key:
         providers.append(("groq", groq_key, "llama-3.3-70b-versatile"))
 
-    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "csk-tvmnhtvpwkytpxp2njpt6v23kd8t43mwn532cdfm6pt36k3j").strip()
+    cerebras_key = os.environ.get("CEREBRAS_API_KEY", "").strip()
     if cerebras_key:
         providers.append(("cerebras", cerebras_key, "llama-3.3-70b"))
 
-    zhipu_key = os.environ.get("ZHIPU_API_KEY", "bcf45451bda84c4990cdab697602880d.XGkFUFoqEMZbJOBu").strip()
+    zhipu_key = os.environ.get("ZHIPU_API_KEY", "").strip()
     if zhipu_key:
         providers.append(("zhipu", zhipu_key, "glm-4-flash"))
 

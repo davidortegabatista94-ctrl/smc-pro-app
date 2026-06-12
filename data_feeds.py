@@ -16,7 +16,7 @@ import db as _db
 
 _log = logging.getLogger(__name__)
 
-_FRED_KEY   = os.environ.get("FRED_API_KEY", "8f68a4232ff18468959baa71aaa124de").strip()
+_FRED_KEY   = os.environ.get("FRED_API_KEY", "").strip()
 
 _FRED_TTL   = 3600 * 4   # 4h — macro data changes slowly
 
