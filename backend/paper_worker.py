@@ -34,6 +34,8 @@ _log = logging.getLogger(__name__)
 
 _BASE_DIR = Path(__file__).parent.parent
 HEARTBEAT = _BASE_DIR / "worker_heartbeat.json"
+RESULTS   = _BASE_DIR / "worker_results.json"   # snapshot del último análisis (para el dashboard)
+BACKTEST  = _BASE_DIR / "worker_backtest.json"  # snapshot del backtest histórico (caro, cada 6h)
 
 DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
 DEFAULT_INTERVAL = 600        # 10 min — equilibra frescura vs límites de yfinance
@@ -62,6 +64,39 @@ def read_heartbeat() -> dict:
     except Exception:
         pass
     return {}
+
+
+def _write_results(results: dict, dxy_dir: str) -> None:
+    """Persiste el último análisis completo para que el dashboard lo LEA (no recalcule)."""
+    try:
+        payload = {"ts": datetime.now(timezone.utc).isoformat(),
+                   "dxy": dxy_dir, "results": results}
+        with open(RESULTS, "w", encoding="utf-8") as f:
+            json.dump(payload, f, default=str)
+    except Exception as e:
+        _log.debug("results write: %s", e)
+
+
+def read_results(max_age_secs: int = 900) -> dict | None:
+    """
+    Lee el snapshot del último análisis del worker si es reciente.
+    Devuelve {ts, dxy, results} o None si no existe / está obsoleto.
+    """
+    try:
+        if not RESULTS.exists():
+            return None
+        with open(RESULTS, "r", encoding="utf-8") as f:
+            blob = json.load(f)
+        ts = datetime.fromisoformat(blob["ts"])
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - ts).total_seconds()
+        if age > max_age_secs:
+            return None
+        blob["age_secs"] = int(age)
+        return blob
+    except Exception:
+        return None
 
 
 def _run_one_cycle(pairs: list[str], min_score: int) -> dict:
@@ -123,6 +158,9 @@ def _run_one_cycle(pairs: list[str], min_score: int) -> dict:
             except Exception:
                 pass
 
+    # 5. Snapshot para el dashboard (lee esto en vez de recalcular)
+    _write_results(results, dxy_dir)
+
     summary = {
         "pairs": len(results),
         "operable": operable,
@@ -136,6 +174,7 @@ def _run_one_cycle(pairs: list[str], min_score: int) -> dict:
 
 def _loop(pairs: list[str], min_score: int, interval: int) -> None:
     _write_heartbeat({"status": "starting", "interval": interval})
+    _last_bt = 0.0
     while True:
         t0 = time.time()
         try:
@@ -147,8 +186,55 @@ def _loop(pairs: list[str], min_score: int, interval: int) -> None:
         except Exception as e:
             _log.warning("paper_worker cycle error: %s", e)
             _write_heartbeat({"status": "error", "error": str(e)})
+        # Backtest histórico: caro (~1-2 min) → recalcular solo cada 6h en background.
+        # El dashboard lo LEE (no bloquea su primera apertura).
+        if time.time() - _last_bt > 6 * 3600:
+            try:
+                _compute_backtest_snapshot()
+                _last_bt = time.time()
+            except Exception as e:
+                _log.warning("backtest snapshot error: %s", e)
         # Dormir hasta el próximo ciclo
         time.sleep(max(60, interval))
+
+
+def _compute_backtest_snapshot() -> None:
+    """Calcula backtest_multiperiod y lo guarda para que el dashboard lo lea."""
+    import backend.orchestrator as orch
+    # Usar el último análisis para pasar contexto de noticias/COT en vivo
+    news_dir, news_score, cot_dir = "", 0.0, ""
+    snap = read_results()
+    if snap:
+        eu = (snap.get("results") or {}).get("EURUSD", {})
+        news_dir   = eu.get("news_sentiment", {}).get("direction", "NEUTRAL")
+        news_score = 1.0 if news_dir == "LONG" else (-1.0 if news_dir == "SHORT" else 0.0)
+        cot_dir    = eu.get("dxy_signal_dir", "")
+    res = orch.backtest_multiperiod(live_news_score=news_score,
+                                    live_news_dir=news_dir, live_cot_dir=cot_dir)
+    try:
+        payload = {"ts": datetime.now(timezone.utc).isoformat(), "backtest": res}
+        with open(BACKTEST, "w", encoding="utf-8") as f:
+            json.dump(payload, f, default=str)
+        _log.info("backtest snapshot escrito")
+    except Exception as e:
+        _log.debug("backtest write: %s", e)
+
+
+def read_backtest(max_age_secs: int = 8 * 3600) -> dict | None:
+    """Lee el snapshot de backtest del worker si es reciente. Devuelve el dict de resultados."""
+    try:
+        if not BACKTEST.exists():
+            return None
+        with open(BACKTEST, "r", encoding="utf-8") as f:
+            blob = json.load(f)
+        ts = datetime.fromisoformat(blob["ts"])
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - ts).total_seconds() > max_age_secs:
+            return None
+        return blob.get("backtest")
+    except Exception:
+        return None
 
 
 def start_background_worker(pairs: list[str] | None = None,

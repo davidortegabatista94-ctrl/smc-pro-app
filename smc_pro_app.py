@@ -2597,7 +2597,20 @@ else:
         except Exception:
             pass
 
-        # ── AUTO-EJECUTA análisis si los datos tienen >5 min o no existen ────
+        # ── PREFERIR SNAPSHOT DEL WORKER (render instantáneo, sin recalcular) ─
+        # El worker dedicado ya analiza cada 10 min y guarda worker_results.json.
+        # El dashboard lo LEE en vez de recomputar → render casi inmediato.
+        if st.session_state.orch_results is None or (_ot.time() - st.session_state.orch_last_run) > 60:
+            try:
+                import backend.paper_worker as _pwr
+                _snap = _pwr.read_results(max_age_secs=900)
+                if _snap and _snap.get("results"):
+                    st.session_state.orch_results  = _snap["results"]
+                    st.session_state.orch_last_run = _ot.time() - int(_snap.get("age_secs", 0))
+            except Exception:
+                pass
+
+        # ── AUTO-EJECUTA análisis solo si NO hay snapshot fresco del worker ──
         _orch_stale = (st.session_state.orch_results is None
                        or (_ot.time() - st.session_state.orch_last_run) > 300)
         if _orch_stale:
@@ -2660,21 +2673,31 @@ else:
                 except Exception as _ae:
                     st.warning(f"Error al actualizar análisis: {_ae}")
 
-        # ── AUTO-EJECUTA backtest histórico en primera apertura ──────────────
+        # ── BACKTEST: leer snapshot del worker (instantáneo) o calcular ──────
         if st.session_state.orch_bt_results is None:
-            with st.spinner("Calculando historial de rendimiento... (~1-2 min, solo la primera vez)"):
-                try:
-                    _bns, _bnd, _bcd = 0.0, "", ""
-                    if st.session_state.orch_results:
-                        _eu2 = st.session_state.orch_results.get("EURUSD", {})
-                        _bnd = _eu2.get("news_sentiment", {}).get("direction", "NEUTRAL")
-                        _bns = 1.0 if _bnd == "LONG" else (-1.0 if _bnd == "SHORT" else 0.0)
-                        _bcd = _eu2.get("dxy_signal_dir", "")
-                    st.session_state.orch_bt_results = _orch.backtest_multiperiod(
-                        live_news_score=_bns, live_news_dir=_bnd, live_cot_dir=_bcd
-                    )
-                except Exception as _be:
-                    st.warning(f"Error en backtest histórico: {_be}")
+            # 1) Preferir el snapshot del worker (no bloquea la primera apertura)
+            try:
+                import backend.paper_worker as _pwb
+                _btsnap = _pwb.read_backtest()
+                if _btsnap:
+                    st.session_state.orch_bt_results = _btsnap
+            except Exception:
+                pass
+            # 2) Fallback: calcular aquí solo si el worker aún no lo escribió
+            if st.session_state.orch_bt_results is None:
+                with st.spinner("Calculando historial de rendimiento... (~1-2 min, solo la primera vez)"):
+                    try:
+                        _bns, _bnd, _bcd = 0.0, "", ""
+                        if st.session_state.orch_results:
+                            _eu2 = st.session_state.orch_results.get("EURUSD", {})
+                            _bnd = _eu2.get("news_sentiment", {}).get("direction", "NEUTRAL")
+                            _bns = 1.0 if _bnd == "LONG" else (-1.0 if _bnd == "SHORT" else 0.0)
+                            _bcd = _eu2.get("dxy_signal_dir", "")
+                        st.session_state.orch_bt_results = _orch.backtest_multiperiod(
+                            live_news_score=_bns, live_news_dir=_bnd, live_cot_dir=_bcd
+                        )
+                    except Exception as _be:
+                        st.warning(f"Error en backtest histórico: {_be}")
 
         # ── SECCIÓN 1: SEÑALES EN VIVO POR PAR ───────────────────────────────
         if st.session_state.orch_results:
