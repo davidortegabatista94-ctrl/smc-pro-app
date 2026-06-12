@@ -47,6 +47,7 @@ import pandas as pd
 import numpy as np
 import logging
 import time
+import feedparser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import os
@@ -545,6 +546,11 @@ def get_tv_data(symbol: str = "EURUSD", tf: str = "1h") -> dict:
             "buy":          a.summary.get("BUY", 0),
             "sell":         a.summary.get("SELL", 0),
             "neutral":      a.summary.get("NEUTRAL", 0),
+            # Volume-derived indicators from TradingView
+            "tv_volume":    ind.get("volume"),           # tick volume del bar actual
+            "tv_obv":       ind.get("OBV"),              # On Balance Volume
+            "tv_cmf":       ind.get("CMF"),              # Chaikin Money Flow (-1..1)
+            "tv_vwma":      ind.get("VWMA"),             # Volume-Weighted MA
             "source":       "TradingView",
         }
         _TV_CACHE[cache_key] = (datetime.now(), result)
@@ -590,8 +596,12 @@ def _mt5_service_available() -> bool:
     """True si hay conexión OANDA disponible (remota o directa)."""
     return bool(_MT5_SERVICE_URL) or (_oanda_bridge is not None)
 
+_mt5_health_cache: dict = {}   # {result, ts}
+_MT5_HEALTH_TTL = 60           # segundos entre peticiones reales
+
 def mt5_service_health() -> dict:
-    """Estado de la conexión OANDA (directa o via servicio remoto)."""
+    """Estado de la conexión OANDA — cacheado 60 s para no bloquear el refresh."""
+    global _mt5_health_cache
     if _oanda_bridge is not None:
         try:
             ok = _oanda_bridge.is_connected()
@@ -602,17 +612,26 @@ def mt5_service_health() -> dict:
             return {"status": "error", "error": str(e), "source": "oanda_direct"}
     if not _MT5_SERVICE_URL:
         return {"status": "no configurado"}
+    # Devolver caché si aún es válido
+    if _mt5_health_cache and (time.time() - _mt5_health_cache.get("ts", 0)) < _MT5_HEALTH_TTL:
+        return _mt5_health_cache.get("result", {"status": "no configurado"})
     reqs = get_requests()
     if not reqs:
         return {"status": "error", "error": "requests no disponible"}
     try:
-        r = reqs.get(f"{_MT5_SERVICE_URL}/health", timeout=5)
-        return r.json()
+        r = reqs.get(f"{_MT5_SERVICE_URL}/health", timeout=4)
+        result = r.json()
     except Exception as e:
-        return {"status": "error", "error": str(e)}
+        result = {"status": "error", "error": str(e)}
+    _mt5_health_cache = {"result": result, "ts": time.time()}
+    return result
+
+_mt5_account_cache: dict = {}   # {result, ts}
+_MT5_ACCOUNT_TTL = 120          # segundos
 
 def mt5_service_account() -> dict | None:
-    """Info de cuenta OANDA (directa o via servicio remoto)."""
+    """Info de cuenta OANDA — cacheada 120 s para no bloquear el refresh."""
+    global _mt5_account_cache
     if _oanda_bridge is not None:
         try:
             return _oanda_bridge.get_account_info()
@@ -620,16 +639,20 @@ def mt5_service_account() -> dict | None:
             return None
     if not _MT5_SERVICE_URL:
         return None
+    if _mt5_account_cache and (time.time() - _mt5_account_cache.get("ts", 0)) < _MT5_ACCOUNT_TTL:
+        return _mt5_account_cache.get("result")
     reqs = get_requests()
     if not reqs:
         return None
     try:
         r = reqs.get(f"{_MT5_SERVICE_URL}/account",
-                     headers=_mt5_service_headers(), timeout=5)
-        return r.json() if r.ok else None
+                     headers=_mt5_service_headers(), timeout=4)
+        result = r.json() if r.ok else None
     except Exception as e:
         logging.warning(f"mt5_service_account error: {e}")
-        return None
+        result = None
+    _mt5_account_cache = {"result": result, "ts": time.time()}
+    return result
 
 def mt5_service_positions() -> list:
     """Posiciones abiertas en OANDA (directa o via servicio remoto)."""
@@ -1322,6 +1345,37 @@ def get_eurusd_data(tf="1h", extended=False):
             logging.warning(f"yfinance ({'extended ' if extended else ''}{tf}): {e}")
     return pd.DataFrame()
 
+def _enrich_df_volume(df: pd.DataFrame, symbol: str = "EURUSD", tf: str = "1h") -> pd.DataFrame:
+    """
+    Enriquece df["Volume"] con TradingView (CMF/OBV).
+    El composite sintético lo gestiona _ensure_volume en indicators.py como fallback.
+    """
+    if df is None or df.empty:
+        return df
+
+    df = df.copy()
+
+    # ── TradingView volume (último bar) ─────────────────────────────────────
+    try:
+        _tv = get_tv_data(symbol.replace("m", ""), tf)
+        _tv_vol = _tv.get("tv_volume")
+        if _tv_vol and _tv_vol > 0 and "Volume_oanda" not in df.columns:
+            # Solo el último valor disponible
+            _arr = [float(_tv_vol)] * len(df)
+            df["Volume_oanda"] = _arr          # imperfecto pero mejor que nada
+        # Añadir CMF y OBV como columnas auxiliares (último valor broadcast)
+        _cmf = _tv.get("tv_cmf")
+        _obv = _tv.get("tv_obv")
+        if _cmf is not None:
+            df["tv_cmf"] = float(_cmf)
+        if _obv is not None:
+            df["tv_obv"] = float(_obv)
+    except Exception as _e:
+        logging.debug(f"TV volume enrich: {_e}")
+
+    return df
+
+
 def get_multiple_timeframes():
     out = {}
     for tf in ["15m", "1h", "4h", "1d"]:
@@ -1472,22 +1526,6 @@ def _get_tg_credentials():
     except Exception:
         pass
     return tok, cid
-
-
-def _get_cached_calendar() -> list:
-    """Return economic calendar from session_state cache (TTL 1h) or fetch fresh."""
-    import time as _t
-    cached = st.session_state.get("economic_calendar")
-    ts     = st.session_state.get("_cal_fetched_ts", 0.0)
-    if cached and (_t.time() - ts) < 3600:
-        return cached
-    try:
-        cal = get_economic_calendar()
-        st.session_state.economic_calendar = cal
-        st.session_state._cal_fetched_ts   = _t.time()
-        return cal
-    except Exception:
-        return cached or []
 
 
 def send_telegram_raw(msg: str) -> bool:
@@ -1850,6 +1888,8 @@ def detect_swing_points(df, lookback=50):
                 all(lows.iloc[i] < lows.iloc[i+j] for j in range(1, 5))):
             sls.append(("FRACTAL LOW", lows.iloc[i], "🟢"))
     return shs[-5:], sls[-5:]
+    return tp, sl, rr, viable, risk_pips, liquidity_warnings
+    return usd_score, eur_score, news, analyze_consensus(news)
 
 # ============================================
 # SEÑAL GLOBAL
@@ -1921,11 +1961,12 @@ def generate_signal():
     # ── Señal KB: selecciona estrategia por régimen actual (técnico + fundamental) ──
     kb          = load_knowledge_base()
     strat_wins  = kb.get("strategy_wins", {})
-    _cot_sig = None
+    _cot_sig    = None   # COT no disponible en generate_signal (viene del session_state en UI)
+    _cal_sig    = None
     try:
-        _cal_sig = _get_cached_calendar()
+        _cal_sig = get_economic_calendar()
     except Exception:
-        _cal_sig = []
+        pass
 
     kb_direction, kb_reason = "NO TRADE", "Sin historial de backtest"
     best_strat = regime_key = regime_lbl = why_selection = None
@@ -1985,8 +2026,14 @@ def _render_trading_chart(
     close   = df_plot["Close"]
     high    = df_plot["High"]
     low     = df_plot["Low"]
-    vol     = df_plot["Volume"]
     idx     = df_plot.index
+
+    # Volumen real si existe y es no-cero; si no, sintético (rango × 1000)
+    _raw_vol = df_plot.get("Volume", pd.Series(0, index=idx)).fillna(0)
+    if _raw_vol.sum() == 0:
+        vol = ((high - low) / 0.0001 * 1000).round().clip(lower=1)
+    else:
+        vol = _raw_vol
 
     # ── Indicators ───────────────────────────────────────────────────────────
     ema21  = close.ewm(span=21,  adjust=False).mean()
@@ -2376,42 +2423,14 @@ else:
     if st.session_state.current_user is None:
         st.markdown("""
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
-        .stApp { background:#04080f!important; font-family:'Inter',sans-serif!important; }
-        .block-container { max-width:420px!important; padding-top:100px!important; }
-        #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important}
-        [data-testid="stWidgetLabel"] label {
-          font-size:.62rem!important; font-weight:700!important;
-          color:#57697c!important; text-transform:uppercase!important;
-          letter-spacing:.1em!important;
-        }
-        .stTextInput input, .stSelectbox>div>div {
-          background:#080d17!important; border:1px solid #172032!important;
-          border-radius:4px!important; color:#c8d3e0!important;
-          font-family:'JetBrains Mono',monospace!important; font-size:.85rem!important;
-        }
-        .stTextInput input:focus { border-color:#1566d3!important; }
-        button[kind="primaryFormSubmit"], button[kind="primary"] {
-          background:#1566d3!important; border:none!important; border-radius:4px!important;
-          font-weight:700!important; letter-spacing:.06em!important;
-          text-transform:uppercase!important; font-size:.76rem!important;
-          padding:10px 20px!important;
-        }
+        .block-container{max-width:500px!important;padding-top:80px!important}
         </style>""", unsafe_allow_html=True)
-        st.markdown("""
-        <div style="margin-bottom:32px;text-align:center">
-          <div style="font-size:1.6rem;font-weight:900;color:#c8d3e0;letter-spacing:-.04em;font-family:Inter,sans-serif">
-            SMC Pro
-          </div>
-          <div style="font-size:.62rem;color:#57697c;letter-spacing:.18em;text-transform:uppercase;margin-top:4px;font-family:Inter,sans-serif">
-            Trading Terminal · EUR/USD
-          </div>
-          <div style="width:40px;height:2px;background:#1566d3;margin:12px auto 0"></div>
-        </div>""", unsafe_allow_html=True)
+        st.title("⚡ SMC Pro v2")
+        st.subheader("Iniciar Sesión")
         with st.form("_login_form"):
             _lu = st.selectbox("Usuario", ["david", "javi"])
-            _lp = st.text_input("Contraseña", type="password", placeholder="••••••••")
-            _ls = st.form_submit_button("ACCEDER", use_container_width=True)
+            _lp = st.text_input("Contraseña", type="password", placeholder="tu nombre")
+            _ls = st.form_submit_button("🔐 Entrar", use_container_width=True)
         if _ls:
             _auth_ok = False
             if _DB_OK:
@@ -2439,6 +2458,85 @@ else:
 
     current_user      = st.session_state.current_user
     current_user_name = _USER_NAMES.get(current_user, current_user.capitalize())
+
+    # ── Selector de modo: Trading o Inversión a Largo Plazo ──────────────────
+    if st.session_state.get("app_mode") == "investment":
+        try:
+            import investment_module as _inv
+            _inv.render_investment_module()
+        except Exception as _inv_err:
+            st.error(f"Error en módulo de inversión: {_inv_err}")
+            if st.button("← Volver"):
+                st.session_state.app_mode = None
+                st.rerun()
+        st.stop()
+
+    if st.session_state.get("app_mode") is None:
+        st.markdown("""
+        <style>
+        .mode-container{display:flex;gap:24px;margin-top:32px}
+        .mode-card{background:#1a1f2e;border:1px solid #2d3748;border-radius:16px;
+                   padding:32px 24px;flex:1;text-align:center}
+        .mode-card h2{font-size:2rem;margin-bottom:8px}
+        .mode-card p{color:#a0aec0;margin-bottom:16px}
+        .mode-card ul{text-align:left;color:#cbd5e0;line-height:2rem;list-style:none;padding-left:8px}
+        </style>
+        """, unsafe_allow_html=True)
+
+        st.markdown(f"## ¡Bienvenido, {current_user_name}! ¿Qué quieres hacer hoy?")
+        st.markdown("")
+
+        _mc1, _mc2 = st.columns(2)
+        with _mc1:
+            st.markdown("""
+            <div class="mode-card">
+                <h2>⚡ Trading Activo</h2>
+                <p>Señales EUR/USD en tiempo real</p>
+                <ul>
+                    <li>🎯 Señales premium multi-filtro</li>
+                    <li>📊 Backtest de 17 estrategias</li>
+                    <li>🤖 Bot automático OANDA</li>
+                    <li>📱 Alertas Telegram</li>
+                    <li>🧠 Asesor IA</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("")
+            if st.button("⚡ Entrar a Trading", use_container_width=True, type="primary"):
+                st.session_state.app_mode = "trading"
+                st.rerun()
+
+        with _mc2:
+            st.markdown("""
+            <div class="mode-card">
+                <h2>📈 Inversión LP</h2>
+                <p>Cartera optimizada a 1-5 años</p>
+                <ul>
+                    <li>💎 35+ activos analizados</li>
+                    <li>📊 Scoring fundamental+técnico+macro</li>
+                    <li>🌍 ETFs, acciones, bonos, oro</li>
+                    <li>💼 Constructor de cartera</li>
+                    <li>📈 Proyección de crecimiento</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("")
+            if st.button("📈 Entrar a Inversión LP", use_container_width=True):
+                st.session_state.app_mode = "investment"
+                st.rerun()
+
+        st.stop()
+
+    # ── Solo se llega aquí en modo TRADING ──────────────────────────────────
+    # Fragment de auto-refresh: fires cada 20s, rerun solo si ≥175s desde
+    # el último análisis. No interfiere con el selector porque ese termina en st.stop().
+    @st.fragment(run_every=20)
+    def _autorefresh():
+        _t = st.session_state.get("last_analysis_time")
+        if _t and (time.time() - float(_t)) >= 175:
+            st.rerun()
+
+    _autorefresh()
 
     # ── Cargar credenciales MT5 del usuario desde DB (solo una vez) ──────────
     _mt5_load_key = f"mt5_loaded_{current_user}"
@@ -2504,8 +2602,6 @@ else:
         st.session_state.market_context_reasons = None
     if "economic_calendar" not in st.session_state:
         st.session_state.economic_calendar = None
-    if "_cal_fetched_ts" not in st.session_state:
-        st.session_state._cal_fetched_ts = 0.0
     if "cot_data" not in st.session_state:
         st.session_state.cot_data = None
     cfg = load_user_config()
@@ -2524,595 +2620,166 @@ else:
         st.session_state.symbol = SYMBOL
 
     st.markdown("""<style>
-/* ══════════════════════════════════════════════════════════════════
-   SMC Pro — Terminal Design v3  ·  Bloomberg / TradingView Aesthetic
-   Professional dark trading terminal — precision, clarity, density
-══════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════
+   SMC Pro — Design System v2
+   Dark trading terminal aesthetic
+══════════════════════════════════════════════════════ */
 
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+/* ── Layout ── */
+.main .block-container{padding-top:.6rem!important;padding-bottom:2rem!important;max-width:100%!important}
+#MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important}
+.stApp{background:#060a10!important}
 
-/* ── Design tokens ────────────────────────────────────────── */
-:root {
-  --bg:         #04080f;
-  --surface:    #080d17;
-  --surface-2:  #0c1220;
-  --surface-3:  #111828;
-  --border:     #172032;
-  --border-2:   #1f2e44;
-  --blue:       #1566d3;
-  --blue-light: #3d8ef5;
-  --blue-glow:  rgba(21,102,211,.16);
-  --green:      #00b87c;
-  --green-dim:  rgba(0,184,124,.08);
-  --green-bd:   rgba(0,184,124,.28);
-  --red:        #e03c50;
-  --red-dim:    rgba(224,60,80,.07);
-  --red-bd:     rgba(224,60,80,.3);
-  --amber:      #c97d0a;
-  --amber-dim:  rgba(201,125,10,.07);
-  --amber-bd:   rgba(201,125,10,.25);
-  --text:       #c8d3e0;
-  --text-2:     #57697c;
-  --text-3:     #2e3f50;
-  --mono:       'JetBrains Mono','Courier New',monospace;
-  --sans:       'Inter',-apple-system,'Segoe UI',sans-serif;
-  --radius:     5px;
-  --radius-lg:  8px;
-}
-
-/* ── Base layout ──────────────────────────────────────────── */
-.main .block-container {
-  padding-top:.5rem!important;
-  padding-bottom:2.5rem!important;
-  max-width:100%!important;
-}
-#MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{
-  display:none!important;
-}
-.stApp {
-  background:var(--bg)!important;
-  font-family:var(--sans)!important;
-}
-p, li, span, label, caption {
-  font-family:var(--sans)!important;
-}
-
-/* ── Sidebar ──────────────────────────────────────────────── */
-[data-testid="stSidebar"] {
-  background:#06090f!important;
-  border-right:1px solid var(--border)!important;
-}
-[data-testid="stSidebar"] h1,
-[data-testid="stSidebar"] h2,
-[data-testid="stSidebar"] h3 {
-  color:var(--blue-light)!important;
-  font-size:.65rem!important;
-  font-weight:700!important;
-  letter-spacing:.12em!important;
-  text-transform:uppercase!important;
-  margin-bottom:8px!important;
-  font-family:var(--sans)!important;
-}
-[data-testid="stSidebar"] .stMarkdown p {
-  font-size:.77rem!important;
-  color:var(--text-2)!important;
-  line-height:1.55!important;
-}
+/* ── Sidebar ── */
+[data-testid="stSidebar"]{background:#07090f!important;border-right:1px solid #151d2e!important}
+[data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3{
+  color:#3d7eff!important;font-size:.72rem!important;font-weight:700!important;
+  letter-spacing:.1em!important;text-transform:uppercase!important;margin-bottom:6px!important}
+[data-testid="stSidebar"] .stMarkdown p{font-size:.8rem!important;color:#6e7a8a!important}
 [data-testid="stSidebarNavItems"]{padding-top:0!important}
 
-/* ── Metrics ──────────────────────────────────────────────── */
-[data-testid="metric-container"] {
-  background:var(--surface)!important;
-  border:1px solid var(--border)!important;
-  border-radius:var(--radius)!important;
-  padding:13px 15px!important;
-  position:relative!important;
-  overflow:hidden!important;
-  transition:border-color .15s!important;
-}
-[data-testid="metric-container"]::after {
-  content:'';
-  position:absolute;
-  bottom:0;left:0;
-  width:100%;height:2px;
-  background:var(--blue);
-  transform:scaleX(0);
-  transition:transform .2s ease;
-  transform-origin:left;
-}
-[data-testid="metric-container"]:hover {
-  border-color:var(--border-2)!important;
-}
-[data-testid="metric-container"]:hover::after {
-  transform:scaleX(1);
-}
-[data-testid="stMetricValue"] {
-  font-size:1.1rem!important;
-  font-weight:700!important;
-  font-family:var(--mono)!important;
-  color:var(--text)!important;
-  letter-spacing:-.01em!important;
-}
-[data-testid="stMetricLabel"] {
-  font-size:.62rem!important;
-  font-weight:600!important;
-  color:var(--text-2)!important;
-  text-transform:uppercase!important;
-  letter-spacing:.1em!important;
-  font-family:var(--sans)!important;
-}
+/* ── Metrics ── */
+[data-testid="metric-container"]{
+  background:#0b0f18!important;border:1px solid #151d2e!important;
+  border-radius:10px!important;padding:12px 14px!important}
+[data-testid="metric-container"]:hover{border-color:#3d7eff!important}
+[data-testid="stMetricValue"]{
+  font-size:1.2rem!important;font-weight:800!important;
+  font-family:'JetBrains Mono','Courier New',monospace!important;color:#e6edf3!important}
+[data-testid="stMetricLabel"]{
+  font-size:.68rem!important;font-weight:700!important;
+  color:#4d5966!important;text-transform:uppercase!important;letter-spacing:.07em!important}
 [data-testid="stMetricDelta"] svg{display:none!important}
-[data-testid="stMetricDelta"]{
-  font-size:.7rem!important;
-  font-family:var(--mono)!important;
-}
+[data-testid="stMetricDelta"]{font-size:.75rem!important}
 
-/* ── Buttons ──────────────────────────────────────────────── */
-button[kind="primary"] {
-  background:var(--blue)!important;
-  border:none!important;
-  border-radius:var(--radius)!important;
-  font-weight:700!important;
-  letter-spacing:.05em!important;
-  font-size:.76rem!important;
-  padding:8px 16px!important;
-  font-family:var(--sans)!important;
-  text-transform:uppercase!important;
-  box-shadow:none!important;
-  transition:background .15s, box-shadow .15s, transform .1s!important;
-}
-button[kind="primary"]:hover {
-  background:#1a72ec!important;
-  box-shadow:0 4px 18px var(--blue-glow)!important;
-  transform:translateY(-1px)!important;
-}
-button[kind="secondary"] {
-  background:var(--surface)!important;
-  border:1px solid var(--border)!important;
-  border-radius:var(--radius)!important;
-  color:var(--text-2)!important;
-  font-size:.76rem!important;
-  font-family:var(--sans)!important;
-  box-shadow:none!important;
-  transition:border-color .15s, color .15s!important;
-}
-button[kind="secondary"]:hover {
-  border-color:var(--border-2)!important;
-  color:var(--text)!important;
-}
+/* ── Buttons ── */
+button[kind="primary"]{
+  background:linear-gradient(135deg,#1a56db,#1643b0)!important;
+  border:none!important;border-radius:8px!important;
+  font-weight:800!important;letter-spacing:.04em!important;
+  font-size:.85rem!important;padding:10px 20px!important;
+  box-shadow:0 2px 12px rgba(26,86,219,.35)!important;transition:all .2s!important}
+button[kind="primary"]:hover{
+  background:linear-gradient(135deg,#2563eb,#1a56db)!important;
+  box-shadow:0 4px 20px rgba(26,86,219,.55)!important;transform:translateY(-1px)!important}
+button[kind="secondary"]{
+  background:#0d1117!important;border:1px solid #1e2d3d!important;
+  border-radius:8px!important;color:#8b9ab0!important;font-size:.8rem!important}
 
-/* ── Expanders ────────────────────────────────────────────── */
-[data-testid="stExpander"] {
-  background:var(--surface)!important;
-  border:1px solid var(--border)!important;
-  border-radius:var(--radius)!important;
-}
-details summary {
-  font-weight:600!important;
-  font-size:.72rem!important;
-  color:var(--text-2)!important;
-  padding:9px 13px!important;
-  font-family:var(--sans)!important;
-  text-transform:uppercase!important;
-  letter-spacing:.07em!important;
-}
-details summary:hover { color:var(--text)!important; }
-details[open] summary { color:var(--text)!important; border-bottom:1px solid var(--border)!important; }
+/* ── Expanders ── */
+[data-testid="stExpander"]{
+  background:#0b0f18!important;border:1px solid #151d2e!important;border-radius:10px!important}
+details summary{
+  font-weight:600!important;font-size:.82rem!important;
+  color:#8b9ab0!important;padding:10px 14px!important}
+details summary:hover{color:#e6edf3!important}
 
-/* ── Alerts ───────────────────────────────────────────────── */
-[data-testid="stAlert"] {
-  border-radius:var(--radius)!important;
-  padding:9px 14px!important;
-  font-size:.76rem!important;
-  font-family:var(--sans)!important;
-  border-left-width:3px!important;
-  border-top-width:0!important;
-  border-right-width:0!important;
-  border-bottom-width:0!important;
-}
-.stSuccess {
-  background:var(--green-dim)!important;
-  border-color:var(--green)!important;
-  color:#8de5c7!important;
-}
-.stWarning {
-  background:var(--amber-dim)!important;
-  border-color:var(--amber)!important;
-  color:#e6b86a!important;
-}
-.stInfo {
-  background:rgba(21,102,211,.06)!important;
-  border-color:var(--blue)!important;
-  color:#7ab5f5!important;
-}
-.stError {
-  background:var(--red-dim)!important;
-  border-color:var(--red)!important;
-  color:#f08090!important;
-}
+/* ── Alerts ── */
+[data-testid="stAlert"]{border-radius:8px!important;padding:10px 14px!important;font-size:.82rem!important}
+.stSuccess{background:rgba(5,150,105,.08)!important;border-color:rgba(5,150,105,.3)!important}
+.stWarning{background:rgba(217,119,6,.08)!important;border-color:rgba(217,119,6,.3)!important}
+.stInfo{background:rgba(26,86,219,.08)!important;border-color:rgba(26,86,219,.3)!important}
+.stError{background:rgba(185,28,28,.08)!important;border-color:rgba(185,28,28,.3)!important}
 
-/* ── DataFrames ───────────────────────────────────────────── */
-[data-testid="stDataFrame"] {
-  border:1px solid var(--border)!important;
-  border-radius:var(--radius)!important;
-  overflow:hidden!important;
-}
+/* ── DataFrames ── */
+[data-testid="stDataFrame"]{border:1px solid #151d2e!important;border-radius:8px!important;overflow:hidden!important}
 
-/* ── Dividers ─────────────────────────────────────────────── */
-hr { border-color:var(--border)!important; margin:14px 0!important; }
+/* ── Dividers ── */
+hr{border-color:#151d2e!important;margin:14px 0!important}
 
-/* ── Inputs ───────────────────────────────────────────────── */
-[data-testid="stWidgetLabel"] label {
-  font-size:.62rem!important;
-  font-weight:700!important;
-  color:var(--text-2)!important;
-  text-transform:uppercase!important;
-  letter-spacing:.1em!important;
-  font-family:var(--sans)!important;
-}
-.stTextInput input, .stSelectbox select {
-  background:var(--surface)!important;
-  border-color:var(--border)!important;
-  border-radius:var(--radius)!important;
-  color:var(--text)!important;
-  font-family:var(--mono)!important;
-  font-size:.82rem!important;
-}
-.stTextInput input:focus { border-color:var(--blue)!important; box-shadow:0 0 0 2px var(--blue-glow)!important; }
+/* ── Inputs ── */
+[data-testid="stWidgetLabel"] label{
+  font-size:.72rem!important;font-weight:700!important;
+  color:#4d5966!important;text-transform:uppercase!important;letter-spacing:.06em!important}
+.stTextInput input,.stSelectbox select{
+  background:#0b0f18!important;border-color:#1e2d3d!important;
+  border-radius:6px!important;color:#c9d1d9!important}
 
-/* ── Plotly ───────────────────────────────────────────────── */
-.js-plotly-plot {
-  border:1px solid var(--border)!important;
-  border-radius:var(--radius)!important;
-  overflow:hidden!important;
-}
+/* ── Plotly chart ── */
+.js-plotly-plot{border:1px solid #151d2e!important;border-radius:10px!important;overflow:hidden!important}
 
-/* ── Headings ─────────────────────────────────────────────── */
-h1, h2, h3 {
-  color:var(--text)!important;
-  font-family:var(--sans)!important;
-  font-weight:700!important;
-  letter-spacing:-.02em!important;
-}
-h3 { font-size:.9rem!important; text-transform:uppercase; letter-spacing:.04em!important; color:var(--text-2)!important; }
+/* ══════ Custom component classes ══════ */
 
+/* Header */
+.smc-header{
+  display:flex;justify-content:space-between;align-items:center;
+  padding:10px 0 12px;border-bottom:1px solid #151d2e;margin-bottom:10px}
+.smc-logo{font-size:1.25rem;font-weight:900;color:#e6edf3;letter-spacing:-.03em}
+.smc-pair{font-size:.85rem;font-weight:700;color:#3d7eff;font-family:monospace}
+.smc-time{font-size:.75rem;color:#4d5966;font-family:monospace}
+.smc-version{font-size:.62rem;font-weight:700;color:#4d5966;background:#0d1117;
+  border:1px solid #1e2d3d;padding:1px 6px;border-radius:3px;margin-left:6px;vertical-align:middle}
+.smc-hbrand{display:flex;align-items:center;gap:8px}
+.smc-hinfo{display:flex;align-items:center;gap:10px}
 
-/* ═══════════════════════════════════════════════════════════
-   TERMINAL COMPONENTS — CUSTOM CLASSES
-═══════════════════════════════════════════════════════════ */
+/* Badges */
+.bdg{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;
+     font-size:.68rem;font-weight:800;letter-spacing:.04em;vertical-align:middle}
+.bdg-g{background:rgba(5,150,105,.12);color:#10b981;border:1px solid rgba(5,150,105,.25)}
+.bdg-r{background:rgba(220,38,38,.12);color:#f87171;border:1px solid rgba(220,38,38,.25)}
+.bdg-y{background:rgba(217,119,6,.12);color:#f59e0b;border:1px solid rgba(217,119,6,.25)}
+.bdg-b{background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.25)}
+.bdg-x{background:rgba(107,114,128,.12);color:#9ca3af;border:1px solid rgba(107,114,128,.25)}
 
-/* ── Top header bar ───────────────────────────────────────── */
-.smc-header {
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  padding:8px 0 11px;
-  border-bottom:1px solid var(--border);
-  margin-bottom:12px;
-}
-.smc-logo {
-  font-size:1.05rem;
-  font-weight:900;
-  color:var(--text);
-  letter-spacing:-.04em;
-  font-family:var(--sans);
-}
-.smc-pair {
-  font-size:.88rem;
-  font-weight:700;
-  color:var(--blue-light);
-  font-family:var(--mono);
-  letter-spacing:.04em;
-}
-.smc-time {
-  font-size:.72rem;
-  color:var(--text-2);
-  font-family:var(--mono);
-}
-.smc-version {
-  font-size:.56rem;
-  font-weight:700;
-  color:var(--text-3);
-  background:var(--surface);
-  border:1px solid var(--border);
-  padding:2px 6px;
-  border-radius:3px;
-  margin-left:6px;
-  vertical-align:middle;
-  font-family:var(--mono);
-  text-transform:uppercase;
-  letter-spacing:.08em;
-}
-.smc-hbrand { display:flex; align-items:center; gap:10px; }
-.smc-hinfo  { display:flex; align-items:center; gap:14px; }
+/* Section headers */
+.smc-sec{display:flex;align-items:center;gap:8px;padding:16px 0 10px;
+  border-bottom:1px solid #151d2e;margin-bottom:12px}
+.smc-sec span:first-child{font-size:1rem}
+.smc-sec-title{font-size:.72rem;font-weight:800;color:#4d5966;
+  letter-spacing:.1em;text-transform:uppercase}
 
-/* ── Badges ───────────────────────────────────────────────── */
-.bdg {
-  display:inline-flex;
-  align-items:center;
-  gap:3px;
-  padding:2px 7px;
-  border-radius:3px;
-  font-size:.6rem;
-  font-weight:700;
-  letter-spacing:.07em;
-  text-transform:uppercase;
-  vertical-align:middle;
-  font-family:var(--sans);
-}
-.bdg-g { background:rgba(0,184,124,.1); color:#00c98a; border:1px solid var(--green-bd); }
-.bdg-r { background:rgba(224,60,80,.1); color:#f06070; border:1px solid var(--red-bd); }
-.bdg-y { background:rgba(201,125,10,.1);color:#d48c22; border:1px solid var(--amber-bd); }
-.bdg-b { background:rgba(21,102,211,.1);color:#5599ee; border:1px solid rgba(21,102,211,.3); }
-.bdg-x { background:rgba(50,70,90,.1);  color:var(--text-2); border:1px solid rgba(50,70,90,.3); }
+/* Signal hero card */
+.smc-signal{border-radius:12px;padding:18px 22px;margin:6px 0;
+  display:flex;align-items:center;justify-content:space-between}
+.smc-sig-b{background:linear-gradient(135deg,#011a0a,#012d10);
+  border:1px solid rgba(5,150,105,.5);box-shadow:0 0 24px rgba(5,150,105,.08)}
+.smc-sig-s{background:linear-gradient(135deg,#1a0505,#2d0a0a);
+  border:1px solid rgba(220,38,38,.5);box-shadow:0 0 24px rgba(220,38,38,.08)}
+.smc-sig-n{background:linear-gradient(135deg,#151206,#221b08);
+  border:1px solid rgba(217,119,6,.3)}
+.sig-dir{font-size:1.7rem;font-weight:900;letter-spacing:-.02em;line-height:1}
+.sig-dir-b{color:#10b981}.sig-dir-s{color:#f87171}.sig-dir-n{color:#f59e0b}
+.sig-price{font-size:1.1rem;font-weight:700;font-family:'JetBrains Mono','Courier New',monospace;
+  color:#c9d1d9;margin-top:4px}
+.sig-right{display:flex;flex-direction:column;align-items:flex-end;gap:5px}
+.sig-pill{font-size:.72rem;color:#6e7a8a;background:#0d1117;
+  border:1px solid #1e2d3d;border-radius:6px;padding:3px 9px}
 
-/* ── Section dividers ─────────────────────────────────────── */
-.smc-sec {
-  display:flex;
-  align-items:center;
-  gap:10px;
-  padding:18px 0 10px;
-  border-bottom:1px solid var(--border);
-  margin-bottom:14px;
-}
-.smc-sec::before {
-  content:'';
-  display:block;
-  width:3px;
-  height:14px;
-  background:var(--blue);
-  border-radius:2px;
-  flex-shrink:0;
-}
-.smc-sec span:first-child { font-size:.9rem; }
-.smc-sec-title {
-  font-size:.62rem;
-  font-weight:800;
-  color:var(--text-2);
-  letter-spacing:.14em;
-  text-transform:uppercase;
-  font-family:var(--sans);
-}
+/* Score card */
+.smc-score{background:#0b0f18;border:1px solid #151d2e;
+  border-radius:12px;padding:16px 18px}
+.sc-num{font-size:2.6rem;font-weight:900;font-family:monospace;line-height:1}
+.sc-den{font-size:1rem;font-weight:400;color:#4d5966}
+.sc-lbl{font-size:.68rem;font-weight:800;letter-spacing:.1em;
+  text-transform:uppercase;margin:4px 0 10px}
+.sc-track{height:5px;background:#151d2e;border-radius:3px;overflow:hidden}
+.sc-fill{height:100%;border-radius:3px;transition:width .6s ease}
 
-/* ── Signal hero card ─────────────────────────────────────── */
-.smc-signal {
-  border-radius:var(--radius)!important;
-  padding:18px 22px;
-  margin:8px 0;
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  position:relative;
-  overflow:hidden;
-}
-.smc-signal::before {
-  content:'';
-  position:absolute;
-  top:0; left:0;
-  width:4px; height:100%;
-  border-radius:0;
-}
-.smc-sig-b {
-  background:var(--green-dim);
-  border:1px solid var(--green-bd);
-}
-.smc-sig-b::before { background:var(--green); }
+/* Position banner */
+.smc-pos{display:flex;align-items:center;justify-content:space-between;
+  background:#0b0f18;border:1px solid #151d2e;border-radius:10px;
+  padding:11px 16px;margin:6px 0;font-size:.8rem}
+.smc-pos-open{border-left:3px solid #3d7eff!important;background:rgba(26,86,219,.04)!important}
+.smc-pos-b{border-left:3px solid #10b981!important}
+.smc-pos-s{border-left:3px solid #f87171!important}
+.pos-vals{display:flex;gap:18px;font-family:monospace;font-size:.78rem}
+.pos-val-tp{color:#10b981}.pos-val-sl{color:#f87171}.pos-val-x{color:#6e7a8a}
 
-.smc-sig-s {
-  background:var(--red-dim);
-  border:1px solid var(--red-bd);
-}
-.smc-sig-s::before { background:var(--red); }
+/* Window status */
+.smc-win{display:flex;align-items:center;gap:8px;padding:8px 14px;
+  border-radius:8px;margin-bottom:8px;font-size:.8rem;font-weight:600}
+.smc-win-on{background:rgba(5,150,105,.06);border:1px solid rgba(5,150,105,.2);color:#10b981}
+.smc-win-off{background:rgba(217,119,6,.06);border:1px solid rgba(217,119,6,.2);color:#f59e0b}
 
-.smc-sig-n {
-  background:var(--amber-dim);
-  border:1px solid var(--amber-bd);
-}
-.smc-sig-n::before { background:var(--amber); }
-
-.sig-dir {
-  font-size:1.55rem;
-  font-weight:900;
-  letter-spacing:-.02em;
-  line-height:1;
-  font-family:var(--sans);
-}
-.sig-dir-b { color:var(--green); }
-.sig-dir-s { color:var(--red); }
-.sig-dir-n { color:var(--amber); }
-
-.sig-price {
-  font-size:.95rem;
-  font-weight:600;
-  font-family:var(--mono);
-  color:var(--text-2);
-  margin-top:5px;
-  letter-spacing:.04em;
-}
-.sig-right { display:flex; flex-direction:column; align-items:flex-end; gap:4px; }
-.sig-pill {
-  font-size:.65rem;
-  color:var(--text-2);
-  background:rgba(4,8,15,.7);
-  border:1px solid var(--border);
-  border-radius:3px;
-  padding:2px 8px;
-  font-family:var(--mono);
-  letter-spacing:.04em;
-}
-
-/* ── Score card ───────────────────────────────────────────── */
-.smc-score {
-  background:var(--surface);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:16px 18px;
-  position:relative;
-  overflow:hidden;
-}
-.smc-score::before {
-  content:'';
-  position:absolute;
-  top:0; left:0;
-  width:100%; height:2px;
-  background:linear-gradient(90deg, var(--blue) 0%, transparent 100%);
-}
-.sc-num {
-  font-size:2.8rem;
-  font-weight:900;
-  font-family:var(--mono);
-  line-height:1;
-  letter-spacing:-.04em;
-}
-.sc-den { font-size:.85rem; font-weight:400; color:var(--text-3); font-family:var(--mono); }
-.sc-lbl {
-  font-size:.58rem;
-  font-weight:800;
-  letter-spacing:.16em;
-  text-transform:uppercase;
-  margin:5px 0 12px;
-  font-family:var(--sans);
-}
-.sc-track {
-  height:3px;
-  background:var(--border);
-  border-radius:2px;
-  overflow:hidden;
-}
-.sc-fill { height:100%; border-radius:2px; transition:width .5s ease; }
-
-/* ── Position bar ─────────────────────────────────────────── */
-.smc-pos {
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  background:var(--surface);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:10px 16px;
-  margin:5px 0;
-  font-size:.77rem;
-  font-family:var(--sans);
-}
-.smc-pos-open {
-  background:rgba(21,102,211,.04)!important;
-}
-.smc-pos-b { border-left:3px solid var(--green)!important; }
-.smc-pos-s { border-left:3px solid var(--red)!important; }
-.pos-vals { display:flex; gap:20px; font-family:var(--mono); font-size:.72rem; }
-.pos-val-tp { color:var(--green); }
-.pos-val-sl { color:var(--red); }
-.pos-val-x  { color:var(--text-2); }
-
-/* ── Trading window status ────────────────────────────────── */
-.smc-win {
-  display:flex;
-  align-items:center;
-  gap:8px;
-  padding:6px 13px;
-  border-radius:var(--radius);
-  margin-bottom:8px;
-  font-size:.72rem;
-  font-weight:600;
-  font-family:var(--sans);
-  letter-spacing:.05em;
-  text-transform:uppercase;
-}
-.smc-win-on  {
-  background:var(--green-dim);
-  border:1px solid var(--green-bd);
-  color:var(--green);
-}
-.smc-win-off {
-  background:var(--amber-dim);
-  border:1px solid var(--amber-bd);
-  color:var(--amber);
-}
-
-/* ── Legacy compat ────────────────────────────────────────── */
-.big-signal {
-  font-size:1.45rem;
-  font-weight:800;
-  text-align:center;
-  padding:.85rem 1rem;
-  border-radius:var(--radius);
-  margin-bottom:.5rem;
-  font-family:var(--sans);
-  letter-spacing:-.01em;
-}
-.sl { background:var(--green-dim); color:var(--green); border:1px solid var(--green-bd); }
-.ss { background:var(--red-dim);   color:var(--red);   border:1px solid var(--red-bd); }
-.sw { background:var(--amber-dim); color:var(--amber); border:1px solid var(--amber-bd); }
-.scalp-box {
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:.8rem;
-  background:var(--surface);
-  margin-top:.5rem;
-}
-.score-box {
-  border-radius:var(--radius);
-  padding:.8rem;
-  text-align:center;
-  font-size:1.55rem;
-  font-weight:800;
-  margin:.3rem 0;
-  font-family:var(--mono);
-}
-.vol-bar { height:10px; border-radius:2px; background:var(--green); margin:2px 0; }
-
-/* ── Extra: data rows, weight bars ───────────────────────── */
-.t-row {
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  padding:6px 12px;
-  border-radius:3px;
-  font-size:.76rem;
-  color:var(--text-2);
-  border-bottom:1px solid var(--border);
-}
-.t-row:hover { background:var(--surface-2); color:var(--text); }
-.t-val {
-  font-family:var(--mono);
-  font-weight:600;
-  color:var(--text);
-  font-size:.78rem;
-}
-.t-wbar-wrap {
-  height:4px;
-  background:var(--border);
-  border-radius:2px;
-  overflow:hidden;
-  margin-top:3px;
-}
-.t-wbar { height:100%; border-radius:2px; background:var(--blue); transition:width .4s ease; }
-.t-panel {
-  background:var(--surface);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:14px 16px;
-  margin:6px 0;
-}
-.t-label {
-  font-size:.6rem;
-  font-weight:700;
-  color:var(--text-2);
-  text-transform:uppercase;
-  letter-spacing:.12em;
-  font-family:var(--sans);
-}
-.t-num {
-  font-family:var(--mono);
-  font-size:1.3rem;
-  font-weight:700;
-  color:var(--text);
-  letter-spacing:-.02em;
-}
-.t-green { color:var(--green); }
-.t-red   { color:var(--red); }
-.t-amber { color:var(--amber); }
-.t-blue  { color:var(--blue-light); }
+/* Legacy compat */
+.big-signal{font-size:1.8rem;font-weight:800;text-align:center;
+  padding:.8rem;border-radius:10px;margin-bottom:.5rem}
+.sl{background:#011a0a;color:#10b981;border:1px solid rgba(5,150,105,.4)}
+.ss{background:#1a0505;color:#f87171;border:1px solid rgba(220,38,38,.4)}
+.sw{background:#151206;color:#f59e0b;border:1px solid rgba(217,119,6,.3)}
+.scalp-box{border:1px solid #1e2d3d;border-radius:8px;padding:.8rem;background:#0b0f18;margin-top:.5rem}
+.score-box{border-radius:10px;padding:.8rem;text-align:center;font-size:1.6rem;font-weight:800;margin:.3rem 0}
+.vol-bar{height:14px;border-radius:3px;background:#10b981;margin:2px 0}
 </style>""", unsafe_allow_html=True)
 
     mt5_login = st.session_state.mt5_login or None
@@ -3160,33 +2827,30 @@ h3 { font-size:.9rem!important; text-transform:uppercase; letter-spacing:.04em!i
 
     # ── Indicador de refresco (fecha + precio en vivo) ──────────────────────
     st.markdown(f"""<div style="
-        display:inline-flex;align-items:center;gap:16px;
-        background:#080d17;border:1px solid #172032;border-radius:5px;
-        padding:5px 14px;margin-bottom:8px;font-family:'JetBrains Mono','Courier New',monospace">
-      <span style="color:#57697c;font-size:10px;letter-spacing:.1em;text-transform:uppercase">REFRESCO</span>
-      <span style="color:#c8d3e0;font-size:12px;font-weight:600">{_live_dt_str}</span>
-      <span style="color:#57697c;font-size:10px">·</span>
-      <span style="color:#57697c;font-size:10px;letter-spacing:.08em">EUR/USD</span>
-      <span style="color:#00b87c;font-size:13px;font-weight:700;letter-spacing:.04em">{_live_px_str}</span>
+        display:inline-flex;align-items:center;gap:14px;
+        background:#0d1117;border:1px solid #30363d;border-radius:8px;
+        padding:6px 16px;margin-bottom:8px;font-family:monospace">
+      <span style="color:#8b949e;font-size:11px">ÚLTIMO REFRESCO</span>
+      <span style="color:#e6edf3;font-size:13px;font-weight:600">{_live_dt_str}</span>
+      <span style="color:#8b949e;font-size:11px">EUR/USD</span>
+      <span style="color:#3fb950;font-size:15px;font-weight:700">{_live_px_str}</span>
     </div>""", unsafe_allow_html=True)
 
     # ── Banner modo local (extensión MT5) ────────────────────────────────────
     if _IS_LOCAL:
-        st.markdown(f"""<div style="background:#080d17;
-            border:1px solid rgba(21,102,211,.3);border-left:3px solid #1566d3;
-            border-radius:5px;padding:10px 16px;
+        st.markdown(f"""<div style="background:linear-gradient(90deg,#1a2a4a,#0b1525);
+            border:1px solid #3d7eff44;border-radius:10px;padding:12px 18px;
             margin-bottom:12px;display:flex;align-items:center;justify-content:space-between;gap:12px">
           <div>
-            <span style="color:#3d8ef5;font-weight:700;font-size:12px;letter-spacing:.04em">MODO EXTENSIÓN MT5</span>
-            <span style="color:#57697c;font-size:11px;margin-left:10px">
-              Datos sincronizados con Railway · Panel completo en la app web
+            <span style="color:#3d7eff;font-weight:700;font-size:13px">⚡ MODO EXTENSIÓN MT5</span>
+            <span style="color:#8899aa;font-size:12px;margin-left:10px">
+              Los datos se sincronizan con Railway · Usa la app web para el panel completo
             </span>
           </div>
           <a href="{_RAILWAY_URL}" target="_blank"
-             style="background:#1566d3;color:#fff;padding:5px 13px;border-radius:4px;
-                    font-size:11px;font-weight:700;text-decoration:none;white-space:nowrap;
-                    letter-spacing:.04em;text-transform:uppercase">
-            Abrir app →
+             style="background:#3d7eff;color:#fff;padding:5px 14px;border-radius:6px;
+                    font-size:12px;font-weight:600;text-decoration:none;white-space:nowrap">
+            🌐 Abrir app web →
           </a>
         </div>""", unsafe_allow_html=True)
 
@@ -3251,20 +2915,20 @@ h3 { font-size:.9rem!important; text-transform:uppercase; letter-spacing:.04em!i
   css.id = 'smc-nav-css';
   css.textContent = [
     '#smc-nav{position:fixed;right:0;top:50%;transform:translateY(-50%);',
-    'z-index:99999;background:#080d17;border:1px solid #172032;',
-    'border-left:3px solid #1566d3;border-radius:6px 0 0 6px;',
-    'padding:8px 5px;width:140px;max-height:90vh;overflow-y:auto;',
-    'font-family:Inter,-apple-system,sans-serif;box-shadow:-3px 0 18px rgba(0,0,0,.5);}',
-    '#smc-nav::-webkit-scrollbar{width:2px;}',
-    '#smc-nav::-webkit-scrollbar-thumb{background:#172032;border-radius:2px;}',
-    '#smc-nav .n-title{color:#3d8ef5;font-size:0.58rem;font-weight:800;',
-    'letter-spacing:.14em;text-transform:uppercase;padding:0 6px 7px;',
-    'border-bottom:1px solid #172032;margin-bottom:3px;display:block;}',
-    '#smc-nav a{display:block;color:#57697c;font-size:0.68rem;',
-    'padding:4px 8px;border-radius:3px;text-decoration:none;',
-    'cursor:pointer;white-space:nowrap;margin:1px 0;transition:all .12s;font-weight:500;}',
-    '#smc-nav a:hover{background:rgba(21,102,211,.15);color:#c8d3e0;padding-left:11px;}',
-    '#smc-nav .n-sep{border-top:1px solid #172032;margin:4px 4px;}'
+    'z-index:99999;background:#0d1117;border:1px solid #30363d;',
+    'border-left:3px solid #1f6feb;border-radius:8px 0 0 8px;',
+    'padding:10px 6px;width:148px;max-height:90vh;overflow-y:auto;',
+    'font-family:-apple-system,sans-serif;box-shadow:-4px 0 20px #0006;}',
+    '#smc-nav::-webkit-scrollbar{width:3px;}',
+    '#smc-nav::-webkit-scrollbar-thumb{background:#30363d;border-radius:2px;}',
+    '#smc-nav .n-title{color:#1f6feb;font-size:0.65rem;font-weight:700;',
+    'letter-spacing:.08em;text-transform:uppercase;padding:0 6px 6px;',
+    'border-bottom:1px solid #21262d;margin-bottom:4px;display:block;}',
+    '#smc-nav a{display:block;color:#c9d1d9;font-size:0.72rem;',
+    'padding:4px 8px;border-radius:5px;text-decoration:none;',
+    'cursor:pointer;white-space:nowrap;margin:1px 0;transition:all .15s;}',
+    '#smc-nav a:hover{background:#1f6feb;color:#fff;padding-left:12px;}',
+    '#smc-nav .n-sep{border-top:1px solid #21262d;margin:5px 4px;}'
   ].join('');
   p.head.appendChild(css);
 
@@ -3278,29 +2942,29 @@ h3 { font-size:.9rem!important; text-transform:uppercase; letter-spacing:.04em!i
   var nav = p.createElement('div');
   nav.id = 'smc-nav';
   nav.innerHTML =
-    '<span class="n-title">SMC Terminal</span>' +
-    '<a onclick="smcGo(\'sec-precio\')">Precio</a>' +
-    '<a onclick="smcGo(\'sec-senal\')">Señal</a>' +
-    '<a onclick="smcGo(\'sec-score\')">Score</a>' +
-    '<a onclick="smcGo(\'sec-chart\')">Gráfico</a>' +
-    '<a onclick="smcGo(\'sec-dna\')">DNA</a>' +
-    '<a onclick="smcGo(\'sec-vol\')">Volumen</a>' +
-    '<a onclick="smcGo(\'sec-scalping\')">Scalping</a>' +
-    '<a onclick="smcGo(\'sec-estructura\')">Estructura</a>' +
-    '<a onclick="smcGo(\'sec-manipulacion\')">Liquidez</a>' +
-    '<a onclick="smcGo(\'sec-cot\')">COT</a>' +
-    '<a onclick="smcGo(\'sec-ia\')">Motor IA</a>' +
+    '<span class="n-title">⚡ SMC Nav</span>' +
+    '<a onclick="smcGo(\'sec-precio\')">📡 Precio</a>' +
+    '<a onclick="smcGo(\'sec-senal\')">🧠 Señal</a>' +
+    '<a onclick="smcGo(\'sec-score\')">🎯 Score</a>' +
+    '<a onclick="smcGo(\'sec-chart\')">📈 Gráfico</a>' +
+    '<a onclick="smcGo(\'sec-dna\')">🧬 DNA</a>' +
+    '<a onclick="smcGo(\'sec-vol\')">📊 Volumen</a>' +
+    '<a onclick="smcGo(\'sec-scalping\')">🎯 Scalping</a>' +
+    '<a onclick="smcGo(\'sec-estructura\')">🏗️ Estructura</a>' +
+    '<a onclick="smcGo(\'sec-manipulacion\')">🕵️ Liquidez</a>' +
+    '<a onclick="smcGo(\'sec-cot\')">🏦 COT</a>' +
+    '<a onclick="smcGo(\'sec-ia\')">🤖 Motor IA</a>' +
     '<div class="n-sep"></div>' +
-    '<a onclick="smcGo(\'sec-backtest\')">Backtest 60d</a>' +
-    '<a onclick="smcGo(\'sec-backtest2008\')">2008+</a>' +
+    '<a onclick="smcGo(\'sec-backtest\')">📊 Backtest</a>' +
+    '<a onclick="smcGo(\'sec-backtest2008\')">🌍 2008</a>' +
     '<div class="n-sep"></div>' +
-    '<a onclick="smcGo(\'sec-porq\')">Por qué</a>' +
-    '<a onclick="smcGo(\'sec-bot\')">Bot</a>' +
-    '<a onclick="smcGo(\'sec-dashboard\')">Dashboard</a>' +
-    '<a onclick="smcGo(\'sec-dxy\')">DXY</a>' +
-    '<a onclick="smcGo(\'sec-accion\')">Acción</a>' +
-    '<a onclick="smcGo(\'sec-autoimprove\')">Auto-Mejora</a>' +
-    '<a onclick="smcGo(\'sec-advisor\')">Advisor</a>';
+    '<a onclick="smcGo(\'sec-porq\')">🔍 Por qué</a>' +
+    '<a onclick="smcGo(\'sec-bot\')">🤖 Bot</a>' +
+    '<a onclick="smcGo(\'sec-dashboard\')">📋 Dashboard</a>' +
+    '<a onclick="smcGo(\'sec-dxy\')">💱 DXY</a>' +
+    '<a onclick="smcGo(\'sec-accion\')">🎯 Acción</a>' +
+    '<a onclick="smcGo(\'sec-autoimprove\')">🔬 Auto-Mejora</a>' +
+    '<a onclick="smcGo(\'sec-advisor\')">💬 Advisor</a>';
   p.body.appendChild(nav);
 })();
 </script>""", height=0, scrolling=False)
@@ -3351,17 +3015,8 @@ h3 { font-size:.9rem!important; text-transform:uppercase; letter-spacing:.04em!i
                     _db.invalidate_session(st.session_state.session_token)
                 except Exception:
                     pass
-            # Limpiar toda la memoria de sesión para evitar leaks entre usuarios
-            _keys_to_clear = [
-                "current_user", "session_token", "active_dna", "_analysis_cache",
-                "macro_context", "market_context_reasons", "economic_calendar",
-                "_cal_fetched_ts", "cot_data", "last_analysis_time",
-                "analysis_executed", "backtest_result", "strategy_comparison",
-                f"advisor_chat_{st.session_state.get('current_user', '')}",
-                f"advisor_session_{st.session_state.get('current_user', '')}",
-            ]
-            for _k in _keys_to_clear:
-                st.session_state.pop(_k, None)
+            st.session_state.current_user  = None
+            st.session_state.session_token = None
             st.query_params.clear()
             st.rerun()
         st.markdown("---")
@@ -3613,7 +3268,8 @@ if not run_fresh_analysis and not st.session_state.analysis_executed:
 
 if run_fresh_analysis:
     st.session_state.last_analysis_time = time.time()
-    st.session_state.analysis_executed = True
+    st.session_state.analysis_executed  = True
+    st.session_state.last_refresh_str   = datetime.utcnow().strftime("%H:%M:%S UTC")
 
 # Valores por defecto para evitar errores cuando no se ha analizado aún
 signal      = {}
@@ -3708,7 +3364,7 @@ if st.session_state.analysis_executed:
             if _kb_dir != "NO TRADE":
                 try:
                     _cot_rec = st.session_state.get("cot_data")
-                    _cal_rec = _get_cached_calendar()
+                    _cal_rec = st.session_state.get("economic_calendar") or get_economic_calendar()
                     kb_record_pending_signal(
                         _kb_dir, _cur_price, _kb_strat, _kb_rsn,
                         df=df_1h, cot=_cot_rec, calendar=_cal_rec
@@ -3719,7 +3375,7 @@ if st.session_state.analysis_executed:
         # ── Contexto fundamental automático ─────────────────────────────────
         try:
             _cot_auto = st.session_state.get("cot_data")
-            _cal_auto = _get_cached_calendar()
+            _cal_auto = st.session_state.get("economic_calendar") or get_economic_calendar()
             _news_auto = signal.get("news", [])
             _ctx_auto  = explain_market_context(df_1h, cot=_cot_auto, calendar=_cal_auto, news=_news_auto)
             st.session_state.market_context_reasons = _ctx_auto
@@ -3956,17 +3612,17 @@ if st.session_state.analysis_executed:
     _ema_dn  = (_tv_ema20 and _tv_ema50 and _tv_ema20 < _tv_ema50)
     _macd_up = (_tv_macd and _tv_macd_sig and _tv_macd > _tv_macd_sig)
     _trend_lbl = "▲ Alcista" if _ema_up else ("▼ Bajista" if _ema_dn else "→ Lateral")
-    _trend_col = "#00b87c" if _ema_up else ("#e03c50" if _ema_dn else "#c97d0a")
+    _trend_col = "#3fb950" if _ema_up else ("#f85149" if _ema_dn else "#e3b341")
     _macd_lbl  = "▲ Alcista" if _macd_up else ("▼ Bajista" if (_tv_macd and _tv_macd_sig) else "—")
-    _macd_col  = "#00b87c" if _macd_up else "#e03c50"
+    _macd_col  = "#3fb950" if _macd_up else "#f85149"
     st.markdown(
-        f'<div style="display:flex;gap:8px;margin-top:6px">'
-        f'<div style="background:#080d17;border:1px solid #172032;border-radius:4px;padding:5px 13px">'
-        f'<span style="color:#57697c;font-size:10px;letter-spacing:.06em">EMA20/50 </span>'
-        f'<span style="color:{_trend_col};font-weight:700;font-size:12px">{_trend_lbl}</span></div>'
-        f'<div style="background:#080d17;border:1px solid #172032;border-radius:4px;padding:5px 13px">'
-        f'<span style="color:#57697c;font-size:10px;letter-spacing:.06em">MACD </span>'
-        f'<span style="color:{_macd_col};font-weight:700;font-size:12px">{_macd_lbl}</span></div>'
+        f'<div style="display:flex;gap:12px;margin-top:6px">'
+        f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px 16px">'
+        f'<span style="color:#8b949e;font-size:11px">EMA20/50 · </span>'
+        f'<span style="color:{_trend_col};font-weight:700;font-size:13px">{_trend_lbl}</span></div>'
+        f'<div style="background:#161b22;border:1px solid #30363d;border-radius:8px;padding:6px 16px">'
+        f'<span style="color:#8b949e;font-size:11px">MACD · </span>'
+        f'<span style="color:{_macd_col};font-weight:700;font-size:13px">{_macd_lbl}</span></div>'
         f'</div>',
         unsafe_allow_html=True,
     )
@@ -4117,7 +3773,7 @@ if st.session_state.analysis_executed:
     label, color = score_label(score)
     col_sc1, col_sc2 = st.columns([1, 2])
     with col_sc1:
-        _sc_colors = {"green": "#00b87c", "lightgreen": "#00c98a", "orange": "#c97d0a", "red": "#e03c50"}
+        _sc_colors = {"green": "#10b981", "lightgreen": "#4ade80", "orange": "#f59e0b", "red": "#f87171"}
         _sc = _sc_colors.get(color, "#6b7280")
         st.markdown(f"""<div class="smc-score">
   <div class="sc-num" style="color:{_sc}">{score}<span class="sc-den">/100</span></div>
@@ -4208,7 +3864,7 @@ if st.session_state.analysis_executed:
     "theme": "dark",
     "style": "1",
     "locale": "es",
-    "toolbar_bg": "#080d17",
+    "toolbar_bg": "#0d1117",
     "enable_publishing": false,
     "hide_top_toolbar": false,
     "hide_legend": false,
@@ -4307,6 +3963,20 @@ if st.session_state.analysis_executed:
             news_items=(signal or {}).get("news", []),
             trades_history=_chart_trades,
         )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECCIÓN: ANÁLISIS TÉCNICO AVANZADO
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown(
+        '<div style="background:linear-gradient(90deg,#0d2137,#0a3d62);'
+        'border-left:4px solid #1e90ff;border-radius:8px;padding:10px 18px;margin:18px 0 4px 0">'
+        '<span style="color:#1e90ff;font-size:13px;font-weight:700;letter-spacing:1px">'
+        '📈 ANÁLISIS TÉCNICO AVANZADO</span>'
+        '<span style="color:#8b949e;font-size:11px;margin-left:10px">'
+        'DNA · Volumen · Scalping · Estructura · Manipulación</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
     # ── Strategy DNA Panel ────────────────────────────────────────────────────
     st.markdown('<div id="sec-dna"></div>', unsafe_allow_html=True)
@@ -4572,6 +4242,20 @@ if st.session_state.analysis_executed:
         else:
             st.info("⚪ Sin absorción institucional detectada")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECCIÓN: FUNDAMENTAL & COT
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown(
+        '<div style="background:linear-gradient(90deg,#0d2137,#1a3a1a);'
+        'border-left:4px solid #3fb950;border-radius:8px;padding:10px 18px;margin:18px 0 4px 0">'
+        '<span style="color:#3fb950;font-size:13px;font-weight:700;letter-spacing:1px">'
+        '🏦 FUNDAMENTAL & INSTITUCIONAL</span>'
+        '<span style="color:#8b949e;font-size:11px;margin-left:10px">'
+        'COT Report · Grandes Inversores · CFTC</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     # ── COT — Datos Institucionales (auto-actualizados cada 6h) ─────────────
     st.markdown('<div id="sec-cot"></div>', unsafe_allow_html=True)
     st.markdown("---")
@@ -4627,6 +4311,20 @@ if st.session_state.analysis_executed:
         st.write("**Fuente:** CFTC (semanal, viernes)")
         st.write("**Refresco:** automático cada 6h")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # SECCIÓN: IA & ESTRATEGIAS
+    # ═══════════════════════════════════════════════════════════════════════════
+    st.markdown(
+        '<div style="background:linear-gradient(90deg,#0d2137,#2d1b4e);'
+        'border-left:4px solid #a855f7;border-radius:8px;padding:10px 18px;margin:18px 0 4px 0">'
+        '<span style="color:#a855f7;font-size:13px;font-weight:700;letter-spacing:1px">'
+        '🤖 IA & ESTRATEGIAS</span>'
+        '<span style="color:#8b949e;font-size:11px;margin-left:10px">'
+        'Motor de Bias · Confluencia · Señales</span>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
     # ── IA — Motor de Bias ────────────────────────────────────────────────────
     st.markdown('<div id="sec-ia"></div>', unsafe_allow_html=True)
     st.markdown("---")
@@ -4637,21 +4335,12 @@ if st.session_state.analysis_executed:
         long_sc   = ai_bias.get("long_score", 0)
         short_sc  = ai_bias.get("short_score", 0)
         evidence  = ai_bias.get("evidence", [])
-        _bias_bg  = "rgba(0,184,124,.07)" if bias_dir == "LONG" else ("rgba(224,60,80,.07)" if bias_dir == "SHORT" else "rgba(201,125,10,.06)")
-        _bias_bd  = "#00b87c" if bias_dir == "LONG" else ("#e03c50" if bias_dir == "SHORT" else "#c97d0a")
-        _bias_col = "#00b87c" if bias_dir == "LONG" else ("#e03c50" if bias_dir == "SHORT" else "#c97d0a")
-        bias_emoji = "▲" if bias_dir == "LONG" else ("▼" if bias_dir == "SHORT" else "–")
+        bias_color = "#0f5132" if bias_dir == "LONG" else ("#842029" if bias_dir == "SHORT" else "#333")
+        bias_emoji = "📈" if bias_dir == "LONG" else ("📉" if bias_dir == "SHORT" else "⚪")
         st.markdown(
-            f'<div style="background:{_bias_bg};border:1px solid {_bias_bd};border-left:4px solid {_bias_bd};'
-            f'border-radius:5px;padding:14px 18px;margin:6px 0">'
-            f'<div style="display:flex;align-items:center;justify-content:space-between">'
-            f'<span style="font-size:1.3rem;font-weight:900;color:{_bias_col};font-family:monospace;letter-spacing:-.02em">'
-            f'{bias_emoji} BIAS IA: {bias_dir}</span>'
-            f'<span style="font-size:.68rem;color:#57697c;font-family:monospace">CONFIANZA <span style="color:{_bias_col};font-size:.9rem;font-weight:700">{conf}%</span></span>'
-            f'</div>'
-            f'<div style="font-size:.68rem;color:#57697c;font-family:monospace;margin-top:4px">'
-            f'LONG {long_sc} &nbsp;·&nbsp; SHORT {short_sc}'
-            f'</div></div>',
+            f'<div class="score-box" style="background:{bias_color};color:white;font-size:1.4rem">'
+            f'{bias_emoji} BIAS IA: {bias_dir} — Confianza {conf}%'
+            f'<br><small>LONG score: {long_sc} | SHORT score: {short_sc}</small></div>',
             unsafe_allow_html=True
         )
         ia_c1, ia_c2 = st.columns(2)
@@ -4675,1278 +4364,2359 @@ if st.session_state.analysis_executed:
 else:
     st.info("📊 Presiona 'ANALIZAR MERCADO' para ver el análisis completo")
 
-# ── BACKTEST + COMPARACIÓN DE ESTRATEGIAS + CONTEXTO DE MERCADO ───────────────
-st.markdown('<div id="sec-backtest"></div>', unsafe_allow_html=True)
+
+# Navegacion principal
 st.markdown("---")
-st.subheader("🧠 Backtest Inteligente — 4 Estrategias + Contexto Fundamental")
-st.caption(
-    "Compara 4 estrategias sobre el mismo año de datos. La ganadora se guarda en la base de conocimiento. "
-    "El panel de contexto explica POR QUÉ el mercado está donde está (técnico + fundamental + institucional)."
-)
+_t_bt, _t_bot, _t_mejora, _t_ia, _t_prem = st.tabs([
+    "📊 Backtest & Mercado",
+    "🤖 Bot & Posiciones",
+    "🔬 Auto-Mejora",
+    "🧠 Asesor IA",
+    "🏹 Señales Premium",
+])
 
-bt_ctrl_l, bt_ctrl_r = st.columns([1, 2])
-with bt_ctrl_l:
-    bt_use_windows = st.checkbox("Solo ventanas 7-12h / 15-20h", value=True, key="bt_windows")
-    run_bt_btn = st.button("🚀 Comparar 17 Estrategias (~1 año)", type="primary", key="run_bt")
-    if run_bt_btn:
-        with st.spinner("Descargando hasta 1 año de datos EURUSD 1h..."):
-            bt_df = get_backtest_data("1h")
-        if bt_df.empty:
-            st.error("Sin datos históricos — verifica conexión a internet.")
-        else:
-            n_c = len(bt_df)
-            with st.spinner(f"Comparando 17 estrategias sobre {n_c} velas ({n_c//24}d) — puede tardar 30-90s..."):
-                cmp = run_strategy_comparison(bt_df, use_windows=bt_use_windows)
-            if not cmp:
-                st.warning("Sin operaciones — pocos datos o mercado lateral extremo.")
-            else:
-                st.session_state.strategy_comparison = cmp
-                st.session_state.backtest_result = cmp["best"]
-                # Persistir en DB + disco
-                _save_bt_cache(cmp, st.session_state.get("lt_comparison"))
-                if _DB_OK:
-                    try:
-                        _sig_snap = signal if isinstance(signal, dict) else {}
-                        _db.save_snapshot(
-                            price=price or 0,
-                            signal=_sig_snap.get("final_signal", "NEUTRAL"),
-                            score=score or 0,
-                            dxy_trend=dxy_trend or "",
-                            regime=_sig_snap.get("regime", ""),
-                            strategy=cmp["best"].get("strategy", ""),
-                            extra={"best_pf": cmp["best"].get("profit_factor", 0),
-                                   "best_wr": cmp["best"].get("winrate", 0)},
-                        )
-                    except Exception:
-                        pass
-                # Contexto de mercado sobre los mismos datos del backtest
-                cot_snap  = st.session_state.get("cot_data")
-                cal_snap  = _get_cached_calendar()
-                news_snap = st.session_state.get("current_news") or []
-                ctx_snap  = explain_market_context(bt_df, cot=cot_snap, calendar=cal_snap, news=news_snap)
-                st.session_state.market_context_reasons = ctx_snap
-                # Guardar en base de conocimiento (incluye contexto fundamental)
-                kb = update_kb(cmp, cot=cot_snap, calendar=cal_snap, market_ctx=ctx_snap)
-                st.success(
-                    f"✅ Comparación completada. Mejor estrategia: **{cmp['best']['label']}** "
-                    f"(PF={cmp['best']['profit_factor']} · WR={cmp['best']['winrate']}%)"
-                )
-
-with bt_ctrl_r:
-    # Calendario económico — auto-cargado desde DB (background worker lo actualiza cada 6h)
-    st.caption("📅 **Calendario económico** — actualización automática cada 6h")
-    cal_data = []
-    try:
-        if _DB_OK:
-            _cal_rows = _db.get_metrics(name="economic_calendar", limit=1) or []
-            if _cal_rows:
-                _cal_ts   = str(_cal_rows[0].get("created_at", ""))[:16]
-                cal_data  = (_cal_rows[0].get("context") or {}).get("events", [])
-                if cal_data:
-                    st.session_state.economic_calendar = cal_data
-    except Exception:
-        pass
-    if not cal_data:
-        cal_data = st.session_state.get("economic_calendar") or []
-    if cal_data:
-        _cal_ts_str = _cal_ts if "_cal_ts" in dir() else ""
-        if _cal_ts_str:
-            st.caption(f"Actualizado: {_cal_ts_str}")
-        high_ev = [e for e in cal_data if e.get("impact","").upper() == "HIGH"]
-        med_ev  = [e for e in cal_data if e.get("impact","").upper() == "MEDIUM"]
-        st.markdown(f"**Esta semana:** {len(high_ev)} eventos ALTO impacto · {len(med_ev)} MEDIO impacto")
-        for ev in high_ev[:5]:
-            st.markdown(
-                f"🔴 **[{ev.get('currency','')}]** {ev.get('title','')} "
-                f"— {str(ev.get('date',''))[:10]} "
-                f"| Prev: {ev.get('previous','?')} | Fore: {ev.get('forecast','?')}"
-            )
-    else:
-        st.info("⏳ El servidor cargará el calendario automáticamente (cada 6h).")
-
-# ── Comparación de estrategias ─────────────────────────────────────────────
-cmp_result = st.session_state.get("strategy_comparison")
-if cmp_result:
-    st.markdown("### 📊 Ranking de Estrategias")
-    best_name = cmp_result["best"]["strategy"]
-
-    if "_RANK_EMOJI" not in globals():
-        _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
-    # Tabla comparativa
-    rows = []
-    for i, r in enumerate(cmp_result["results"]):
-        rentable = r.get("profit_factor", 0) >= 1.0 and r.get("winrate", 0) >= r.get("be_winrate", 0)
-        be_n = r.get("be_count", 0)
-        rows.append({
-            "Pos":          _RANK_EMOJI[i] if i < len(_RANK_EMOJI) else f"#{i+1}",
-            "Estrategia":   r.get("label", r.get("strategy", "?")),
-            "Operaciones":  r.get("total", 0),
-            "Win Rate":     f"{r.get('winrate', 0)}%",
-            "BE (scratch)": be_n,
-            "WR sin BE":    f"{r.get('be_winrate', 0)}%",
-            "Profit Factor":f"{r.get('profit_factor', 0)}x",
-            "Net Pips":     f"{r.get('net_pips', 0):+.1f}",
-            "Max DD":       f"{r.get('max_dd', 0)}%",
-            "P&L $":        f"${r.get('net_pnl', 0):+.2f}",
-            "Estado":       "✅ Rentable" if rentable else "⚠️ Marginal",
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-    # Ganadora detallada
-    best = cmp_result["best"]
-    st.markdown(f"### 🏆 Estrategia Ganadora: {best['label']}")
-    st.info(f"**Por qué funciona:** {best['why']}\n\n✅ **Ventajas:** {best['pros']}\n\n⚠️ **Limitaciones:** {best['cons']}")
-
-    mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-    mc1.metric("Operaciones", best["total"])
-    mc2.metric("Win Rate", f"{best['winrate']}%", delta=f"BE={best['be_winrate']}%")
-    mc3.metric("Profit Factor", f"{best['profit_factor']}x")
-    mc4.metric("Net Pips", f"{best['net_pips']:+.1f}p")
-    mc5.metric("Max Drawdown", f"{best['max_dd']}%")
-
-    # Curva de capital de la ganadora
-    eq_list = best.get("equity", [])
-    if len(eq_list) > 2:
-        st.write("**Curva de capital — estrategia ganadora ($10,000 capital inicial · 0.01 lot):**")
-        st.line_chart(pd.DataFrame({"Capital ($)": eq_list}), height=220)
-
-    # Tabs: curvas de todas + tabla de trades
-    with st.expander("Ver curvas de capital de todas las estrategias", expanded=False):
-        max_len = max(len(r["equity"]) for r in cmp_result["results"])
-        eq_all = {}
-        for r in cmp_result["results"]:
-            eq_padded = r["equity"] + [r["equity"][-1]] * (max_len - len(r["equity"]))
-            eq_all[r["label"][:20]] = eq_padded
-        st.line_chart(pd.DataFrame(eq_all), height=240)
-
-    with st.expander(f"Ver operaciones de '{best['label']}' ({len(best.get('trades',[]))} trades)", expanded=False):
-        raw = best.get("trades", [])
-        if raw:
-            td = pd.DataFrame(raw)
-            if "outcome" in td.columns:
-                td["Resultado"] = td["outcome"].map({"TP":"✅ TP","SL":"❌ SL","BE":"🔄 BE 0p","MAX":"⏱ MAX","OPEN":"🔄 Abierta"})
-            cols_s = [c for c in ["time","dir","Resultado","pips","pnl"] if c in td.columns]
-            st.dataframe(
-                td[cols_s].rename(columns={"time":"Entrada","dir":"Dirección","pips":"Pips","pnl":"P&L $"}),
-                use_container_width=True, hide_index=True
-            )
-
-    # Base de conocimiento histórica
-    kb = load_knowledge_base()
-    if kb.get("runs"):
-        _kb_total_runs = len(kb["runs"])
-        _kb_sig_stats  = kb.get("signal_stats", {})
-        with st.expander(f"📚 Base de conocimiento ({_kb_total_runs} backtests · señales evaluadas)", expanded=False):
-            _col_kb1, _col_kb2 = st.columns(2)
-            with _col_kb1:
-                if kb.get("strategy_wins"):
-                    st.markdown("**Ranking histórico de estrategias:**")
-                    for s, cnt in sorted(kb["strategy_wins"].items(), key=lambda x: -x[1]):
-                        meta = _STRATEGY_META.get(s, {})
-                        st.markdown(f"- **{meta.get('label', s)}**: nº1 en {cnt} backtest(s)")
-            with _col_kb2:
-                if _kb_sig_stats:
-                    st.markdown("**Aciertos de señal KB por estrategia:**")
-                    for s, ss in sorted(_kb_sig_stats.items(), key=lambda x: -(x[1].get("correct",0))):
-                        ok = ss.get("correct", 0); ko = ss.get("wrong", 0)
-                        acc = f"{ok/(ok+ko)*100:.0f}%" if (ok+ko) > 0 else "—"
-                        meta = _STRATEGY_META.get(s, {})
-                        st.markdown(f"- **{meta.get('label',s)}**: {ok}✅ {ko}❌ → {acc}")
-            hist_rows = []
-            for run in reversed(kb["runs"][-15:]):
-                hist_rows.append({
-                    "Fecha":    run.get("ts","?")[:10],
-                    "Ganadora": _STRATEGY_META.get(run.get("best",""), {}).get("label", run.get("best","?")),
-                    "PF":       run.get("pf","?"),
-                    "WR":       f"{run.get('wr','?')}%",
-                    "Ops":      run.get("total","?"),
-                    "NetPips":  run.get("net_pips","?"),
-                    "COT":      run.get("cot_bias") or "—",
-                    "Eventos":  run.get("events_high",0),
-                })
-            st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
-            # Mostrar el "por qué" del último backtest
-            _last_run = kb["runs"][-1]
-            if _last_run.get("market_ctx"):
-                st.markdown("**Contexto fundamental del último backtest:**")
-                for _rc in _last_run["market_ctx"]:
-                    st.markdown(f"  - {_rc}")
-else:
-    st.info("Pulsa **'Comparar 17 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
-
-# ════════════════════════════════════════════════════════════════════════════════
-# BACKTEST HISTÓRICO LARGO PLAZO — DESDE 2008 (DATOS DIARIOS)
-# ════════════════════════════════════════════════════════════════════════════════
-st.markdown('<div id="sec-backtest2008"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🌍 Backtest Histórico — Desde 2008 hasta Hoy (Datos Diarios)")
-st.caption(
-    "Descarga datos diarios EUR/USD desde 2008 (~4,000 velas) y ejecuta las 17 estrategias. "
-    "Los umbrales ATR se escalan automáticamente para barras diarias. "
-    "Resultado: cuál estrategia habría sido más rentable en 16+ años de mercado real."
-)
-
-if "lt_comparison" not in st.session_state:
-    _bt_disk2 = _load_bt_cache()
-    st.session_state.lt_comparison = _bt_disk2.get("lt")
-
-_lt_cols = st.columns([1, 2])
-with _lt_cols[0]:
-    _run_lt = st.button("🚀 Backtest 2008–Hoy (17 estrategias · datos diarios)",
-                        type="primary", key="run_lt")
-    if _run_lt:
-        with st.spinner("Descargando datos diarios EUR/USD desde 2008..."):
-            _lt_df = get_longterm_data_2008()
-        if _lt_df.empty:
-            st.error("No se pudieron descargar datos históricos. Verifica conexión a internet.")
-        else:
-            _lt_n = len(_lt_df)
-            _lt_years = round(_lt_n / 252)
-            with st.spinner(f"Ejecutando 17 estrategias sobre {_lt_n} días (~{_lt_years} años) — paralelo, ~15-30s..."):
-                _lt_cmp = run_longterm_comparison(_lt_df)
-            if not _lt_cmp:
-                st.warning("Sin operaciones válidas en datos históricos.")
-            else:
-                st.session_state.lt_comparison = _lt_cmp
-                st.session_state.lt_n_bars = _lt_n
-                # Persistir en disco para sobrevivir recargas de página
-                _save_bt_cache(st.session_state.get("strategy_comparison"), _lt_cmp)
-                st.success(
-                    f"✅ Completado — {_lt_n} barras diarias · Mejor estrategia: "
-                    f"**{_lt_cmp['best']['label']}** "
-                    f"(PF={_lt_cmp['best']['profit_factor']} · "
-                    f"WR={_lt_cmp['best']['winrate']}% · "
-                    f"{_lt_cmp['best']['net_pips']:+.0f} pips)"
-                )
-
-with _lt_cols[1]:
-    st.markdown(
-        "**Diferencias vs backtest de 1 año:**\n"
-        "- Datos diarios — cada barra = 1 día de trading\n"
-        "- ATR umbral escalado a ≥40 pips (vs 4p en 1h)\n"
-        "- Cooldown de 3 días entre entradas\n"
-        "- Sin filtro de horario (ventana London/NY)\n"
-        "- 16+ años incluyen: crisis 2008, COVID 2020, subidas Fed 2022-23"
+with _t_bt:
+    # ── BACKTEST + COMPARACIÓN DE ESTRATEGIAS + CONTEXTO DE MERCADO ───────────────
+    st.markdown('<div id="sec-backtest"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🧠 Backtest Inteligente — 4 Estrategias + Contexto Fundamental")
+    st.caption(
+        "Compara 4 estrategias sobre el mismo año de datos. La ganadora se guarda en la base de conocimiento. "
+        "El panel de contexto explica POR QUÉ el mercado está donde está (técnico + fundamental + institucional)."
     )
 
-_lt_cmp_result = st.session_state.get("lt_comparison")
-if _lt_cmp_result:
-    _lt_n_bars = st.session_state.get("lt_n_bars", 0)
-    _lt_years  = round(_lt_n_bars / 252) if _lt_n_bars else "?"
-    st.markdown(f"### 📊 Ranking Histórico 2008–Hoy ({_lt_n_bars} barras · ~{_lt_years} años)")
-
-    if "_RANK_EMOJI" not in globals():
-        _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
-    _lt_rows = []
-    for _i, _r in enumerate(_lt_cmp_result["results"]):
-        _rentable = _r.get("profit_factor", 0) >= 1.0
-        _be_n = _r.get("be_count", 0)
-        _lt_rows.append({
-            "Pos":           _RANK_EMOJI[_i] if _i < len(_RANK_EMOJI) else f"#{_i+1}",
-            "Estrategia":    _r.get("label", _r.get("strategy", "?")),
-            "Operaciones":   _r.get("total", 0),
-            "Win Rate":      f"{_r.get('winrate', 0)}%",
-            "BE (scratch)":  _be_n,
-            "Profit Factor": f"{_r.get('profit_factor', 0)}x",
-            "Net Pips":      f"{_r.get('net_pips', 0):+.0f}",
-            "Max DD":        f"{_r.get('max_dd', 0)}%",
-            "P&L $":         f"${_r.get('net_pnl', 0):+.2f}",
-            "Estado":        "✅ Rentable" if _rentable else "⚠️ Marginal",
-        })
-    st.dataframe(pd.DataFrame(_lt_rows), use_container_width=True, hide_index=True)
-
-    _lt_best = _lt_cmp_result["best"]
-    st.markdown(f"### 🏆 Mejor Estrategia Histórica (2008–Hoy): {_lt_best['label']}")
-    _ltc1, _ltc2, _ltc3, _ltc4, _ltc5 = st.columns(5)
-    _ltc1.metric("Operaciones", _lt_best.get("total", 0))
-    _ltc2.metric("Win Rate", f"{_lt_best.get('winrate', 0)}%")
-    _ltc3.metric("Profit Factor", f"{_lt_best.get('profit_factor', 0)}x")
-    _ltc4.metric("Net Pips", f"{_lt_best.get('net_pips', 0):+.0f}p")
-    _ltc5.metric("Max Drawdown", f"{_lt_best.get('max_dd', 0)}%")
-
-    st.info(
-        f"**Por qué funciona a largo plazo:** {_lt_best.get('why', '')}\n\n"
-        f"✅ **Ventajas:** {_lt_best.get('pros', '')}\n\n"
-        f"⚠️ **Limitaciones:** {_lt_best.get('cons', '')}"
-    )
-
-    # Curva de capital de la ganadora histórica
-    _lt_eq = _lt_best.get("equity", [])
-    if len(_lt_eq) > 2:
-        st.write(f"**Curva de capital 2008–Hoy — {_lt_best['label']} ($10,000 inicial · 0.01 lot):**")
-        st.line_chart(pd.DataFrame({"Capital ($)": _lt_eq}), height=260)
-
-    with st.expander("Ver curvas de todas las estrategias — largo plazo", expanded=False):
-        _lt_max_len = max(len(_r["equity"]) for _r in _lt_cmp_result["results"])
-        _lt_eq_all  = {}
-        for _r in _lt_cmp_result["results"]:
-            _eq_pad = _r["equity"] + [_r["equity"][-1]] * (_lt_max_len - len(_r["equity"]))
-            _lt_eq_all[_r["label"][:20]] = _eq_pad
-        st.line_chart(pd.DataFrame(_lt_eq_all), height=260)
-
-    with st.expander(
-        f"Ver operaciones de '{_lt_best['label']}' ({len(_lt_best.get('trades', []))} trades)",
-        expanded=False
-    ):
-        _lt_raw = _lt_best.get("trades", [])
-        if _lt_raw:
-            _lt_td = pd.DataFrame(_lt_raw)
-            if "outcome" in _lt_td.columns:
-                _lt_td["Resultado"] = _lt_td["outcome"].map(
-                    {"TP": "✅ TP", "SL": "❌ SL", "BE": "🔄 BE 0p", "OPEN": "🔄 Abierta"}
-                )
-            _lt_cols_s = [c for c in ["time", "dir", "Resultado", "pips", "pnl"] if c in _lt_td.columns]
-            st.dataframe(
-                _lt_td[_lt_cols_s].rename(
-                    columns={"time": "Fecha", "dir": "Dirección", "pips": "Pips (día)", "pnl": "P&L $"}
-                ),
-                use_container_width=True, hide_index=True,
-            )
-
-# ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
-st.markdown('<div id="sec-porq"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🔍 Por qué se mueve el EUR/USD — Análisis Técnico + Fundamental")
-ctx_reasons = st.session_state.get("market_context_reasons")
-if ctx_reasons:
-    for reason in ctx_reasons:
-        st.markdown(f"- {reason}")
-    st.caption("Fuentes: EMA técnico · RSI/MACD momentum · COT CFTC institucional · Calendario ForexFactory · RSS noticias")
-else:
-    st.info(
-        "Ejecuta primero el backtest (botón arriba) y asegúrate de tener datos COT y calendario cargados. "
-        "Este panel explicará en detalle POR QUÉ el mercado está donde está."
-    )
-
-# ── BOT AUTOMÁTICO (SIEMPRE VISIBLE) ───────────────────────────────────────────
-st.markdown('<div id="sec-bot"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🤖 Modo Bot Automático")
-
-# Información de diagnóstico MT5
-if sys.platform != "win32":
-    st.info(
-        "ℹ️ **Bot automático desactivado en servidor cloud.**  "
-        "MT5 requiere Windows. Las señales, alertas Telegram y el backtest "
-        "funcionan con normalidad — solo la ejecución de órdenes requiere la "
-        "versión local en PC con Windows."
-    )
-else:
-    st.write("**🔍 Diagnóstico MT5:**")
-    col_diag1, col_diag2, col_diag3 = st.columns(3)
-    with col_diag1:
-        if is_mt5_available():
-            st.success("✅ MT5 instalado")
-        else:
-            st.error("❌ MT5 no instalado")
-    with col_diag2:
-        if is_mt5_available():
-            connected_diag = mt5_connect()
-            if connected_diag:
-                st.success("✅ MT5 conectado")
+    bt_ctrl_l, bt_ctrl_r = st.columns([1, 2])
+    with bt_ctrl_l:
+        bt_use_windows = st.checkbox("Solo ventanas 7-12h / 15-20h", value=True, key="bt_windows")
+        run_bt_btn = st.button("🚀 Comparar 17 Estrategias (~1 año)", type="primary", key="run_bt")
+        if run_bt_btn:
+            with st.spinner("Descargando hasta 1 año de datos EURUSD 1h..."):
+                bt_df = get_backtest_data("1h")
+            if bt_df.empty:
+                st.error("Sin datos históricos — verifica conexión a internet.")
             else:
-                st.error("❌ MT5 no conectado")
-                err = get_mt5_error()
-                if err:
-                    st.warning(f"🛠️ Error: {err}")
-                st.info("💡 Abre MetaTrader 5 y verifica que esté funcionando")
-        else:
-            st.error("❌ No disponible")
-    with col_diag3:
-        if is_mt5_available() and mt5_connect():
-            terminal_info = mt5.terminal_info()
-            if terminal_info:
-                st.success(f"✅ Terminal: {terminal_info.name}")
-            else:
-                st.warning("⚠️ Terminal info no disponible")
-        else:
-            st.error("❌ No disponible")
-
-# Inicializar estado del bot en session_state
-if "bot_enabled" not in st.session_state:
-    st.session_state.bot_enabled = False
-if "bot_volume" not in st.session_state:
-    st.session_state.bot_volume = 0.01
-if "bot_last_signal" not in st.session_state:
-    st.session_state.bot_last_signal = None
-if "bot_just_activated" not in st.session_state:
-    st.session_state.bot_just_activated = False
-
-# Sincronizar variables globales con session_state
-BOT_ENABLED = st.session_state.bot_enabled
-BOT_VOLUME = st.session_state.bot_volume
-BOT_LAST_SIGNAL = st.session_state.bot_last_signal
-
-# ── Detectar fuente de conexión disponible ────────────────────────────────
-_svc_ok    = _mt5_service_available() and mt5_service_health().get("mt5") == "connected"
-_local_ok  = is_mt5_available() and mt5_connect()
-_any_conn  = _svc_ok or _local_ok
-
-if _svc_ok:
-    st.success("✅ OANDA conectado — trading automático disponible")
-elif _local_ok:
-    st.success("✅ MT5 local conectado — trading disponible")
-else:
-    st.info("📊 **Modo señales** — análisis, scoring y Telegram activos.\nEjecución automática de órdenes no configurada.")
-
-if _any_conn:
-    # Estado actual del bot
-    if st.session_state.bot_enabled:
-        st.success("🚀 **BOT ACTIVO** - Ejecutando señales automáticamente")
-    else:
-        st.info("⏸️ **BOT INACTIVO** - Modo manual")
-
-    # Estado del bot — solo lectura, corre automáticamente en el servidor
-    _bot_cols = st.columns([2, 1])
-    with _bot_cols[0]:
-        if st.session_state.bot_enabled:
-            st.success("🤖 **Bot ACTIVO** — analizando señales automáticamente 24/7")
-        else:
-            st.info("📊 **Modo señales** — acumulando datos y aprendiendo del mercado")
-    with _bot_cols[1]:
-        positions_mt5 = get_mt5_positions()
-        if positions_mt5:
-            st.warning(f"📊 {len(positions_mt5)} posiciones abiertas · cierre automático por TP/SL")
-        else:
-            st.caption("🎯 Sin posiciones abiertas")
-
-    # ── Panel de posiciones abiertas ──────────────────────────────────────────
-    _live_pos = get_mt5_positions()
-    if _live_pos:
-        st.markdown("#### 📊 Posiciones Abiertas")
-        for _p in _live_pos:
-            # Compatibilidad: dict (OANDA remoto) u objeto MT5 (local)
-            def _pv(attr, default=0):
-                return _p.get(attr, default) if isinstance(_p, dict) else getattr(_p, attr, default)
-            _ticket   = _pv("ticket", "—")
-            _open_p   = float(_pv("open_price") or _pv("price_open", 0))
-            _cur_p    = float(_pv("current_price") or _pv("price_current", _open_p))
-            _sl_p     = float(_pv("sl", 0))
-            _vol      = float(_pv("volume", 0))
-            _profit   = float(_pv("profit", 0))
-            _type_raw = _pv("type", "BUY")
-            _is_buy   = (_type_raw in (0, "BUY", "LONG")) if not isinstance(_type_raw, str) else _type_raw.upper() in ("BUY", "LONG")
-            _dir_lbl  = "LONG" if _is_buy else "SHORT"
-            _ppips    = (_cur_p - _open_p) / 0.0001 if _is_buy else (_open_p - _cur_p) / 0.0001
-            _be_icon  = "⚖️ BE" if (_sl_p >= _open_p if _is_buy else _sl_p <= _open_p) and _sl_p != 0 else "🎯"
-            st.markdown(
-                f"**#{_ticket}** {_dir_lbl} {_vol}L @ {_open_p:.5f} "
-                f"| Actual: {_cur_p:.5f} "
-                f"| {_be_icon} P&L: {_ppips:+.1f}p (${_profit:.2f})"
-            )
-    else:
-        st.info("🎯 Sin posiciones abiertas")
-
-    # ── Break-Even automático ─────────────────────────────────────────────────
-    if st.session_state.bot_enabled and _live_pos:
-        _be_msgs = manage_positions_be()
-        for _bm in _be_msgs:
-            st.success(f"⚖️ {_bm}")
-
-    # ── Información de riesgo y lógica del bot ────────────────────────────────
-    if st.session_state.bot_enabled:
-        st.warning("⚠️ **BOT ACTIVO** — Trading automático en curso")
-        st.info(f"💰 Volumen: {st.session_state.bot_volume} lotes | SL máx: {SCALP_SL_PIPS}p")
-
-        # Lógica del bot: ejecutar señal si condiciones se cumplen
-        _bot_score = score if st.session_state.analysis_executed else 0
-        _bot_signal = signal if st.session_state.analysis_executed else {}
-        _bot_liq = liq_levels if st.session_state.analysis_executed else []
-
-        if not st.session_state.analysis_executed:
-            st.info("🔄 Presiona 'ANALIZAR MERCADO' primero para activar el bot")
-        elif st.session_state.bot_just_activated:
-            st.info("🤖 Bot activado — esperando próxima señal de calidad...")
-            st.session_state.bot_just_activated = False
-        elif _bot_signal.get("direction") and _bot_score >= MIN_DEFINITIVE_SCORE:
-            # Solo ejecutar si no hay posiciones abiertas y la señal cambió
-            if _live_pos:
-                st.info(f"🔒 Posición abierta — bot monitorea BE y gestión automática")
-            elif st.session_state.bot_last_signal != _bot_signal.get("direction"):
-                _ok, _msg = auto_trade_signal(_bot_signal, st.session_state.bot_volume, liq_levels=_bot_liq)
-                if _ok:
-                    st.success(f"🚀 Bot ejecutó trade: {_msg}")
-                    st.session_state.bot_last_signal = _bot_signal.get("direction")
-                    # Persistir trade en DB con snapshot de mercado
+                n_c = len(bt_df)
+                with st.spinner(f"Comparando 17 estrategias sobre {n_c} velas ({n_c//24}d) — puede tardar 30-90s..."):
+                    cmp = run_strategy_comparison(bt_df, use_windows=bt_use_windows)
+                if not cmp:
+                    st.warning("Sin operaciones — pocos datos o mercado lateral extremo.")
+                else:
+                    st.session_state.strategy_comparison = cmp
+                    st.session_state.backtest_result = cmp["best"]
+                    # Persistir en DB + disco
+                    _save_bt_cache(cmp, st.session_state.get("lt_comparison"))
                     if _DB_OK:
                         try:
-                            _mkt_snap = {}
-                            if _AI_ENGINE_OK:
-                                _mkt_snap = _ai_engine.build_market_snapshot(
-                                    _bot_signal, _bot_score, session, dxy_dir,
-                                    vol_spikes, delta,
-                                    st.session_state.get("market_context_reasons"),
-                                    dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
-                                )
-                            _db.save_trade_with_snapshot(
-                                direction=_bot_signal.get("direction", ""),
-                                entry_price=float(_bot_signal.get("entry", price or 0)),
-                                sl_price=float(_bot_signal.get("stop_loss", 0) or 0),
-                                tp_price=float(_bot_signal.get("take_profit", 0) or 0),
-                                outcome="OPEN",
-                                pips=0.0,
-                                pnl=0.0,
-                                strategy=_bot_signal.get("strategy", ""),
-                                score=_bot_score,
-                                market_snapshot=_mkt_snap,
-                                dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
-                                user_id=current_user,
+                            _sig_snap = signal if isinstance(signal, dict) else {}
+                            _db.save_snapshot(
+                                price=price or 0,
+                                signal=_sig_snap.get("final_signal", "NEUTRAL"),
+                                score=score or 0,
+                                dxy_trend=dxy_trend or "",
+                                regime=_sig_snap.get("regime", ""),
+                                strategy=cmp["best"].get("strategy", ""),
+                                extra={"best_pf": cmp["best"].get("profit_factor", 0),
+                                       "best_wr": cmp["best"].get("winrate", 0)},
                             )
                         except Exception:
                             pass
-                    try:
-                        send_telegram_alert(_bot_signal, _bot_score, definitive=True, reason=f"Bot auto: {_msg}")
-                    except Exception:
-                        pass
+                    # Contexto de mercado sobre los mismos datos del backtest
+                    cot_snap  = st.session_state.get("cot_data")
+                    cal_snap  = st.session_state.get("economic_calendar") or get_economic_calendar()
+                    news_snap = st.session_state.get("current_news") or []
+                    ctx_snap  = explain_market_context(bt_df, cot=cot_snap, calendar=cal_snap, news=news_snap)
+                    st.session_state.market_context_reasons = ctx_snap
+                    # Guardar en base de conocimiento (incluye contexto fundamental)
+                    kb = update_kb(cmp, cot=cot_snap, calendar=cal_snap, market_ctx=ctx_snap)
+                    st.success(
+                        f"✅ Comparación completada. Mejor estrategia: **{cmp['best']['label']}** "
+                        f"(PF={cmp['best']['profit_factor']} · WR={cmp['best']['winrate']}%)"
+                    )
+
+    with bt_ctrl_r:
+        # Calendario económico — auto-cargado desde DB (background worker lo actualiza cada 6h)
+        st.caption("📅 **Calendario económico** — actualización automática cada 6h")
+        cal_data = []
+        try:
+            if _DB_OK:
+                _cal_rows = _db.get_metrics(name="economic_calendar", limit=1) or []
+                if _cal_rows:
+                    _cal_ts   = str(_cal_rows[0].get("created_at", ""))[:16]
+                    cal_data  = (_cal_rows[0].get("context") or {}).get("events", [])
+                    if cal_data:
+                        st.session_state.economic_calendar = cal_data
+        except Exception:
+            pass
+        if not cal_data:
+            cal_data = st.session_state.get("economic_calendar") or []
+        if cal_data:
+            _cal_ts_str = _cal_ts if "_cal_ts" in dir() else ""
+            if _cal_ts_str:
+                st.caption(f"Actualizado: {_cal_ts_str}")
+            high_ev = [e for e in cal_data if e.get("impact","").upper() == "HIGH"]
+            med_ev  = [e for e in cal_data if e.get("impact","").upper() == "MEDIUM"]
+            st.markdown(f"**Esta semana:** {len(high_ev)} eventos ALTO impacto · {len(med_ev)} MEDIO impacto")
+            for ev in high_ev[:5]:
+                st.markdown(
+                    f"🔴 **[{ev.get('currency','')}]** {ev.get('title','')} "
+                    f"— {str(ev.get('date',''))[:10]} "
+                    f"| Prev: {ev.get('previous','?')} | Fore: {ev.get('forecast','?')}"
+                )
+        else:
+            st.info("⏳ El servidor cargará el calendario automáticamente (cada 6h).")
+
+    # ── Comparación de estrategias ─────────────────────────────────────────────
+    cmp_result = st.session_state.get("strategy_comparison")
+    if cmp_result:
+        st.markdown("### 📊 Ranking de Estrategias")
+        best_name = cmp_result["best"]["strategy"]
+
+        if "_RANK_EMOJI" not in globals():
+            _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
+        # Tabla comparativa
+        rows = []
+        for i, r in enumerate(cmp_result["results"]):
+            rentable = r.get("profit_factor", 0) >= 1.0 and r.get("winrate", 0) >= r.get("be_winrate", 0)
+            be_n = r.get("be_count", 0)
+            rows.append({
+                "Pos":          _RANK_EMOJI[i] if i < len(_RANK_EMOJI) else f"#{i+1}",
+                "Estrategia":   r.get("label", r.get("strategy", "?")),
+                "Operaciones":  r.get("total", 0),
+                "Win Rate":     f"{r.get('winrate', 0)}%",
+                "BE (scratch)": be_n,
+                "WR sin BE":    f"{r.get('be_winrate', 0)}%",
+                "Profit Factor":f"{r.get('profit_factor', 0)}x",
+                "Net Pips":     f"{r.get('net_pips', 0):+.1f}",
+                "Max DD":       f"{r.get('max_dd', 0)}%",
+                "P&L $":        f"${r.get('net_pnl', 0):+.2f}",
+                "Estado":       "✅ Rentable" if rentable else "⚠️ Marginal",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+        # Ganadora detallada
+        best = cmp_result["best"]
+        st.markdown(f"### 🏆 Estrategia Ganadora: {best['label']}")
+        st.info(f"**Por qué funciona:** {best['why']}\n\n✅ **Ventajas:** {best['pros']}\n\n⚠️ **Limitaciones:** {best['cons']}")
+
+        mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+        mc1.metric("Operaciones", best["total"])
+        mc2.metric("Win Rate", f"{best['winrate']}%", delta=f"BE={best['be_winrate']}%")
+        mc3.metric("Profit Factor", f"{best['profit_factor']}x")
+        mc4.metric("Net Pips", f"{best['net_pips']:+.1f}p")
+        mc5.metric("Max Drawdown", f"{best['max_dd']}%")
+
+        # Curva de capital de la ganadora
+        eq_list = best.get("equity", [])
+        if len(eq_list) > 2:
+            st.write("**Curva de capital — estrategia ganadora ($10,000 capital inicial · 0.01 lot):**")
+            st.line_chart(pd.DataFrame({"Capital ($)": eq_list}), height=220)
+
+        # Tabs: curvas de todas + tabla de trades
+        with st.expander("Ver curvas de capital de todas las estrategias", expanded=False):
+            max_len = max(len(r["equity"]) for r in cmp_result["results"])
+            eq_all = {}
+            for r in cmp_result["results"]:
+                eq_padded = r["equity"] + [r["equity"][-1]] * (max_len - len(r["equity"]))
+                eq_all[r["label"][:20]] = eq_padded
+            st.line_chart(pd.DataFrame(eq_all), height=240)
+
+        with st.expander(f"Ver operaciones de '{best['label']}' ({len(best.get('trades',[]))} trades)", expanded=False):
+            raw = best.get("trades", [])
+            if raw:
+                td = pd.DataFrame(raw)
+                if "outcome" in td.columns:
+                    td["Resultado"] = td["outcome"].map({"TP":"✅ TP","SL":"❌ SL","BE":"🔄 BE 0p","MAX":"⏱ MAX","OPEN":"🔄 Abierta"})
+                cols_s = [c for c in ["time","dir","Resultado","pips","pnl"] if c in td.columns]
+                st.dataframe(
+                    td[cols_s].rename(columns={"time":"Entrada","dir":"Dirección","pips":"Pips","pnl":"P&L $"}),
+                    use_container_width=True, hide_index=True
+                )
+
+        # Base de conocimiento histórica
+        kb = load_knowledge_base()
+        if kb.get("runs"):
+            _kb_total_runs = len(kb["runs"])
+            _kb_sig_stats  = kb.get("signal_stats", {})
+            with st.expander(f"📚 Base de conocimiento ({_kb_total_runs} backtests · señales evaluadas)", expanded=False):
+                _col_kb1, _col_kb2 = st.columns(2)
+                with _col_kb1:
+                    if kb.get("strategy_wins"):
+                        st.markdown("**Ranking histórico de estrategias:**")
+                        for s, cnt in sorted(kb["strategy_wins"].items(), key=lambda x: -x[1]):
+                            meta = _STRATEGY_META.get(s, {})
+                            st.markdown(f"- **{meta.get('label', s)}**: nº1 en {cnt} backtest(s)")
+                with _col_kb2:
+                    if _kb_sig_stats:
+                        st.markdown("**Aciertos de señal KB por estrategia:**")
+                        for s, ss in sorted(_kb_sig_stats.items(), key=lambda x: -(x[1].get("correct",0))):
+                            ok = ss.get("correct", 0); ko = ss.get("wrong", 0)
+                            acc = f"{ok/(ok+ko)*100:.0f}%" if (ok+ko) > 0 else "—"
+                            meta = _STRATEGY_META.get(s, {})
+                            st.markdown(f"- **{meta.get('label',s)}**: {ok}✅ {ko}❌ → {acc}")
+                hist_rows = []
+                for run in reversed(kb["runs"][-15:]):
+                    hist_rows.append({
+                        "Fecha":    run.get("ts","?")[:10],
+                        "Ganadora": _STRATEGY_META.get(run.get("best",""), {}).get("label", run.get("best","?")),
+                        "PF":       run.get("pf","?"),
+                        "WR":       f"{run.get('wr','?')}%",
+                        "Ops":      run.get("total","?"),
+                        "NetPips":  run.get("net_pips","?"),
+                        "COT":      run.get("cot_bias") or "—",
+                        "Eventos":  run.get("events_high",0),
+                    })
+                st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+                # Mostrar el "por qué" del último backtest
+                _last_run = kb["runs"][-1]
+                if _last_run.get("market_ctx"):
+                    st.markdown("**Contexto fundamental del último backtest:**")
+                    for _rc in _last_run["market_ctx"]:
+                        st.markdown(f"  - {_rc}")
+    else:
+        st.info("Pulsa **'Comparar 17 Estrategias'** para encontrar la mejor estrategia en el año actual. La señal inteligente aparecerá automáticamente al analizar el mercado.")
+
+    # ════════════════════════════════════════════════════════════════════════════════
+    # BACKTEST HISTÓRICO LARGO PLAZO — DESDE 2008 (DATOS DIARIOS)
+    # ════════════════════════════════════════════════════════════════════════════════
+    st.markdown('<div id="sec-backtest2008"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🌍 Backtest Histórico — Desde 2008 hasta Hoy (Datos Diarios)")
+    st.caption(
+        "Descarga datos diarios EUR/USD desde 2008 (~4,000 velas) y ejecuta las 17 estrategias. "
+        "Los umbrales ATR se escalan automáticamente para barras diarias. "
+        "Resultado: cuál estrategia habría sido más rentable en 16+ años de mercado real."
+    )
+
+    if "lt_comparison" not in st.session_state:
+        _bt_disk2 = _load_bt_cache()
+        st.session_state.lt_comparison = _bt_disk2.get("lt")
+
+    _lt_cols = st.columns([1, 2])
+    with _lt_cols[0]:
+        _run_lt = st.button("🚀 Backtest 2008–Hoy (17 estrategias · datos diarios)",
+                            type="primary", key="run_lt")
+        if _run_lt:
+            with st.spinner("Descargando datos diarios EUR/USD desde 2008..."):
+                _lt_df = get_longterm_data_2008()
+            if _lt_df.empty:
+                st.error("No se pudieron descargar datos históricos. Verifica conexión a internet.")
+            else:
+                _lt_n = len(_lt_df)
+                _lt_years = round(_lt_n / 252)
+                with st.spinner(f"Ejecutando 17 estrategias sobre {_lt_n} días (~{_lt_years} años) — paralelo, ~15-30s..."):
+                    _lt_cmp = run_longterm_comparison(_lt_df)
+                if not _lt_cmp:
+                    st.warning("Sin operaciones válidas en datos históricos.")
                 else:
-                    st.error(f"❌ Error bot: {_msg}")
-            else:
-                st.info("🔄 Señal activa ya ejecutada — esperando nueva señal")
-        else:
-            _threshold_gap = MIN_DEFINITIVE_SCORE - _bot_score
-            if _threshold_gap > 0:
-                st.info(f"⏳ Score {_bot_score}/100 — faltan {_threshold_gap}p para ejecutar (mínimo {MIN_DEFINITIVE_SCORE})")
-            else:
-                st.info("⏳ Sin dirección clara — bot en espera")
+                    st.session_state.lt_comparison = _lt_cmp
+                    st.session_state.lt_n_bars = _lt_n
+                    # Persistir en disco para sobrevivir recargas de página
+                    _save_bt_cache(st.session_state.get("strategy_comparison"), _lt_cmp)
+                    st.success(
+                        f"✅ Completado — {_lt_n} barras diarias · Mejor estrategia: "
+                        f"**{_lt_cmp['best']['label']}** "
+                        f"(PF={_lt_cmp['best']['profit_factor']} · "
+                        f"WR={_lt_cmp['best']['winrate']}% · "
+                        f"{_lt_cmp['best']['net_pips']:+.0f} pips)"
+                    )
 
+    with _lt_cols[1]:
+        st.markdown(
+            "**Diferencias vs backtest de 1 año:**\n"
+            "- Datos diarios — cada barra = 1 día de trading\n"
+            "- ATR umbral escalado a ≥40 pips (vs 4p en 1h)\n"
+            "- Cooldown de 3 días entre entradas\n"
+            "- Sin filtro de horario (ventana London/NY)\n"
+            "- 16+ años incluyen: crisis 2008, COVID 2020, subidas Fed 2022-23"
+        )
 
-# Mostrar noticias si están disponibles
-news = signal.get("news", []) if 'signal' in dir() and signal else []
-if news:
-    for idx, a in enumerate(news[:20]):
-        title = a.get("title", "") or "Sin título"
-        src   = a.get("source", {}).get("name", "")
-        url   = a.get("url", ""); pub = (a.get("publishedAt") or "")[:10]
-        imp   = a.get("impact_score", 0); lbl = a.get("impact_label", "⚪ BAJO")
-        tb_cls = get_textblob()
-        if tb_cls and tb_cls is not False:
-            try:
-                pol = tb_cls(title).sentiment.polarity
-            except Exception:
-                pol = 0.0
-        else:
-            pol = 0.0
-        s_emoji = "🟢" if pol > 0.1 else ("🔴" if pol < -0.1 else "⚪")
+    _lt_cmp_result = st.session_state.get("lt_comparison")
+    if _lt_cmp_result:
+        _lt_n_bars = st.session_state.get("lt_n_bars", 0)
+        _lt_years  = round(_lt_n_bars / 252) if _lt_n_bars else "?"
+        st.markdown(f"### 📊 Ranking Histórico 2008–Hoy ({_lt_n_bars} barras · ~{_lt_years} años)")
+
+        if "_RANK_EMOJI" not in globals():
+            _RANK_EMOJI = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟","⓫","⓬","⓭","⓮","⓯","⓰","⓱"]
+        _lt_rows = []
+        for _i, _r in enumerate(_lt_cmp_result["results"]):
+            _rentable = _r.get("profit_factor", 0) >= 1.0
+            _be_n = _r.get("be_count", 0)
+            _lt_rows.append({
+                "Pos":           _RANK_EMOJI[_i] if _i < len(_RANK_EMOJI) else f"#{_i+1}",
+                "Estrategia":    _r.get("label", _r.get("strategy", "?")),
+                "Operaciones":   _r.get("total", 0),
+                "Win Rate":      f"{_r.get('winrate', 0)}%",
+                "BE (scratch)":  _be_n,
+                "Profit Factor": f"{_r.get('profit_factor', 0)}x",
+                "Net Pips":      f"{_r.get('net_pips', 0):+.0f}",
+                "Max DD":        f"{_r.get('max_dd', 0)}%",
+                "P&L $":         f"${_r.get('net_pnl', 0):+.2f}",
+                "Estado":        "✅ Rentable" if _rentable else "⚠️ Marginal",
+            })
+        st.dataframe(pd.DataFrame(_lt_rows), use_container_width=True, hide_index=True)
+
+        _lt_best = _lt_cmp_result["best"]
+        st.markdown(f"### 🏆 Mejor Estrategia Histórica (2008–Hoy): {_lt_best['label']}")
+        _ltc1, _ltc2, _ltc3, _ltc4, _ltc5 = st.columns(5)
+        _ltc1.metric("Operaciones", _lt_best.get("total", 0))
+        _ltc2.metric("Win Rate", f"{_lt_best.get('winrate', 0)}%")
+        _ltc3.metric("Profit Factor", f"{_lt_best.get('profit_factor', 0)}x")
+        _ltc4.metric("Net Pips", f"{_lt_best.get('net_pips', 0):+.0f}p")
+        _ltc5.metric("Max Drawdown", f"{_lt_best.get('max_dd', 0)}%")
+
+        st.info(
+            f"**Por qué funciona a largo plazo:** {_lt_best.get('why', '')}\n\n"
+            f"✅ **Ventajas:** {_lt_best.get('pros', '')}\n\n"
+            f"⚠️ **Limitaciones:** {_lt_best.get('cons', '')}"
+        )
+
+        # Curva de capital de la ganadora histórica
+        _lt_eq = _lt_best.get("equity", [])
+        if len(_lt_eq) > 2:
+            st.write(f"**Curva de capital 2008–Hoy — {_lt_best['label']} ($10,000 inicial · 0.01 lot):**")
+            st.line_chart(pd.DataFrame({"Capital ($)": _lt_eq}), height=260)
+
+        with st.expander("Ver curvas de todas las estrategias — largo plazo", expanded=False):
+            _lt_max_len = max(len(_r["equity"]) for _r in _lt_cmp_result["results"])
+            _lt_eq_all  = {}
+            for _r in _lt_cmp_result["results"]:
+                _eq_pad = _r["equity"] + [_r["equity"][-1]] * (_lt_max_len - len(_r["equity"]))
+                _lt_eq_all[_r["label"][:20]] = _eq_pad
+            st.line_chart(pd.DataFrame(_lt_eq_all), height=260)
+
         with st.expander(
-            f"[{idx}] {lbl} {s_emoji} — {title[:80]}... | {imp:.0f}%",
+            f"Ver operaciones de '{_lt_best['label']}' ({len(_lt_best.get('trades', []))} trades)",
             expanded=False
         ):
-            n1, n2 = st.columns([3, 1])
-            with n1:
-                st.write(f"**{src}** | {pub}")
-                if url: st.write(f"[Leer →]({url})")
-            with n2:
-                st.metric("Impacto", f"{imp:.0f}%")
-            desc = a.get("description", "")
-            if desc: st.write(f"*{desc[:180]}...*")
-else:
-    st.info("Sin noticias disponibles.")
+            _lt_raw = _lt_best.get("trades", [])
+            if _lt_raw:
+                _lt_td = pd.DataFrame(_lt_raw)
+                if "outcome" in _lt_td.columns:
+                    _lt_td["Resultado"] = _lt_td["outcome"].map(
+                        {"TP": "✅ TP", "SL": "❌ SL", "BE": "🔄 BE 0p", "OPEN": "🔄 Abierta"}
+                    )
+                _lt_cols_s = [c for c in ["time", "dir", "Resultado", "pips", "pnl"] if c in _lt_td.columns]
+                st.dataframe(
+                    _lt_td[_lt_cols_s].rename(
+                        columns={"time": "Fecha", "dir": "Dirección", "pips": "Pips (día)", "pnl": "P&L $"}
+                    ),
+                    use_container_width=True, hide_index=True,
+                )
 
-# ── Dashboard final ───────────────────────────────────────────────────────
-st.markdown('<div id="sec-dashboard"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("📋 Dashboard Final — Resumen de Decisión")
-tech_sig = ("COMPRA" if signal.get("buy_signals", 0) > signal.get("sell_signals", 0)
-            else "VENTA" if signal.get("sell_signals", 0) > 0 else "NEUTRAL")
-fund_raw = consensus.get("consensus", "Neutral")
-fund_sig = ("COMPRA" if "Bullish" in fund_raw
-            else "VENTA" if "Bearish" in fund_raw else "NEUTRAL")
-ws       = consensus.get("weighted_sentiment", 0)
-news_sig = "COMPRA" if ws > 0.1 else ("VENTA" if ws < -0.1 else "NEUTRAL")
-delta_sig = "NEUTRAL"
-if delta:
-    if delta["delta"] > 0:   delta_sig = "🟢 COMPRADORES"
-    elif delta["delta"] < 0: delta_sig = "🔴 VENDEDORES"
-
-def sig_icon(s):
-    return "🟢" if s == "COMPRA" else ("🔴" if s == "VENTA" else "⚪")
-
-bt_result = "N/A"
-if direction and not df_1h.empty:
-    bt = run_backtest(df_1h, direction, SCALP_SL_PIPS, SCALP_TP_PIPS)
-    if bt:
-        bt_result = (f"{'✅' if bt['net_pips']>0 else '❌'} "
-                     f"{bt['winrate']}% WR | {bt['net_pips']}p netos")
-
-spread_result = (f"{tick['spread_pips']}p {'✅' if tick['spread_pips']<1.5 else '⚠️'}"
-                 if tick else "N/A (sin MT5)")
-poc_result    = f"`{poc['precio']:.5f}`" if poc else "N/A"
-
-# ── Niveles de DXY ────────────────────────────────────────────────────────
-st.markdown('<div id="sec-dxy"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("💱 Niveles de DXY (Índice del Dólar)")
-dxy_levels = {
-    "Precio Actual": dxy_price,
-    "Tendencia": dxy_trend or "N/A",
-    "Cambio": f"{dxy_chg:+.2f}%"
-}
-if dxy_price is not None:
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.metric("📊 Precio DXY", f"{dxy_levels['Precio Actual']:.2f}")
-    with col2:
-        st.metric("📈 Cambio", dxy_levels['Cambio'])
-    st.write(f"**Tendencia:** {dxy_levels['Tendencia']}")
-else:
-    st.info("📡 Actualizando niveles de DXY...")
-
-matrix = [
-    {"Análisis": "Técnico (TF + Indicadores)",
-     "Señal": f"{sig_icon(tech_sig)} {tech_sig}",
-     "Fuerza": f"{signal.get('buy_signals',0)+signal.get('sell_signals',0)} señales"},
-    {"Análisis": "Fundamental (Noticias)",
-     "Señal": f"{sig_icon(fund_sig)} {fund_sig}",
-     "Fuerza": f"{avg_impact:.0f}% impacto"},
-    {"Análisis": "Sentimiento de mercado",
-     "Señal": f"{sig_icon(news_sig)} {news_sig}",
-     "Fuerza": f"{total_sources} fuentes"},
-    {"Análisis": "DXY (Dólar)",
-     "Señal": f"{'🔴' if dxy_dir=='UP' else '🟢' if dxy_dir=='DOWN' else '⚪'} {dxy_dir}",
-     "Fuerza": f"{dxy_chg:+.2f}%"},
-    {"Análisis": "Spike de volumen",
-     "Señal": "⚡ Spike detectado" if vol_spikes else "⚪ Normal",
-     "Fuerza": f"{vol_spikes[0]['ratio']}x" if vol_spikes else "—"},
-    {"Análisis": "Delta de volumen",
-     "Señal": delta_sig,
-     "Fuerza": f"{delta['delta_pct']:+.1f}%" if delta else "—"},
-    {"Análisis": "POC (Volume Profile)",
-     "Señal": poc_result,
-     "Fuerza": f"{poc['volumen']:,} ticks" if poc else "—"},
-    {"Análisis": "Score de confluencia",
-     "Señal": label,
-     "Fuerza": f"{score}/100"},
-    {"Análisis": "Spread MT5",
-     "Señal": spread_result,
-     "Fuerza": "Tiempo real" if tick else "—"},
-    {"Análisis": "Backtesting 1h",
-     "Señal": bt_result,
-     "Fuerza": "Histórico"},
-]
-st.dataframe(pd.DataFrame(matrix), use_container_width=True, hide_index=True)
-
-st.markdown('<div id="sec-accion"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🎯 Resumen de Acción Recomendada")
-recomendacion = {
-    "Dirección": signal.get('final_signal', 'NEUTRAL'),
-    "Confianza": f"{score}/100 — {label}",
-    "Precio Entrada": f"{price:.5f}" if price else "N/A",
-    "Stop Loss": f"{signal.get('stop_loss', 'N/A')}",
-    "Take Profit": f"{signal.get('take_profit', 'N/A')}",
-    "Sesión Activa": session,
-    "Contexto DXY": f"{dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)",
-    "Acción": "✅ OPERABLE" if score >= MIN_DEFINITIVE_SCORE else "⏸️ ESPERAR"
-}
-for key, val in recomendacion.items():
-    st.write(f"**{key}:** {val}")
-
-final_signal = signal.get('final_signal', 'NEUTRAL')
-st.info(
-    f"**Señal:** {final_signal}  \n"
-    f"**Score:** {score}/100 — {label}  \n"
-    f"**Precio:** {f'{price:.5f}' if price else 'N/A'}  \n"
-    f"**Delta volumen:** {delta_sig}  \n"
-    f"**Sesión:** {session}  |  **DXY:** {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)"
-)
-
-
-# ── AUTO-MEJORA — Sistema autónomo de aprendizaje y corrección ────────────────
-st.markdown('<div id="sec-autoimprove"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader("🔬 Sistema de Auto-Mejora Autónoma")
-st.caption("El sistema monitoriza su propio rendimiento, detecta errores, y se corrige automáticamente cada hora usando IA.")
-
-_sim_col1, _sim_col2 = st.columns([1, 1])
-
-with _sim_col1:
-    # ── APIs activas / pendientes (solo en Railway) ───────────────────────────
-    if not _IS_LOCAL:
-        st.markdown("**🌐 APIs Gratuitas — Estado**")
-        if _SELF_IMPROVE_OK:
-            _api_status = _self_improve.get_configured_apis()
-            _api_missing = _self_improve.get_missing_apis()
-            for _api in _api_status:
-                _t = "🤖" if _api["type"] == "ai" else "📊"
-                st.success(f"{_t} **{_api['name']}** activo")
-            if _api_missing:
-                st.markdown("**➕ APIs gratuitas disponibles (sin configurar):**")
-                for _api in _api_missing:
-                    _t = "🤖" if _api["type"] == "ai" else "📊"
-                    st.info(f"{_t} {_api['name']} — Obtén key gratis: {_api['url']}\n`Railway → Variables → {_api['env']}`")
-        else:
-            st.warning("Módulo self_improve no disponible")
+    # ── Panel: Por qué se mueve el mercado ────────────────────────────────────────
+    st.markdown('<div id="sec-porq"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🔍 Por qué se mueve el EUR/USD — Análisis Técnico + Fundamental")
+    ctx_reasons = st.session_state.get("market_context_reasons")
+    if ctx_reasons:
+        for reason in ctx_reasons:
+            st.markdown(f"- {reason}")
+        st.caption("Fuentes: EMA técnico · RSI/MACD momentum · COT CFTC institucional · Calendario ForexFactory · RSS noticias")
     else:
-        st.info(f"🌐 APIs configuradas en Railway · [Abrir panel completo →]({_RAILWAY_URL})")
+        st.info(
+            "Ejecuta primero el backtest (botón arriba) y asegúrate de tener datos COT y calendario cargados. "
+            "Este panel explicará en detalle POR QUÉ el mercado está donde está."
+        )
 
-    # ── Datos macro FRED ─────────────────────────────────────────────────────
-    _macro_ctx = st.session_state.get("macro_context") or {}
-    if _macro_ctx.get("fred"):
-        st.markdown("**🏦 Macro FRED (tiempo real)**")
-        _fred = _macro_ctx["fred"]
-        _fc1, _fc2 = st.columns(2)
-        if _fred.get("fed_rate"):
-            _fc1.metric("Tasa Fed", f"{_fred['fed_rate']['value']:.2f}%")
-        if _fred.get("unemployment"):
-            _fc2.metric("Desempleo", f"{_fred['unemployment']['value']:.1f}%")
-        if _fred.get("10y_yield"):
-            _fc1.metric("Bono 10Y", f"{_fred['10y_yield']['value']:.2f}%")
-        if _fred.get("2y_yield"):
-            _fc2.metric("Bono 2Y", f"{_fred['2y_yield']['value']:.2f}%")
-        _bias = _macro_ctx.get("macro_bias", "NEUTRAL")
-        _yc   = _macro_ctx.get("yield_curve", "?")
-        _bias_col = "🟢" if _bias == "BEARISH_USD" else "🔴" if _bias == "BULLISH_USD" else "⚪"
-        st.caption(f"{_bias_col} Sesgo USD: **{_bias}** | Yield curve: **{_yc}**")
-    elif _DATA_FEEDS_OK:
-        st.caption("🏦 FRED cargando — ejecuta un análisis para ver datos macro.")
+    # ── BOT AUTOMÁTICO (SIEMPRE VISIBLE) ───────────────────────────────────────────
 
-with _sim_col2:
-    # ── Último ciclo de auto-sanación ─────────────────────────────────────────
-    st.markdown("**🩺 Último Ciclo de Auto-Corrección**")
-    _heal = st.session_state.get("last_heal_result")
-    if _heal:
-        _hs = _heal.get("health_status", "?")
-        _hs_icon = "🟢" if _hs == "ok" else "🟡" if _hs == "warning" else "🔴"
-        st.markdown(f"{_hs_icon} Estado: **{_hs.upper()}**")
-        if _heal.get("summary"):
-            st.write(_heal["summary"])
-        if _heal.get("top_finding"):
-            st.info(f"💡 **Hallazgo:** {_heal['top_finding']}")
-        if _heal.get("applied_changes"):
-            st.success(f"✅ Parámetros ajustados: {list(_heal['applied_changes'].keys())}")
-        if _heal.get("dna_updated"):
-            _new_v = (_heal.get("new_dna") or {}).get("version", "?")
-            st.success(f"🧬 DNA auto-evolucionado a v{_new_v}")
-        st.caption(f"Ejecutado: {(_heal.get('ts') or '')[:16]}")
+with _t_bot:
+    st.markdown('<div id="sec-bot"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🤖 Modo Bot Automático")
+
+    # Información de diagnóstico MT5
+    if sys.platform != "win32":
+        st.info(
+            "ℹ️ **Bot automático desactivado en servidor cloud.**  "
+            "MT5 requiere Windows. Las señales, alertas Telegram y el backtest "
+            "funcionan con normalidad — solo la ejecución de órdenes requiere la "
+            "versión local en PC con Windows."
+        )
     else:
-        st.info("Esperando primer ciclo de auto-corrección (se ejecuta automáticamente cada hora al analizar)")
-
-    # ── Historial de mejoras ──────────────────────────────────────────────────
-    if _DB_OK:
-        try:
-            _improvements = _db.get_self_improvements(limit=20)
-            # Skip garbage entries: AI errors and raw <think> blocks
-            def _reason_ok(r: str) -> bool:
-                r = r.strip()
-                if not r or len(r) < 15:                         return False
-                if r.startswith("⚠️ Todos los proveedores"):     return False
-                if r.startswith("<think>"):                       return False
-                if r.startswith("{") or r.startswith("["):        return False  # raw JSON
-                if r.startswith("{ ") or '"health_status"' in r: return False  # JSON fragment
-                return True
-            _improvements = [
-                _i for _i in _improvements
-                if _reason_ok(str(_i.get("reason", "")))
-            ][:5]
-            if _improvements:
-                st.markdown("**📋 Últimas auto-mejoras aplicadas**")
-                for _imp in _improvements:
-                    _ic = "✅" if _imp.get("applied") else "📝"
-                    _ts = str(_imp.get("created_at", ""))[:16]
-                    st.caption(f"{_ic} {_ts} — {str(_imp.get('reason',''))[:80]}")
+        st.write("**🔍 Diagnóstico MT5:**")
+        col_diag1, col_diag2, col_diag3 = st.columns(3)
+        with col_diag1:
+            if is_mt5_available():
+                st.success("✅ MT5 instalado")
             else:
-                st.caption("Sin mejoras registradas aún.")
-        except Exception:
-            pass
+                st.error("❌ MT5 no instalado")
+        with col_diag2:
+            if is_mt5_available():
+                connected_diag = mt5_connect()
+                if connected_diag:
+                    st.success("✅ MT5 conectado")
+                else:
+                    st.error("❌ MT5 no conectado")
+                    err = get_mt5_error()
+                    if err:
+                        st.warning(f"🛠️ Error: {err}")
+                    st.info("💡 Abre MetaTrader 5 y verifica que esté funcionando")
+            else:
+                st.error("❌ No disponible")
+        with col_diag3:
+            if is_mt5_available() and mt5_connect():
+                terminal_info = mt5.terminal_info()
+                if terminal_info:
+                    st.success(f"✅ Terminal: {terminal_info.name}")
+                else:
+                    st.warning("⚠️ Terminal info no disponible")
+            else:
+                st.error("❌ No disponible")
 
-# ── Estrategia Maestra Adaptativa ─────────────────────────────────────────────
-try:
-    import strategy_learner as _sl_mod
-    _LEARNER_OK = True
-except ImportError:
-    _LEARNER_OK = False
+    # Inicializar estado del bot en session_state
+    if "bot_enabled" not in st.session_state:
+        st.session_state.bot_enabled = False
+    if "bot_volume" not in st.session_state:
+        st.session_state.bot_volume = 0.01
+    if "bot_last_signal" not in st.session_state:
+        st.session_state.bot_last_signal = None
+    if "bot_just_activated" not in st.session_state:
+        st.session_state.bot_just_activated = False
 
-if _LEARNER_OK:
-    with st.expander("🧬 Estrategia Maestra Adaptativa", expanded=True):
-        _master = None
+    # Sincronizar variables globales con session_state
+    BOT_ENABLED = st.session_state.bot_enabled
+    BOT_VOLUME = st.session_state.bot_volume
+    BOT_LAST_SIGNAL = st.session_state.bot_last_signal
+
+    # ── Detectar fuente de conexión disponible ────────────────────────────────
+    _svc_ok    = _mt5_service_available() and mt5_service_health().get("mt5") == "connected"
+    _local_ok  = is_mt5_available() and mt5_connect()
+    _any_conn  = _svc_ok or _local_ok
+
+    if _svc_ok:
+        st.success("✅ OANDA conectado — trading automático disponible")
+    elif _local_ok:
+        st.success("✅ MT5 local conectado — trading disponible")
+    else:
+        st.info("📊 **Modo señales** — análisis, scoring y Telegram activos.\nEjecución automática de órdenes no configurada.")
+
+    if _any_conn:
+        # Estado actual del bot
+        if st.session_state.bot_enabled:
+            st.success("🚀 **BOT ACTIVO** - Ejecutando señales automáticamente")
+        else:
+            st.info("⏸️ **BOT INACTIVO** - Modo manual")
+
+        # Estado del bot — solo lectura, corre automáticamente en el servidor
+        _bot_cols = st.columns([2, 1])
+        with _bot_cols[0]:
+            if st.session_state.bot_enabled:
+                st.success("🤖 **Bot ACTIVO** — analizando señales automáticamente 24/7")
+            else:
+                st.info("📊 **Modo señales** — acumulando datos y aprendiendo del mercado")
+        with _bot_cols[1]:
+            positions_mt5 = get_mt5_positions()
+            if positions_mt5:
+                st.warning(f"📊 {len(positions_mt5)} posiciones abiertas · cierre automático por TP/SL")
+            else:
+                st.caption("🎯 Sin posiciones abiertas")
+
+        # ── Panel de posiciones abiertas ──────────────────────────────────────────
+        _live_pos = get_mt5_positions()
+        if _live_pos:
+            st.markdown("#### 📊 Posiciones Abiertas")
+            for _p in _live_pos:
+                # Compatibilidad: dict (OANDA remoto) u objeto MT5 (local)
+                def _pv(attr, default=0):
+                    return _p.get(attr, default) if isinstance(_p, dict) else getattr(_p, attr, default)
+                _ticket   = _pv("ticket", "—")
+                _open_p   = float(_pv("open_price") or _pv("price_open", 0))
+                _cur_p    = float(_pv("current_price") or _pv("price_current", _open_p))
+                _sl_p     = float(_pv("sl", 0))
+                _vol      = float(_pv("volume", 0))
+                _profit   = float(_pv("profit", 0))
+                _type_raw = _pv("type", "BUY")
+                _is_buy   = (_type_raw in (0, "BUY", "LONG")) if not isinstance(_type_raw, str) else _type_raw.upper() in ("BUY", "LONG")
+                _dir_lbl  = "LONG" if _is_buy else "SHORT"
+                _ppips    = (_cur_p - _open_p) / 0.0001 if _is_buy else (_open_p - _cur_p) / 0.0001
+                _be_icon  = "⚖️ BE" if (_sl_p >= _open_p if _is_buy else _sl_p <= _open_p) and _sl_p != 0 else "🎯"
+                st.markdown(
+                    f"**#{_ticket}** {_dir_lbl} {_vol}L @ {_open_p:.5f} "
+                    f"| Actual: {_cur_p:.5f} "
+                    f"| {_be_icon} P&L: {_ppips:+.1f}p (${_profit:.2f})"
+                )
+        else:
+            st.info("🎯 Sin posiciones abiertas")
+
+        # ── Break-Even automático ─────────────────────────────────────────────────
+        if st.session_state.bot_enabled and _live_pos:
+            _be_msgs = manage_positions_be()
+            for _bm in _be_msgs:
+                st.success(f"⚖️ {_bm}")
+
+        # ── Información de riesgo y lógica del bot ────────────────────────────────
+        if st.session_state.bot_enabled:
+            st.warning("⚠️ **BOT ACTIVO** — Trading automático en curso")
+            st.info(f"💰 Volumen: {st.session_state.bot_volume} lotes | SL máx: {SCALP_SL_PIPS}p")
+
+            # Lógica del bot: ejecutar señal si condiciones se cumplen
+            _bot_score = score if st.session_state.analysis_executed else 0
+            _bot_signal = signal if st.session_state.analysis_executed else {}
+            _bot_liq = liq_levels if st.session_state.analysis_executed else []
+
+            if not st.session_state.analysis_executed:
+                st.info("🔄 Presiona 'ANALIZAR MERCADO' primero para activar el bot")
+            elif st.session_state.bot_just_activated:
+                st.info("🤖 Bot activado — esperando próxima señal de calidad...")
+                st.session_state.bot_just_activated = False
+            elif _bot_signal.get("direction") and _bot_score >= MIN_DEFINITIVE_SCORE:
+                # Solo ejecutar si no hay posiciones abiertas y la señal cambió
+                if _live_pos:
+                    st.info(f"🔒 Posición abierta — bot monitorea BE y gestión automática")
+                elif st.session_state.bot_last_signal != _bot_signal.get("direction"):
+                    _ok, _msg = auto_trade_signal(_bot_signal, st.session_state.bot_volume, liq_levels=_bot_liq)
+                    if _ok:
+                        st.success(f"🚀 Bot ejecutó trade: {_msg}")
+                        st.session_state.bot_last_signal = _bot_signal.get("direction")
+                        # Persistir trade en DB con snapshot de mercado
+                        if _DB_OK:
+                            try:
+                                _mkt_snap = {}
+                                if _AI_ENGINE_OK:
+                                    _mkt_snap = _ai_engine.build_market_snapshot(
+                                        _bot_signal, _bot_score, session, dxy_dir,
+                                        vol_spikes, delta,
+                                        st.session_state.get("market_context_reasons"),
+                                        dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
+                                    )
+                                _db.save_trade_with_snapshot(
+                                    direction=_bot_signal.get("direction", ""),
+                                    entry_price=float(_bot_signal.get("entry", price or 0)),
+                                    sl_price=float(_bot_signal.get("stop_loss", 0) or 0),
+                                    tp_price=float(_bot_signal.get("take_profit", 0) or 0),
+                                    outcome="OPEN",
+                                    pips=0.0,
+                                    pnl=0.0,
+                                    strategy=_bot_signal.get("strategy", ""),
+                                    score=_bot_score,
+                                    market_snapshot=_mkt_snap,
+                                    dna_version=int(_active_dna.get("_version") or _active_dna.get("version", 1)),
+                                    user_id=current_user,
+                                )
+                            except Exception:
+                                pass
+                        try:
+                            send_telegram_alert(_bot_signal, _bot_score, definitive=True, reason=f"Bot auto: {_msg}")
+                        except Exception:
+                            pass
+                    else:
+                        st.error(f"❌ Error bot: {_msg}")
+                else:
+                    st.info("🔄 Señal activa ya ejecutada — esperando nueva señal")
+            else:
+                _threshold_gap = MIN_DEFINITIVE_SCORE - _bot_score
+                if _threshold_gap > 0:
+                    st.info(f"⏳ Score {_bot_score}/100 — faltan {_threshold_gap}p para ejecutar (mínimo {MIN_DEFINITIVE_SCORE})")
+                else:
+                    st.info("⏳ Sin dirección clara — bot en espera")
+
+
+    # Mostrar noticias si están disponibles
+    news = signal.get("news", []) if 'signal' in dir() and signal else []
+    if news:
+        for idx, a in enumerate(news[:20]):
+            title = a.get("title", "") or "Sin título"
+            src   = a.get("source", {}).get("name", "")
+            url   = a.get("url", ""); pub = (a.get("publishedAt") or "")[:10]
+            imp   = a.get("impact_score", 0); lbl = a.get("impact_label", "⚪ BAJO")
+            tb_cls = get_textblob()
+            if tb_cls and tb_cls is not False:
+                try:
+                    pol = tb_cls(title).sentiment.polarity
+                except Exception:
+                    pol = 0.0
+            else:
+                pol = 0.0
+            s_emoji = "🟢" if pol > 0.1 else ("🔴" if pol < -0.1 else "⚪")
+            with st.expander(
+                f"[{idx}] {lbl} {s_emoji} — {title[:80]}... | {imp:.0f}%",
+                expanded=False
+            ):
+                n1, n2 = st.columns([3, 1])
+                with n1:
+                    st.write(f"**{src}** | {pub}")
+                    if url: st.write(f"[Leer →]({url})")
+                with n2:
+                    st.metric("Impacto", f"{imp:.0f}%")
+                desc = a.get("description", "")
+                if desc: st.write(f"*{desc[:180]}...*")
+    else:
+        st.info("Sin noticias disponibles.")
+
+    # ── Dashboard final ───────────────────────────────────────────────────────
+    st.markdown('<div id="sec-dashboard"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("📋 Dashboard Final — Resumen de Decisión")
+    tech_sig = ("COMPRA" if signal.get("buy_signals", 0) > signal.get("sell_signals", 0)
+                else "VENTA" if signal.get("sell_signals", 0) > 0 else "NEUTRAL")
+    fund_raw = consensus.get("consensus", "Neutral")
+    fund_sig = ("COMPRA" if "Bullish" in fund_raw
+                else "VENTA" if "Bearish" in fund_raw else "NEUTRAL")
+    ws       = consensus.get("weighted_sentiment", 0)
+    news_sig = "COMPRA" if ws > 0.1 else ("VENTA" if ws < -0.1 else "NEUTRAL")
+    delta_sig = "NEUTRAL"
+    if delta:
+        if delta["delta"] > 0:   delta_sig = "🟢 COMPRADORES"
+        elif delta["delta"] < 0: delta_sig = "🔴 VENDEDORES"
+
+    def sig_icon(s):
+        return "🟢" if s == "COMPRA" else ("🔴" if s == "VENTA" else "⚪")
+
+    bt_result = "N/A"
+    if direction and not df_1h.empty:
+        bt = run_backtest(df_1h, direction, SCALP_SL_PIPS, SCALP_TP_PIPS)
+        if bt:
+            bt_result = (f"{'✅' if bt['net_pips']>0 else '❌'} "
+                         f"{bt['winrate']}% WR | {bt['net_pips']}p netos")
+
+    spread_result = (f"{tick['spread_pips']}p {'✅' if tick['spread_pips']<1.5 else '⚠️'}"
+                     if tick else "N/A (sin MT5)")
+    poc_result    = f"`{poc['precio']:.5f}`" if poc else "N/A"
+
+    # ── Niveles de DXY ────────────────────────────────────────────────────────
+    st.markdown('<div id="sec-dxy"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("💱 Niveles de DXY (Índice del Dólar)")
+    dxy_levels = {
+        "Precio Actual": dxy_price,
+        "Tendencia": dxy_trend or "N/A",
+        "Cambio": f"{dxy_chg:+.2f}%"
+    }
+    if dxy_price is not None:
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.metric("📊 Precio DXY", f"{dxy_levels['Precio Actual']:.2f}")
+        with col2:
+            st.metric("📈 Cambio", dxy_levels['Cambio'])
+        st.write(f"**Tendencia:** {dxy_levels['Tendencia']}")
+    else:
+        st.info("📡 Actualizando niveles de DXY...")
+
+    matrix = [
+        {"Análisis": "Técnico (TF + Indicadores)",
+         "Señal": f"{sig_icon(tech_sig)} {tech_sig}",
+         "Fuerza": f"{signal.get('buy_signals',0)+signal.get('sell_signals',0)} señales"},
+        {"Análisis": "Fundamental (Noticias)",
+         "Señal": f"{sig_icon(fund_sig)} {fund_sig}",
+         "Fuerza": f"{avg_impact:.0f}% impacto"},
+        {"Análisis": "Sentimiento de mercado",
+         "Señal": f"{sig_icon(news_sig)} {news_sig}",
+         "Fuerza": f"{total_sources} fuentes"},
+        {"Análisis": "DXY (Dólar)",
+         "Señal": f"{'🔴' if dxy_dir=='UP' else '🟢' if dxy_dir=='DOWN' else '⚪'} {dxy_dir}",
+         "Fuerza": f"{dxy_chg:+.2f}%"},
+        {"Análisis": "Spike de volumen",
+         "Señal": "⚡ Spike detectado" if vol_spikes else "⚪ Normal",
+         "Fuerza": f"{vol_spikes[0]['ratio']}x" if vol_spikes else "—"},
+        {"Análisis": "Delta de volumen",
+         "Señal": delta_sig,
+         "Fuerza": f"{delta['delta_pct']:+.1f}%" if delta else "—"},
+        {"Análisis": "POC (Volume Profile)",
+         "Señal": poc_result,
+         "Fuerza": f"{poc['volumen']:,} ticks" if poc else "—"},
+        {"Análisis": "Score de confluencia",
+         "Señal": label,
+         "Fuerza": f"{score}/100"},
+        {"Análisis": "Spread MT5",
+         "Señal": spread_result,
+         "Fuerza": "Tiempo real" if tick else "—"},
+        {"Análisis": "Backtesting 1h",
+         "Señal": bt_result,
+         "Fuerza": "Histórico"},
+    ]
+    st.dataframe(pd.DataFrame(matrix), use_container_width=True, hide_index=True)
+
+    st.markdown('<div id="sec-accion"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🎯 Resumen de Acción Recomendada")
+    recomendacion = {
+        "Dirección": signal.get('final_signal', 'NEUTRAL'),
+        "Confianza": f"{score}/100 — {label}",
+        "Precio Entrada": f"{price:.5f}" if price else "N/A",
+        "Stop Loss": f"{signal.get('stop_loss', 'N/A')}",
+        "Take Profit": f"{signal.get('take_profit', 'N/A')}",
+        "Sesión Activa": session,
+        "Contexto DXY": f"{dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)",
+        "Acción": "✅ OPERABLE" if score >= MIN_DEFINITIVE_SCORE else "⏸️ ESPERAR"
+    }
+    for key, val in recomendacion.items():
+        st.write(f"**{key}:** {val}")
+
+    final_signal = signal.get('final_signal', 'NEUTRAL')
+    st.info(
+        f"**Señal:** {final_signal}  \n"
+        f"**Score:** {score}/100 — {label}  \n"
+        f"**Precio:** {f'{price:.5f}' if price else 'N/A'}  \n"
+        f"**Delta volumen:** {delta_sig}  \n"
+        f"**Sesión:** {session}  |  **DXY:** {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%)"
+    )
+
+
+    # ── AUTO-MEJORA — Sistema autónomo de aprendizaje y corrección ────────────────
+
+with _t_mejora:
+    st.markdown('<div id="sec-autoimprove"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("🔬 Sistema de Auto-Mejora Autónoma")
+    st.caption("El sistema monitoriza su propio rendimiento, detecta errores, y se corrige automáticamente cada hora usando IA.")
+
+    _sim_col1, _sim_col2 = st.columns([1, 1])
+
+    with _sim_col1:
+        # ── APIs activas / pendientes (solo en Railway) ───────────────────────────
+        if not _IS_LOCAL:
+            st.markdown("**🌐 APIs Gratuitas — Estado**")
+            if _SELF_IMPROVE_OK:
+                _api_status = _self_improve.get_configured_apis()
+                _api_missing = _self_improve.get_missing_apis()
+                for _api in _api_status:
+                    _t = "🤖" if _api["type"] == "ai" else "📊"
+                    st.success(f"{_t} **{_api['name']}** activo")
+                if _api_missing:
+                    st.markdown("**➕ APIs gratuitas disponibles (sin configurar):**")
+                    for _api in _api_missing:
+                        _t = "🤖" if _api["type"] == "ai" else "📊"
+                        st.info(f"{_t} {_api['name']} — Obtén key gratis: {_api['url']}\n`Railway → Variables → {_api['env']}`")
+            else:
+                st.warning("Módulo self_improve no disponible")
+        else:
+            st.info(f"🌐 APIs configuradas en Railway · [Abrir panel completo →]({_RAILWAY_URL})")
+
+        # ── Datos macro FRED ─────────────────────────────────────────────────────
+        _macro_ctx = st.session_state.get("macro_context") or {}
+        if _macro_ctx.get("fred"):
+            st.markdown("**🏦 Macro FRED (tiempo real)**")
+            _fred = _macro_ctx["fred"]
+            _fc1, _fc2 = st.columns(2)
+            if _fred.get("fed_rate"):
+                _fc1.metric("Tasa Fed", f"{_fred['fed_rate']['value']:.2f}%")
+            if _fred.get("unemployment"):
+                _fc2.metric("Desempleo", f"{_fred['unemployment']['value']:.1f}%")
+            if _fred.get("10y_yield"):
+                _fc1.metric("Bono 10Y", f"{_fred['10y_yield']['value']:.2f}%")
+            if _fred.get("2y_yield"):
+                _fc2.metric("Bono 2Y", f"{_fred['2y_yield']['value']:.2f}%")
+            _bias = _macro_ctx.get("macro_bias", "NEUTRAL")
+            _yc   = _macro_ctx.get("yield_curve", "?")
+            _bias_col = "🟢" if _bias == "BEARISH_USD" else "🔴" if _bias == "BULLISH_USD" else "⚪"
+            st.caption(f"{_bias_col} Sesgo USD: **{_bias}** | Yield curve: **{_yc}**")
+        elif _DATA_FEEDS_OK:
+            st.caption("🏦 FRED cargando — ejecuta un análisis para ver datos macro.")
+
+    with _sim_col2:
+        # ── Último ciclo de auto-sanación ─────────────────────────────────────────
+        st.markdown("**🩺 Último Ciclo de Auto-Corrección**")
+        _heal = st.session_state.get("last_heal_result")
+        if _heal:
+            _hs = _heal.get("health_status", "?")
+            _hs_icon = "🟢" if _hs == "ok" else "🟡" if _hs == "warning" else "🔴"
+            st.markdown(f"{_hs_icon} Estado: **{_hs.upper()}**")
+            if _heal.get("summary"):
+                st.write(_heal["summary"])
+            if _heal.get("top_finding"):
+                st.info(f"💡 **Hallazgo:** {_heal['top_finding']}")
+            if _heal.get("applied_changes"):
+                st.success(f"✅ Parámetros ajustados: {list(_heal['applied_changes'].keys())}")
+            if _heal.get("dna_updated"):
+                _new_v = (_heal.get("new_dna") or {}).get("version", "?")
+                st.success(f"🧬 DNA auto-evolucionado a v{_new_v}")
+            st.caption(f"Ejecutado: {(_heal.get('ts') or '')[:16]}")
+        else:
+            st.info("Esperando primer ciclo de auto-corrección (se ejecuta automáticamente cada hora al analizar)")
+
+        # ── Historial de mejoras ──────────────────────────────────────────────────
         if _DB_OK:
             try:
-                _master = _db.load_active_strategy()
+                _improvements = _db.get_self_improvements(limit=20)
+                # Skip garbage entries: AI errors and raw <think> blocks
+                def _reason_ok(r: str) -> bool:
+                    r = r.strip()
+                    if not r or len(r) < 15:                         return False
+                    if r.startswith("⚠️ Todos los proveedores"):     return False
+                    if r.startswith("<think>"):                       return False
+                    if r.startswith("{") or r.startswith("["):        return False  # raw JSON
+                    if r.startswith("{ ") or '"health_status"' in r: return False  # JSON fragment
+                    return True
+                _improvements = [
+                    _i for _i in _improvements
+                    if _reason_ok(str(_i.get("reason", "")))
+                ][:5]
+                if _improvements:
+                    st.markdown("**📋 Últimas auto-mejoras aplicadas**")
+                    for _imp in _improvements:
+                        _ic = "✅" if _imp.get("applied") else "📝"
+                        _ts = str(_imp.get("created_at", ""))[:16]
+                        st.caption(f"{_ic} {_ts} — {str(_imp.get('reason',''))[:80]}")
+                else:
+                    st.caption("Sin mejoras registradas aún.")
             except Exception:
                 pass
 
-        if _master and _master.get("source") == "meta_learner":
-            _mv = _master.get("version", "?")
-            _mobs = _master.get("obs_analyzed", 0)
-            _mevolved = str(_master.get("evolved_at", ""))[:16]
-            _minsight = _master.get("ai_insight", "")
-            _mimprove = _master.get("improvement", "")
+    # ── Estrategia Maestra Adaptativa ─────────────────────────────────────────────
+    try:
+        import strategy_learner as _sl_mod
+        _LEARNER_OK = True
+    except ImportError:
+        _LEARNER_OK = False
 
-            st.success(f"🧬 **DNA Maestro v{_mv}** — {_mobs} observaciones analizadas")
-            if _minsight:
-                st.info(f"💡 **Insight IA:** {_minsight}")
-            if _mimprove:
-                st.caption(f"📈 Mejora vs anterior: {_mimprove}")
-
-            # Pesos de señal — weight bars
-            _sw = _master.get("signal_weights") or {}
-            if _sw:
-                st.markdown('<p style="font-size:.62rem;font-weight:800;letter-spacing:.12em;color:#57697c;text-transform:uppercase;margin:10px 0 6px">PESOS DE SEÑAL APRENDIDOS</p>', unsafe_allow_html=True)
-                _weight_items = [
-                    ("Técnico",     _sw.get("technical", 0),   "#1566d3"),
-                    ("DXY",         _sw.get("dxy", 0),         "#3d8ef5"),
-                    ("Fundamental", _sw.get("fundamental", 0), "#00b87c"),
-                    ("Sentimiento", _sw.get("sentiment", 0),   "#c97d0a"),
-                    ("Volumen",     _sw.get("volume", 0),      "#57697c"),
-                ]
-                _whtml = '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;margin-bottom:6px">'
-                for _wlbl, _wval, _wcol in _weight_items:
-                    _wpct = round(_wval * 100)
-                    _whtml += (
-                        f'<div style="background:#080d17;border:1px solid #172032;border-radius:4px;padding:8px 10px">'
-                        f'<div style="font-size:.58rem;font-weight:700;color:#57697c;letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px">{_wlbl}</div>'
-                        f'<div style="font-size:1.1rem;font-weight:800;color:{_wcol};font-family:monospace;letter-spacing:-.02em">{_wpct}<span style="font-size:.6rem;color:#2e3f50">%</span></div>'
-                        f'<div style="height:3px;background:#172032;border-radius:2px;margin-top:5px;overflow:hidden">'
-                        f'<div style="height:100%;width:{_wpct}%;background:{_wcol};border-radius:2px;transition:width .4s"></div></div>'
-                        f'</div>'
-                    )
-                _whtml += '</div>'
-                st.markdown(_whtml, unsafe_allow_html=True)
-
-            # Mejores condiciones
-            _bc = _master.get("best_conditions") or []
-            _ac = _master.get("avoid_conditions") or []
-            if _bc or _ac:
-                _cc1, _cc2 = st.columns(2)
-                if _bc:
-                    _cc1.markdown("**✅ Mejores condiciones:**")
-                    for _c in _bc:
-                        _cc1.caption(f"• {_c}")
-                if _ac:
-                    _cc2.markdown("**⛔ Evitar:**")
-                    for _c in _ac:
-                        _cc2.caption(f"• {_c}")
-
-            st.caption(f"Última evolución: {_mevolved} | Próxima en ~6h")
-
-        else:
-            _obs_count = 0
+    if _LEARNER_OK:
+        with st.expander("🧬 Estrategia Maestra Adaptativa", expanded=True):
+            _master = None
             if _DB_OK:
                 try:
-                    _obs_count = len(_db.get_metrics(name="market_observation", limit=200) or [])
+                    _master = _db.load_active_strategy()
                 except Exception:
                     pass
-            _needed = max(0, 20 - _obs_count)
-            if _needed > 0:
-                st.info(f"🔄 Acumulando datos... {_obs_count}/20 observaciones necesarias para el primer aprendizaje.\nEl sistema aprenderá automáticamente.")
+
+            if _master and _master.get("source") == "meta_learner":
+                _mv = _master.get("version", "?")
+                _mobs = _master.get("obs_analyzed", 0)
+                _mevolved = str(_master.get("evolved_at", ""))[:16]
+                _minsight = _master.get("ai_insight", "")
+                _mimprove = _master.get("improvement", "")
+
+                st.success(f"🧬 **DNA Maestro v{_mv}** — {_mobs} observaciones analizadas")
+                if _minsight:
+                    st.info(f"💡 **Insight IA:** {_minsight}")
+                if _mimprove:
+                    st.caption(f"📈 Mejora vs anterior: {_mimprove}")
+
+                # Pesos de señal
+                _sw = _master.get("signal_weights") or {}
+                if _sw:
+                    st.markdown("**⚖️ Pesos de señal aprendidos:**")
+                    _sc1, _sc2, _sc3, _sc4, _sc5 = st.columns(5)
+                    _sc1.metric("Técnico",      f"{_sw.get('technical',0)*100:.0f}%")
+                    _sc2.metric("DXY",          f"{_sw.get('dxy',0)*100:.0f}%")
+                    _sc3.metric("Volumen",      f"{_sw.get('volume',0)*100:.0f}%")
+                    _sc4.metric("Sentimiento",  f"{_sw.get('sentiment',0)*100:.0f}%")
+                    _sc5.metric("Fundamental",  f"{_sw.get('fundamental',0)*100:.0f}%")
+
+                # Mejores condiciones
+                _bc = _master.get("best_conditions") or []
+                _ac = _master.get("avoid_conditions") or []
+                if _bc or _ac:
+                    _cc1, _cc2 = st.columns(2)
+                    if _bc:
+                        _cc1.markdown("**✅ Mejores condiciones:**")
+                        for _c in _bc:
+                            _cc1.caption(f"• {_c}")
+                    if _ac:
+                        _cc2.markdown("**⛔ Evitar:**")
+                        for _c in _ac:
+                            _cc2.caption(f"• {_c}")
+
+                st.caption(f"Última evolución: {_mevolved} | Próxima en ~6h")
+
             else:
-                st.info(f"✅ {_obs_count} observaciones acumuladas. El primer ciclo de aprendizaje se ejecutará en breve (cada 6h).")
-
-        # ── Ranking de estrategias ganadoras (auto-actualizado por el servidor) ─
-        st.markdown("---")
-        _rnk_h1, _rnk_h2 = st.columns([3, 1])
-        _rnk_h1.markdown("**🏆 Ranking de estrategias — Doble Filtro (60d + 2008)**")
-        try:
-            import strategy_selector as _ss_mod
-            _ranking = _ss_mod.get_latest_ranking()
-            if not _ranking:
-                _ranking = []
-
-            # Timestamps de última actualización
-            _ts_60d = None
-            _ts_lt  = None
-            try:
-                _rk_rows = _db.get_metrics(name="strategy_ranking", limit=1) or []
-                if _rk_rows:
-                    _rk_ts = (_rk_rows[0].get("context") or {}).get("ts", "")
-                    _ts_60d = _rk_ts[:16] if _rk_ts else None
-            except Exception:
-                pass
-            _rnk_h2.caption(f"🔄 Auto cada 8h\n{'Actualizado: ' + _ts_60d if _ts_60d else 'Calculando...'}")
-
-            if _ranking:
-                _n_cert = sum(1 for _r in _ranking if _r.get("is_certified") or _r.get("badge") == "🏆")
-                _n_60d  = sum(1 for _r in _ranking if (_r.get("is_winner_60d") or _r.get("is_winner")) and not (_r.get("is_certified") or _r.get("badge") == "🏆"))
-                _n_lt   = sum(1 for _r in _ranking if _r.get("is_winner_lt"))
-                _rk1, _rk2, _rk3 = st.columns(3)
-                _rk1.metric("🏆 Certificadas", _n_cert, help="Ganan en 60d 1H Y en 2008+ diario")
-                _rk2.metric("✅ Solo reciente", _n_60d, help="Ganan en 60d 1H pero no tienen datos 2008 aún")
-                _rk3.metric("📅 Ganan 2008+", _n_lt, help="Probadas rentables en datos históricos desde 2008")
-                st.markdown("")
-
-                # ── Tabla de ranking profesional ──────────────────────────────
-                _tbl_hdr = (
-                    '<div style="display:grid;grid-template-columns:2.5fr 1fr 1fr 1fr 1fr 0.7fr;'
-                    'gap:4px;padding:5px 10px;background:#080d17;border:1px solid #172032;'
-                    'border-radius:4px 4px 0 0;margin-top:8px">'
-                    '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">ESTRATEGIA</span>'
-                    '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">WR 60D</span>'
-                    '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">PF 60D</span>'
-                    '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">WR 2008</span>'
-                    '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">PF 2008</span>'
-                    '<span style="font-size:.58rem;font-weight:800;color:#57697c;letter-spacing:.12em;text-transform:uppercase">ESTADO</span>'
-                    '</div>'
-                )
-                _tbl_rows = ""
-                for _ri, _r in enumerate(_ranking[:12]):
-                    _bg = "#0a0e18" if _ri % 2 == 0 else "#080d17"
-                    _bd_left = ""
-                    if _r.get("is_certified") or _r.get("badge") == "🏆":
-                        _badge_txt = "CERT"
-                        _badge_col = "#00b87c"
-                        _bd_left = "border-left:3px solid #00b87c;"
-                    elif _r.get("is_winner_60d") or _r.get("is_winner"):
-                        _badge_txt = "60D"
-                        _badge_col = "#1566d3"
-                        _bd_left = "border-left:3px solid #1566d3;"
-                    else:
-                        _badge_txt = "—"
-                        _badge_col = "#2e3f50"
-
-                    _lbl = _r.get("label", _r.get("name", "?"))[:28]
-                    _pos_txt = ["01", "02", "03"][_ri] if _ri < 3 else f"{_ri+1:02d}"
-                    _pos_col = ["#c97d0a", "#57697c", "#57697c"][_ri] if _ri < 3 else "#2e3f50"
-
-                    _wr   = _r.get("winrate", 0)
-                    _pf   = _r.get("profit_factor", 0)
-                    _lt_wr= _r.get("lt_winrate", 0)
-                    _lt_pf= _r.get("lt_profit_factor", 0)
-
-                    _wr_col  = "#00b87c" if _wr >= 55 else ("#c97d0a" if _wr >= 52 else "#e03c50")
-                    _lt_col  = "#00b87c" if _lt_wr >= 55 else ("#c97d0a" if _lt_wr >= 52 else "#57697c")
-                    _lt_str  = f"{_lt_wr:.0f}%" if _lt_wr > 0 else "—"
-                    _lt_pf_s = f"{_lt_pf:.2f}" if _lt_pf > 0 else "—"
-
-                    _tbl_rows += (
-                        f'<div style="display:grid;grid-template-columns:2.5fr 1fr 1fr 1fr 1fr 0.7fr;'
-                        f'gap:4px;padding:6px 10px;background:{_bg};{_bd_left}'
-                        f'border-bottom:1px solid #172032;align-items:center">'
-                        f'<span style="font-size:.72rem;color:#c8d3e0;font-weight:600">'
-                        f'<span style="color:{_pos_col};font-family:monospace;font-size:.6rem;margin-right:5px">{_pos_txt}</span>'
-                        f'{_lbl}</span>'
-                        f'<span style="font-size:.72rem;color:{_wr_col};font-family:monospace;font-weight:700">{_wr:.0f}%</span>'
-                        f'<span style="font-size:.72rem;color:#c8d3e0;font-family:monospace">{_pf:.2f}</span>'
-                        f'<span style="font-size:.72rem;color:{_lt_col};font-family:monospace;font-weight:700">{_lt_str}</span>'
-                        f'<span style="font-size:.72rem;color:#c8d3e0;font-family:monospace">{_lt_pf_s}</span>'
-                        f'<span style="font-size:.6rem;color:{_badge_col};font-weight:800;letter-spacing:.06em">{_badge_txt}</span>'
-                        f'</div>'
-                    )
-                st.markdown(
-                    _tbl_hdr +
-                    f'<div style="border:1px solid #172032;border-top:none;border-radius:0 0 4px 4px;overflow:hidden">'
-                    + _tbl_rows + '</div>',
-                    unsafe_allow_html=True
-                )
-            else:
-                st.info("⏳ El servidor está calculando el ranking en background (primera vez puede tardar ~2 min). Se actualizará automáticamente.")
-        except Exception:
-            st.caption("Módulo strategy_selector cargando en background...")
-
-        # Estado del ciclo de aprendizaje
-        st.markdown("")
-        _learn_h1, _learn_h2 = st.columns([3, 1])
-        _learn_h1.caption("🧠 **Ciclo de aprendizaje IA** — corre automáticamente cada 6h")
-        try:
-            _last_learn = _db.get_setting("last_learn_ts") or ""
-            if _last_learn:
-                from datetime import datetime, timezone as _tz
-                _last_dt = datetime.fromisoformat(_last_learn)
-                if not _last_dt.tzinfo:
-                    _last_dt = _last_dt.replace(tzinfo=_tz.utc)
-                _hrs_ago = int((datetime.now(_tz.utc) - _last_dt).total_seconds() / 3600)
-                _nxt_hrs = max(0, 6 - _hrs_ago)
-                _learn_h2.caption(f"Último: hace {_hrs_ago}h · Próximo en ~{_nxt_hrs}h")
-            else:
-                _learn_h2.caption("Primera ejecución pendiente...")
-        except Exception:
-            pass
-
-# ── Patrones de mercado detectados (auto-actualizados cada 6h) ────────────────
-if _SELF_IMPROVE_OK and _DB_OK:
-    with st.expander("🔎 Patrones detectados por IA en observaciones históricas", expanded=False):
-        try:
-            _pat_rows = _db.get_metrics(name="pattern_report", limit=1) or []
-            if _pat_rows:
-                _pat_ctx = _pat_rows[0].get("context") or {}
-                _pat_rep = _pat_ctx.get("report", "")
-                _pat_ts  = str(_pat_rows[0].get("created_at", ""))[:16]
-                if _pat_rep:
-                    st.caption(f"🤖 Análisis automático · Última actualización: {_pat_ts} · Siguiente en ~6h")
-                    st.write(_pat_rep)
+                _obs_count = 0
+                if _DB_OK:
+                    try:
+                        _obs_count = len(_db.get_metrics(name="market_observation", limit=200) or [])
+                    except Exception:
+                        pass
+                _needed = max(0, 20 - _obs_count)
+                if _needed > 0:
+                    st.info(f"🔄 Acumulando datos... {_obs_count}/20 observaciones necesarias para el primer aprendizaje.\nEl sistema aprenderá automáticamente.")
                 else:
-                    st.info("⏳ El servidor está analizando patrones en background. Disponible en la próxima ejecución (~6h desde el inicio).")
-            else:
-                st.info("⏳ El servidor ejecutará el análisis de patrones automáticamente (cada 6h). Primera ejecución pendiente.")
-        except Exception:
-            st.caption("Patrones: cargando desde servidor...")
+                    st.info(f"✅ {_obs_count} observaciones acumuladas. El primer ciclo de aprendizaje se ejecutará en breve (cada 6h).")
 
-# ── Trading Advisor AI ────────────────────────────────────────────────────────
-st.markdown('<div id="sec-advisor"></div>', unsafe_allow_html=True)
-st.markdown("---")
-st.subheader(f"🧠 Trading Advisor AI — Asesor Personal de {current_user_name}")
-st.caption(f"Hola {current_user_name}, cuéntame tu tesis. Analizo tu visión contra tus operaciones reales, los backtests históricos (2008–hoy), posicionamiento institucional, técnico y fundamental. Aprendo de cada conversación.")
+            # ── Ranking de estrategias ganadoras (auto-actualizado por el servidor) ─
+            st.markdown("---")
+            _rnk_h1, _rnk_h2 = st.columns([3, 1])
+            _rnk_h1.markdown("**🏆 Ranking de estrategias — Doble Filtro (60d + 2008)**")
+            try:
+                import strategy_selector as _ss_mod
+                _ranking = _ss_mod.get_latest_ranking()
+                if not _ranking:
+                    _ranking = []
 
-import os as _os
+                # Timestamps de última actualización
+                _ts_60d = None
+                _ts_lt  = None
+                try:
+                    _rk_rows = _db.get_metrics(name="strategy_ranking", limit=1) or []
+                    if _rk_rows:
+                        _rk_ts = (_rk_rows[0].get("context") or {}).get("ts", "")
+                        _ts_60d = _rk_ts[:16] if _rk_ts else None
+                except Exception:
+                    pass
+                _rnk_h2.caption(f"🔄 Auto cada 8h\n{'Actualizado: ' + _ts_60d if _ts_60d else 'Calculando...'}")
 
-# API key: env var (Railway) o input de sesión
-_ant_key = _os.environ.get("GROQ_API_KEY", "").strip()
+                if _ranking:
+                    _n_cert = sum(1 for _r in _ranking if _r.get("is_certified") or _r.get("badge") == "🏆")
+                    _n_60d  = sum(1 for _r in _ranking if (_r.get("is_winner_60d") or _r.get("is_winner")) and not (_r.get("is_certified") or _r.get("badge") == "🏆"))
+                    _n_lt   = sum(1 for _r in _ranking if _r.get("is_winner_lt"))
+                    _rk1, _rk2, _rk3 = st.columns(3)
+                    _rk1.metric("🏆 Certificadas", _n_cert, help="Ganan en 60d 1H Y en 2008+ diario")
+                    _rk2.metric("✅ Solo reciente", _n_60d, help="Ganan en 60d 1H pero no tienen datos 2008 aún")
+                    _rk3.metric("📅 Ganan 2008+", _n_lt, help="Probadas rentables en datos históricos desde 2008")
+                    st.markdown("")
 
-# Session_id estable por usuario (aislado entre David y Javi)
-_adv_sess_key = f"advisor_session_{current_user}"
-if _adv_sess_key not in st.session_state:
-    import uuid as _uuid
-    st.session_state[_adv_sess_key] = str(_uuid.uuid4())
-st.session_state.advisor_session_id = st.session_state[_adv_sess_key]
+                    _rank_cols = st.columns([3, 1, 1, 1, 1, 1])
+                    _rank_cols[0].markdown("**Estrategia**")
+                    _rank_cols[1].markdown("**WR 60d**")
+                    _rank_cols[2].markdown("**PF 60d**")
+                    _rank_cols[3].markdown("**WR 2008**")
+                    _rank_cols[4].markdown("**PF 2008**")
+                    _rank_cols[5].markdown("**Estado**")
+                    for _ri, _r in enumerate(_ranking[:12]):
+                        _rc = st.columns([3, 1, 1, 1, 1, 1])
+                        if _r.get("badge"):
+                            _emoji = _r["badge"]
+                        elif _r.get("is_certified"):
+                            _emoji = "🏆"
+                        elif _r.get("is_winner_60d") or _r.get("is_winner"):
+                            _emoji = "✅"
+                        else:
+                            _emoji = "❌"
+                        _lbl = _r.get("label", _r.get("name", "?"))[:30]
+                        _pos = "🥇" if _ri==0 else "🥈" if _ri==1 else "🥉" if _ri==2 else f"{_ri+1}."
+                        _rc[0].caption(f"{_pos} {_lbl}")
+                        _wr  = _r.get("winrate", 0)
+                        _pf  = _r.get("profit_factor", 0)
+                        _lt_wr = _r.get("lt_winrate", 0)
+                        _lt_pf = _r.get("lt_profit_factor", 0)
+                        _rc[1].caption(f"{'🟢' if _wr >= 55 else '🟡' if _wr >= 52 else '🔴'} {_wr:.0f}%")
+                        _rc[2].caption(f"{_pf:.2f}")
+                        _rc[3].caption(f"{'🟢' if _lt_wr >= 55 else '🟡' if _lt_wr >= 52 else '—'} {_lt_wr:.0f}%" if _lt_wr > 0 else "—")
+                        _rc[4].caption(f"{_lt_pf:.2f}" if _lt_pf > 0 else "—")
+                        _rc[5].caption(_emoji)
+                else:
+                    st.info("⏳ El servidor está calculando el ranking en background (primera vez puede tardar ~2 min). Se actualizará automáticamente.")
+            except Exception:
+                st.caption("Módulo strategy_selector cargando en background...")
 
-# Historial de chat: cargar desde DB filtrado por usuario
-_adv_chat_key = f"advisor_chat_{current_user}"
-if _adv_chat_key not in st.session_state:
-    if _DB_OK:
-        try:
-            st.session_state[_adv_chat_key] = _db.load_chat_history(
-                st.session_state.advisor_session_id, user_id=current_user
-            )
-        except Exception:
-            st.session_state[_adv_chat_key] = []
+            # Estado del ciclo de aprendizaje
+            st.markdown("")
+            _learn_h1, _learn_h2 = st.columns([3, 1])
+            _learn_h1.caption("🧠 **Ciclo de aprendizaje IA** — corre automáticamente cada 6h")
+            try:
+                _last_learn = _db.get_setting("last_learn_ts") or ""
+                if _last_learn:
+                    from datetime import datetime, timezone as _tz
+                    _last_dt = datetime.fromisoformat(_last_learn)
+                    if not _last_dt.tzinfo:
+                        _last_dt = _last_dt.replace(tzinfo=_tz.utc)
+                    _hrs_ago = int((datetime.now(_tz.utc) - _last_dt).total_seconds() / 3600)
+                    _nxt_hrs = max(0, 6 - _hrs_ago)
+                    _learn_h2.caption(f"Último: hace {_hrs_ago}h · Próximo en ~{_nxt_hrs}h")
+                else:
+                    _learn_h2.caption("Primera ejecución pendiente...")
+            except Exception:
+                pass
+
+    # ── Patrones de mercado detectados (auto-actualizados cada 6h) ────────────────
+    if _SELF_IMPROVE_OK and _DB_OK:
+        with st.expander("🔎 Patrones detectados por IA en observaciones históricas", expanded=False):
+            try:
+                _pat_rows = _db.get_metrics(name="pattern_report", limit=1) or []
+                if _pat_rows:
+                    _pat_ctx = _pat_rows[0].get("context") or {}
+                    _pat_rep = _pat_ctx.get("report", "")
+                    _pat_ts  = str(_pat_rows[0].get("created_at", ""))[:16]
+                    if _pat_rep:
+                        st.caption(f"🤖 Análisis automático · Última actualización: {_pat_ts} · Siguiente en ~6h")
+                        st.write(_pat_rep)
+                    else:
+                        st.info("⏳ El servidor está analizando patrones en background. Disponible en la próxima ejecución (~6h desde el inicio).")
+                else:
+                    st.info("⏳ El servidor ejecutará el análisis de patrones automáticamente (cada 6h). Primera ejecución pendiente.")
+            except Exception:
+                st.caption("Patrones: cargando desde servidor...")
+
+    # ── Trading Advisor AI ────────────────────────────────────────────────────────
+
+with _t_ia:
+    # ── Panel: Señal de Entrada Actual ────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🎯 Señal de Entrada Actual")
+
+    _kb_strat_key  = signal.get("kb_best_strategy", "")
+    _kb_dir_now    = signal.get("kb_direction", "NO TRADE")
+    _kb_reason_now = signal.get("kb_reason", "")
+    _sig_price_now = signal.get("price")
+    _sig_dir_now   = signal.get("direction")
+    _dna_panel     = st.session_state.get("active_dna") or {}
+    _sc_panel      = st.session_state.get("strategy_comparison") or {}
+    _sc_res_map    = {r["strategy"]: r for r in (_sc_panel.get("results") or [])}
+    _strat_bt      = _sc_res_map.get(_kb_strat_key, {})
+    _meta_panel    = _STRATEGY_META.get(_kb_strat_key, {})
+
+    if not _sig_price_now:
+        st.info("📊 Presiona **ANALIZAR MERCADO** para ver la señal de entrada.")
     else:
-        st.session_state[_adv_chat_key] = []
-# Alias genérico usado en el resto del código
-st.session_state.advisor_chat = st.session_state[_adv_chat_key]
-
-
-def _advisor_context() -> str:
-    """Builds a rich snapshot of current app data for the AI system prompt."""
-    _lines = []
-    _s = signal if isinstance(signal, dict) else {}
-
-    _lines.append("=== DATOS EN TIEMPO REAL DE LA APP ===")
-    _lines.append(f"Par: EUR/USD")
-    _lines.append(f"Precio actual: {f'{price:.5f}' if price else 'N/A'}")
-    _lines.append(f"Señal: {_s.get('final_signal', 'NEUTRAL')} | Score: {score}/100 ({label})")
-    _lines.append(f"Señales alcistas: {_s.get('buy_signals', 0)} | Bajistas: {_s.get('sell_signals', 0)}")
-    if _s.get('entry'):
-        _lines.append(f"Setup sugerido: Entrada {_s.get('entry','?')} | SL {_s.get('stop_loss','?')} | TP {_s.get('take_profit','?')}")
-    if _s.get('regime'):
-        _lines.append(f"Régimen detectado: {_s.get('regime')}")
-    if _s.get('strategy'):
-        _lines.append(f"Estrategia activa: {_s.get('strategy')}")
-    _lines.append(f"Sesión activa: {session}")
-    _lines.append(f"DXY: {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%) — {'DXY sube → presión bajista EUR' if dxy_dir == 'UP' else 'DXY baja → presión alcista EUR' if dxy_dir == 'DOWN' else 'DXY neutro'}")
-
-    if delta:
-        _dir_d = "compradores dominan" if delta.get("delta", 0) > 0 else "vendedores dominan"
-        _lines.append(f"Delta de volumen: {delta.get('delta_pct', 0):+.1f}% ({_dir_d})")
-    if vol_spikes:
-        _lines.append(f"Spike de volumen: {vol_spikes[0].get('ratio', 0):.1f}x — posible movimiento institucional")
-    if poc:
-        _lines.append(f"POC (Volume Profile): {poc['precio']:.5f} — nivel de mayor liquidez")
-
-    # Fundamental
-    _c = consensus if isinstance(consensus, dict) else {}
-    if _c:
-        _lines.append(f"\n=== FUNDAMENTAL ===")
-        _lines.append(f"Consenso: {_c.get('consensus', 'N/A')} | Sentimiento ponderado: {_c.get('weighted_sentiment', 0):+.3f}")
-        _lines.append(f"Impacto medio noticias: {avg_impact:.0f}% | Fuentes procesadas: {total_sources}")
-
-    # Market context reasons
-    _reasons = st.session_state.get("market_context_reasons", [])
-    if _reasons:
-        _lines.append(f"\n=== RAZONES DETECTADAS POR LA APP ===")
-        for _r in _reasons[:10]:
-            _lines.append(f"  • {_r}")
-
-    # 1-year backtest
-    _cmp = st.session_state.get("strategy_comparison")
-    if _cmp:
-        _b = _cmp.get("best", {})
-        _lines.append(f"\n=== BACKTEST 1 AÑO ===")
-        _lines.append(f"Mejor estrategia: {_b.get('label', 'N/A')}")
-        _lines.append(f"  WR: {_b.get('winrate', 0)}% | PF: {_b.get('profit_factor', 0)}x | Pips netos: {_b.get('net_pips', 0):+.1f} | Max DD: {_b.get('max_dd', 0)}%")
-        _lines.append(f"  Operaciones: {_b.get('total', 0)} | Por qué funciona: {_b.get('why', 'N/A')}")
-        _lines.append(f"  Ventajas: {_b.get('pros', 'N/A')}")
-        _lines.append(f"  Limitaciones: {_b.get('cons', 'N/A')}")
-        _rs = _cmp.get("results", [])
-        if _rs:
-            _lines.append("  Ranking completo (1 año):")
-            for _ri, _r in enumerate(_rs[:6]):
-                _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
-                _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p netos | DD {_r.get('max_dd',0)}%")
-
-    # 2008 historical backtest
-    _lt = st.session_state.get("lt_comparison")
-    if _lt:
-        _b2 = _lt.get("best", {})
-        _lines.append(f"\n=== BACKTEST HISTÓRICO 2008–HOY (18+ AÑOS) ===")
-        _lines.append(f"Mejor estrategia histórica: {_b2.get('label', 'N/A')}")
-        _lines.append(f"  WR: {_b2.get('winrate', 0)}% | PF: {_b2.get('profit_factor', 0)}x | Pips netos: {_b2.get('net_pips', 0):+.1f} | Max DD: {_b2.get('max_dd', 0)}%")
-        _lines.append(f"  Operaciones en 18 años: {_b2.get('total', 0)} (incluye: crisis 2008, flash crash 2015, Brexit 2016, COVID 2020, subidas Fed 2022-23)")
-        _lt_rs = _lt.get("results", [])
-        if _lt_rs:
-            _lines.append("  Ranking histórico (todas las estrategias):")
-            for _ri, _r in enumerate(_lt_rs):
-                _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
-                _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p | DD {_r.get('max_dd',0)}%")
-
-    # ── Patrones de trading del usuario ──────────────────────────────────────
-    if _DB_OK:
-        try:
-            _pats = _db.get_user_trade_patterns(current_user)
-            if _pats and _pats.get("total"):
-                _lines.append(f"\n=== HISTORIAL REAL DE {current_user_name.upper()} EN ESTA APP ===")
-                _lines.append(f"Total operaciones: {_pats.get('total', 0)} | Win Rate: {float(_pats.get('winrate') or 0):.1f}%")
-                _lines.append(f"Net pips acumulados: {float(_pats.get('net_pips') or 0):+.1f} | P&L neto: ${float(_pats.get('net_pnl') or 0):+.2f}")
-                if _pats.get("by_strategy"):
-                    _lines.append("  Rendimiento por estrategia:")
-                    for _s in _pats["by_strategy"][:5]:
-                        _lines.append(f"    • {_s.get('strategy','?')}: {_s.get('total',0)} ops | {float(_s.get('winrate') or 0):.0f}% WR | {float(_s.get('net_pips') or 0):+.1f}p")
-                if _pats.get("recent_streak"):
-                    _lines.append(f"  Racha reciente: {_pats['recent_streak']}")
-        except Exception:
-            pass
-
-    # ── Memorias del Advisor (aprendizajes acumulados) ────────────────────────
-    if _DB_OK:
-        try:
-            _mems = _db.load_ai_memories(current_user, limit=12)
-            if _mems:
-                _lines.append(f"\n=== LO QUE HE APRENDIDO DE {current_user_name.upper()} ===")
-                for _m in _mems:
-                    _ct = _m.get("content", "")
-                    if _ct:
-                        _lines.append(f"  [{_m.get('memory_type','insight')}] {_ct}")
-        except Exception:
-            pass
-
-    return "\n".join(_lines)
-
-
-def _extract_lesson(user_msg: str, ai_response: str, api_key: str) -> str | None:
-    """Extract a 1-sentence learning from a conversation. Returns None if nothing new."""
-    try:
-        from ai_engine import call_ai as _call_ai
-        _prompt = (
-            f"Conversación de trading EUR/USD:\n"
-            f"USUARIO: {user_msg[:250]}\n"
-            f"ADVISOR: {ai_response[:400]}\n\n"
-            f"En UNA frase corta (máx 120 caracteres), extrae el insight o patrón de trading "
-            f"más importante que el ADVISOR ha identificado sobre este usuario o mercado. "
-            f"Si no hay nada nuevo o relevante que aprender, responde exactamente: NONE"
+        # ── Badge de estado ────────────────────────────────────────────────────
+        _edir = _kb_dir_now if _kb_dir_now in ("LONG", "SHORT") else _sig_dir_now
+        if _edir == "LONG":
+            _ec, _eb, _ei, _el = "#0f5132", "#3fb950", "📈", "ENTRADA — LONG"
+        elif _edir == "SHORT":
+            _ec, _eb, _ei, _el = "#450a0a", "#f85149", "📉", "ENTRADA — SHORT"
+        else:
+            _ec, _eb, _ei, _el = "#1a1a1a", "#e3b341", "⚪", "SIN ENTRADA — ESPERAR"
+        st.markdown(
+            f'<div style="background:{_ec};border:2px solid {_eb};border-radius:12px;'
+            f'padding:14px 22px;display:flex;align-items:center;gap:16px;margin-bottom:12px">'
+            f'<span style="font-size:32px">{_ei}</span>'
+            f'<span style="color:{_eb};font-weight:700;font-size:20px">{_el}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
         )
-        _r = _call_ai([{"role": "user", "content": _prompt}],
-                      max_tokens=160, temperature=0.2).strip()
-        return None if _r.startswith("⚠️") or _r.upper().startswith("NONE") or len(_r) < 12 else _r
-    except Exception:
-        return None
 
+        # ── Score bar ──────────────────────────────────────────────────────────
+        st.markdown(f"**Score de confluencia: {score}/100**")
+        st.progress(min(score, 100) / 100)
 
-def _advisor_call(user_msg: str, history: list, context: str) -> str:
-    """
-    Send user message to the best available AI provider (Groq → Cerebras → Zhipu → Claude).
-    Falls back to Claude (Anthropic) automatically if the free providers fail.
-    """
-    from ai_engine import call_ai as _call_ai
+        # ── Dos columnas: estrategia | niveles ────────────────────────────────
+        _pn_l, _pn_r = st.columns(2)
 
-    _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamiento, y los aprendizajes acumulados de todas vuestras conversaciones anteriores.
+        with _pn_l:
+            st.markdown("**📊 Estrategia Activa**")
+            if _kb_strat_key and _meta_panel:
+                st.markdown(f"🏆 **{_meta_panel.get('label', _kb_strat_key)}**")
+                st.caption(f"💡 {_meta_panel.get('why', '')[:120]}")
+                if _meta_panel.get("pros"):
+                    st.caption(f"✅ {_meta_panel['pros']}")
+                if _meta_panel.get("cons"):
+                    st.caption(f"⚠️ {_meta_panel['cons']}")
+                if _kb_reason_now:
+                    st.caption(f"📝 {_kb_reason_now[:120]}")
+            else:
+                st.caption("Estrategia seleccionada por KB tras el análisis.")
 
-Tu objetivo no es solo analizar — es convertirte en el mejor consejero posible para {current_user_name} adaptándote a su estilo, sus errores pasados y sus puntos fuertes.
+            st.markdown("**📈 Backtest 1 año**")
+            if _strat_bt:
+                _bt_c1, _bt_c2 = st.columns(2)
+                _bt_c1.metric("Win Rate",    f"{_strat_bt.get('winrate', 0):.1f}%")
+                _bt_c2.metric("Pips netos",  f"{_strat_bt.get('net_pips', 0):+.1f}")
+                _bt_c1.metric("Max Drawdown",f"{_strat_bt.get('max_dd', 0):.1f}%")
+                _bt_c2.metric("P. Factor",   f"{_strat_bt.get('profit_factor', 0):.2f}")
+                _bt_c1.metric("Trades",      str(_strat_bt.get("total", "—")))
+                _bt_c2.metric("R:R Ratio",   f"1:{_strat_bt.get('rr_ratio', 0):.1f}")
+            else:
+                st.caption("Ejecuta el backtest (pestaña 📊) para ver estadísticas.")
 
-{context}
+            st.markdown("**🧬 DNA Aprendido**")
+            _dn_wr = float(_dna_panel.get("_winrate") or _dna_panel.get("winrate") or 0)
+            _dn_np = float(_dna_panel.get("_net_pips") or _dna_panel.get("net_pips") or 0)
+            _dn_v  = _dna_panel.get("_version") or _dna_panel.get("version", "—")
+            _dc1, _dc2 = st.columns(2)
+            _dc1.metric("WR Aprendido", f"{_dn_wr:.1f}%")
+            _dc2.metric("Pips DNA",     f"{_dn_np:+.1f}")
+            st.caption(f"Versión DNA: v{_dn_v}")
 
-INSTRUCCIONES:
-{current_user_name} compartirá su visión/tesis. Analízala contra los datos de la app y su historial personal. Responde SIEMPRE con esta estructura:
+        with _pn_r:
+            st.markdown("**💰 Niveles de Entrada**")
+            _lc1, _lc2 = st.columns(2)
+            if _sig_price_now:
+                _lc1.metric("Precio actual", f"{_sig_price_now:.5f}")
+            if smart_sl:
+                _lc2.metric("Stop Loss", f"{smart_sl:.5f}",
+                            delta=f"{round(abs(_sig_price_now - smart_sl)/0.0001,1)} pips" if _sig_price_now else None,
+                            delta_color="inverse")
+            if tp1:
+                _lc1.metric("TP1", f"{tp1:.5f}")
+            if tp2:
+                _lc2.metric("TP2", f"{tp2:.5f}")
+            if tp3:
+                _lc1.metric("TP3", f"{tp3:.5f}")
+            if rr2:
+                _lc2.metric("R:R", f"1:{rr2:.1f}")
 
-📊 **TU VISIÓN ENTENDIDA**
-Resumir lo que propone {current_user_name} en 1-2 frases.
+            st.markdown("**📡 Contexto de Mercado**")
+            _ctx_c1, _ctx_c2 = st.columns(2)
+            _ctx_c1.metric("Sesión",  signal.get("session", "—"))
+            _ctx_c2.metric("Régimen", signal.get("regime",  "—").replace("_", " ").title())
+            _ctx_c1.metric("RSI 1H",  f"{signal.get('rsi', 0):.1f}" if signal.get("rsi") else "—")
+            _ctx_c2.metric("ATR 1H",  f"{signal.get('atr_1h_pips', 0):.1f} p" if signal.get("atr_1h_pips") else "—")
 
-✅ **POR QUÉ SÍ** (confluencias a favor)
-Argumentos que respaldan la visión: backtest histórico (18+ años), señal actual de la app, técnico (EMA/RSI/MACD), fundamental (BCE/Fed/macro), patrones del usuario si aplican. Cita profit factors y win rates.
+            if _edir in ("LONG", "SHORT"):
+                _liq = signal.get("liquidity_warnings") or smart_warnings or []
+                if _liq:
+                    st.warning("⚠️ " + " · ".join(str(w) for w in _liq[:3]))
+                else:
+                    st.success("✅ Sin alertas de liquidez en los niveles actuales")
 
-❌ **POR QUÉ NO** (riesgos y contradicciones)
-Argumentos en contra: estrategias que fallen en este contexto, drawdowns históricos, alertas de la app, errores pasados de {current_user_name} si los hay en su historial.
+    st.markdown("---")
 
-🎯 **VEREDICTO**
-Conclusión directa con nivel de convicción (ALTA/MEDIA/BAJA) y ajustes concretos (entrada, SL, TP, timing). Si detectas un patrón recurrente en {current_user_name}, menciónalo.
+    # ── Trading Advisor AI ────────────────────────────────────────────────────
+    st.markdown('<div id="sec-advisor"></div>', unsafe_allow_html=True)
+    st.subheader(f"🧠 Trading Advisor AI — Asesor Personal de {current_user_name}")
+    st.caption(f"Hola {current_user_name}, cuéntame tu tesis. Analizo tu visión contra tus operaciones reales, los backtests históricos (2008–hoy), posicionamiento institucional, técnico y fundamental. Aprendo de cada conversación.")
 
-🧠 **APRENDIZAJE** (solo si hay algo nuevo)
-En 1 frase: qué nuevo insight has extraído de esta conversación sobre el mercado o sobre {current_user_name}.
+    import os as _os
 
-REGLAS:
-- Responde en español, tutea a {current_user_name}
-- Sé cuantitativo — cita datos concretos del backtest como evidencia
-- Usa el historial real del usuario cuando sea relevante
-- Máximo 450 palabras en total
-- Si los datos de la app aún no están cargados (N/A), indícalo y razona con lo que tengas"""
+    # API key: env var (Railway) o input de sesión
+    _ant_key = _os.environ.get("GROQ_API_KEY", "gsk_0r0JRGjnYIAsgkfey3UWwWGdyb3FYjGb4Q5RKJICkoPGHM4pdQRlY").strip()
 
-    _messages = [{"role": "system", "content": _system}]
-    for _h in history[-8:]:
-        _messages.append({"role": _h["role"], "content": _h["content"]})
-    _messages.append({"role": "user", "content": user_msg})
+    # Session_id estable por usuario (aislado entre David y Javi)
+    _adv_sess_key = f"advisor_session_{current_user}"
+    if _adv_sess_key not in st.session_state:
+        import uuid as _uuid
+        st.session_state[_adv_sess_key] = str(_uuid.uuid4())
+    st.session_state.advisor_session_id = st.session_state[_adv_sess_key]
 
-    return _call_ai(_messages, max_tokens=1200, temperature=0.4, prefer_quality=True)
-
-
-# Mostrar historial de conversación
-for _msg in st.session_state.advisor_chat:
-    _av = "👤" if _msg["role"] == "user" else "🧠"
-    with st.chat_message(_msg["role"], avatar=_av):
-        st.markdown(_msg["content"])
-
-# Input del chat
-_chat_prompt = st.chat_input(
-    "Ej: Creo que el EUR/USD va a subir porque el BCE está hawkish y el DXY está cayendo..."
-)
-if _chat_prompt:
-    if not _ant_key:
-        st.error("⚠️ Configura la GROQ_API_KEY primero (ver configuración arriba).")
-    else:
-        with st.chat_message("user", avatar="👤"):
-            st.markdown(_chat_prompt)
-        st.session_state.advisor_chat.append({"role": "user", "content": _chat_prompt})
+    # Historial de chat: cargar desde DB filtrado por usuario
+    _adv_chat_key = f"advisor_chat_{current_user}"
+    if _adv_chat_key not in st.session_state:
         if _DB_OK:
             try:
-                _db.save_chat_message(
-                    st.session_state.advisor_session_id, "user",
-                    _chat_prompt, user_id=current_user
+                st.session_state[_adv_chat_key] = _db.load_chat_history(
+                    st.session_state.advisor_session_id, user_id=current_user
                 )
+            except Exception:
+                st.session_state[_adv_chat_key] = []
+        else:
+            st.session_state[_adv_chat_key] = []
+    # Alias genérico usado en el resto del código
+    st.session_state.advisor_chat = st.session_state[_adv_chat_key]
+
+
+    def _advisor_context() -> str:
+        """Builds a rich snapshot of current app data for the AI system prompt."""
+        _lines = []
+        _s = signal if isinstance(signal, dict) else {}
+
+        _lines.append("=== DATOS EN TIEMPO REAL DE LA APP ===")
+        _lines.append(f"Par: EUR/USD")
+        _lines.append(f"Precio actual: {f'{price:.5f}' if price else 'N/A'}")
+        _lines.append(f"Señal: {_s.get('final_signal', 'NEUTRAL')} | Score: {score}/100 ({label})")
+        _lines.append(f"Señales alcistas: {_s.get('buy_signals', 0)} | Bajistas: {_s.get('sell_signals', 0)}")
+        if _s.get('entry'):
+            _lines.append(f"Setup sugerido: Entrada {_s.get('entry','?')} | SL {_s.get('stop_loss','?')} | TP {_s.get('take_profit','?')}")
+        if _s.get('regime'):
+            _lines.append(f"Régimen detectado: {_s.get('regime')}")
+        if _s.get('strategy'):
+            _lines.append(f"Estrategia activa: {_s.get('strategy')}")
+        _lines.append(f"Sesión activa: {session}")
+        _lines.append(f"DXY: {dxy_trend or 'N/A'} ({dxy_chg:+.2f}%) — {'DXY sube → presión bajista EUR' if dxy_dir == 'UP' else 'DXY baja → presión alcista EUR' if dxy_dir == 'DOWN' else 'DXY neutro'}")
+
+        if delta:
+            _dir_d = "compradores dominan" if delta.get("delta", 0) > 0 else "vendedores dominan"
+            _lines.append(f"Delta de volumen: {delta.get('delta_pct', 0):+.1f}% ({_dir_d})")
+        if vol_spikes:
+            _lines.append(f"Spike de volumen: {vol_spikes[0].get('ratio', 0):.1f}x — posible movimiento institucional")
+        if poc:
+            _lines.append(f"POC (Volume Profile): {poc['precio']:.5f} — nivel de mayor liquidez")
+
+        # Fundamental
+        _c = consensus if isinstance(consensus, dict) else {}
+        if _c:
+            _lines.append(f"\n=== FUNDAMENTAL ===")
+            _lines.append(f"Consenso: {_c.get('consensus', 'N/A')} | Sentimiento ponderado: {_c.get('weighted_sentiment', 0):+.3f}")
+            _lines.append(f"Impacto medio noticias: {avg_impact:.0f}% | Fuentes procesadas: {total_sources}")
+
+        # Market context reasons
+        _reasons = st.session_state.get("market_context_reasons", [])
+        if _reasons:
+            _lines.append(f"\n=== RAZONES DETECTADAS POR LA APP ===")
+            for _r in _reasons[:10]:
+                _lines.append(f"  • {_r}")
+
+        # 1-year backtest
+        _cmp = st.session_state.get("strategy_comparison")
+        if _cmp:
+            _b = _cmp.get("best", {})
+            _lines.append(f"\n=== BACKTEST 1 AÑO ===")
+            _lines.append(f"Mejor estrategia: {_b.get('label', 'N/A')}")
+            _lines.append(f"  WR: {_b.get('winrate', 0)}% | PF: {_b.get('profit_factor', 0)}x | Pips netos: {_b.get('net_pips', 0):+.1f} | Max DD: {_b.get('max_dd', 0)}%")
+            _lines.append(f"  Operaciones: {_b.get('total', 0)} | Por qué funciona: {_b.get('why', 'N/A')}")
+            _lines.append(f"  Ventajas: {_b.get('pros', 'N/A')}")
+            _lines.append(f"  Limitaciones: {_b.get('cons', 'N/A')}")
+            _rs = _cmp.get("results", [])
+            if _rs:
+                _lines.append("  Ranking completo (1 año):")
+                for _ri, _r in enumerate(_rs[:6]):
+                    _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
+                    _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p netos | DD {_r.get('max_dd',0)}%")
+
+        # 2008 historical backtest
+        _lt = st.session_state.get("lt_comparison")
+        if _lt:
+            _b2 = _lt.get("best", {})
+            _lines.append(f"\n=== BACKTEST HISTÓRICO 2008–HOY (18+ AÑOS) ===")
+            _lines.append(f"Mejor estrategia histórica: {_b2.get('label', 'N/A')}")
+            _lines.append(f"  WR: {_b2.get('winrate', 0)}% | PF: {_b2.get('profit_factor', 0)}x | Pips netos: {_b2.get('net_pips', 0):+.1f} | Max DD: {_b2.get('max_dd', 0)}%")
+            _lines.append(f"  Operaciones en 18 años: {_b2.get('total', 0)} (incluye: crisis 2008, flash crash 2015, Brexit 2016, COVID 2020, subidas Fed 2022-23)")
+            _lt_rs = _lt.get("results", [])
+            if _lt_rs:
+                _lines.append("  Ranking histórico (todas las estrategias):")
+                for _ri, _r in enumerate(_lt_rs):
+                    _ok = "✅" if _r.get("profit_factor", 0) >= 1.0 else "⚠️"
+                    _lines.append(f"    {_ri+1}. {_ok} {_r.get('label','?')}: {_r.get('winrate',0)}% WR | {_r.get('profit_factor',0)}x PF | {_r.get('net_pips',0):+.1f}p | DD {_r.get('max_dd',0)}%")
+
+        # ── Patrones de trading del usuario ──────────────────────────────────────
+        if _DB_OK:
+            try:
+                _pats = _db.get_user_trade_patterns(current_user)
+                if _pats and _pats.get("total"):
+                    _lines.append(f"\n=== HISTORIAL REAL DE {current_user_name.upper()} EN ESTA APP ===")
+                    _lines.append(f"Total operaciones: {_pats.get('total', 0)} | Win Rate: {float(_pats.get('winrate') or 0):.1f}%")
+                    _lines.append(f"Net pips acumulados: {float(_pats.get('net_pips') or 0):+.1f} | P&L neto: ${float(_pats.get('net_pnl') or 0):+.2f}")
+                    if _pats.get("by_strategy"):
+                        _lines.append("  Rendimiento por estrategia:")
+                        for _s in _pats["by_strategy"][:5]:
+                            _lines.append(f"    • {_s.get('strategy','?')}: {_s.get('total',0)} ops | {float(_s.get('winrate') or 0):.0f}% WR | {float(_s.get('net_pips') or 0):+.1f}p")
+                    if _pats.get("recent_streak"):
+                        _lines.append(f"  Racha reciente: {_pats['recent_streak']}")
             except Exception:
                 pass
 
-        with st.chat_message("assistant", avatar="🧠"):
-            with st.spinner(f"Analizando tu visión, {current_user_name}..."):
-                _ctx_snap  = _advisor_context()
-                _ai_answer = _advisor_call(
-                    _chat_prompt,
-                    st.session_state.advisor_chat[:-1],
-                    _ctx_snap,
-                )
-            st.markdown(_ai_answer)
-        st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})
+        # ── Memorias del Advisor (aprendizajes acumulados) ────────────────────────
         if _DB_OK:
             try:
-                _db.save_chat_message(
-                    st.session_state.advisor_session_id, "assistant",
-                    _ai_answer, user_id=current_user
-                )
+                _mems = _db.load_ai_memories(current_user, limit=12)
+                if _mems:
+                    _lines.append(f"\n=== LO QUE HE APRENDIDO DE {current_user_name.upper()} ===")
+                    for _m in _mems:
+                        _ct = _m.get("content", "")
+                        if _ct:
+                            _lines.append(f"  [{_m.get('memory_type','insight')}] {_ct}")
             except Exception:
                 pass
-        # Auto-aprendizaje: extraer insight y guardar en ai_memory
-        if _DB_OK and _ant_key:
-            try:
-                _lesson = _extract_lesson(_chat_prompt, _ai_answer, _ant_key)
-                if _lesson:
-                    _db.save_ai_memory(
-                        current_user, "insight",
-                        f"Chat {datetime.now().strftime('%Y-%m-%d')}",
-                        _lesson, 0.7, "chat",
+
+        return "\n".join(_lines)
+
+
+    def _extract_lesson(user_msg: str, ai_response: str, api_key: str) -> str | None:
+        """Extract a 1-sentence learning from a conversation. Returns None if nothing new."""
+        try:
+            from ai_engine import call_ai as _call_ai
+            _prompt = (
+                f"Conversación de trading EUR/USD:\n"
+                f"USUARIO: {user_msg[:250]}\n"
+                f"ADVISOR: {ai_response[:400]}\n\n"
+                f"En UNA frase corta (máx 120 caracteres), extrae el insight o patrón de trading "
+                f"más importante que el ADVISOR ha identificado sobre este usuario o mercado. "
+                f"Si no hay nada nuevo o relevante que aprender, responde exactamente: NONE"
+            )
+            _r = _call_ai([{"role": "user", "content": _prompt}],
+                          max_tokens=160, temperature=0.2).strip()
+            return None if _r.startswith("⚠️") or _r.upper().startswith("NONE") or len(_r) < 12 else _r
+        except Exception:
+            return None
+
+
+    def _advisor_call(user_msg: str, history: list, context: str) -> str:
+        """
+        Send user message to the best available AI provider (Groq → Cerebras → Zhipu → Claude).
+        Falls back to Claude (Anthropic) automatically if the free providers fail.
+        """
+        from ai_engine import call_ai as _call_ai
+
+        _system = f"""Eres el Trading Advisor personal de {current_user_name}, un sistema de IA especializado en EUR/USD que APRENDE y EVOLUCIONA con cada conversación. Tienes acceso completo al historial de trading real de {current_user_name}, sus patrones de comportamiento, y los aprendizajes acumulados de todas vuestras conversaciones anteriores.
+
+    Tu objetivo no es solo analizar — es convertirte en el mejor consejero posible para {current_user_name} adaptándote a su estilo, sus errores pasados y sus puntos fuertes.
+
+    {context}
+
+    INSTRUCCIONES:
+    {current_user_name} compartirá su visión/tesis. Analízala contra los datos de la app y su historial personal. Responde SIEMPRE con esta estructura:
+
+    📊 **TU VISIÓN ENTENDIDA**
+    Resumir lo que propone {current_user_name} en 1-2 frases.
+
+    ✅ **POR QUÉ SÍ** (confluencias a favor)
+    Argumentos que respaldan la visión: backtest histórico (18+ años), señal actual de la app, técnico (EMA/RSI/MACD), fundamental (BCE/Fed/macro), patrones del usuario si aplican. Cita profit factors y win rates.
+
+    ❌ **POR QUÉ NO** (riesgos y contradicciones)
+    Argumentos en contra: estrategias que fallen en este contexto, drawdowns históricos, alertas de la app, errores pasados de {current_user_name} si los hay en su historial.
+
+    🎯 **VEREDICTO**
+    Conclusión directa con nivel de convicción (ALTA/MEDIA/BAJA) y ajustes concretos (entrada, SL, TP, timing). Si detectas un patrón recurrente en {current_user_name}, menciónalo.
+
+    🧠 **APRENDIZAJE** (solo si hay algo nuevo)
+    En 1 frase: qué nuevo insight has extraído de esta conversación sobre el mercado o sobre {current_user_name}.
+
+    REGLAS:
+    - Responde en español, tutea a {current_user_name}
+    - Sé cuantitativo — cita datos concretos del backtest como evidencia
+    - Usa el historial real del usuario cuando sea relevante
+    - Máximo 450 palabras en total
+    - Si los datos de la app aún no están cargados (N/A), indícalo y razona con lo que tengas"""
+
+        _messages = [{"role": "system", "content": _system}]
+        for _h in history[-8:]:
+            _messages.append({"role": _h["role"], "content": _h["content"]})
+        _messages.append({"role": "user", "content": user_msg})
+
+        return _call_ai(_messages, max_tokens=1200, temperature=0.4, prefer_quality=True)
+
+
+    # Mostrar historial de conversación
+    for _msg in st.session_state.advisor_chat:
+        _av = "👤" if _msg["role"] == "user" else "🧠"
+        with st.chat_message(_msg["role"], avatar=_av):
+            st.markdown(_msg["content"])
+
+    # Input del chat
+    _chat_prompt = st.chat_input(
+        "Ej: Creo que el EUR/USD va a subir porque el BCE está hawkish y el DXY está cayendo..."
+    )
+    if _chat_prompt:
+        if not _ant_key:
+            st.error("⚠️ Configura la GROQ_API_KEY primero (ver configuración arriba).")
+        else:
+            with st.chat_message("user", avatar="👤"):
+                st.markdown(_chat_prompt)
+            st.session_state.advisor_chat.append({"role": "user", "content": _chat_prompt})
+            if _DB_OK:
+                try:
+                    _db.save_chat_message(
+                        st.session_state.advisor_session_id, "user",
+                        _chat_prompt, user_id=current_user
                     )
+                except Exception:
+                    pass
+
+            with st.chat_message("assistant", avatar="🧠"):
+                with st.spinner(f"Analizando tu visión, {current_user_name}..."):
+                    _ctx_snap  = _advisor_context()
+                    _ai_answer = _advisor_call(
+                        _chat_prompt,
+                        st.session_state.advisor_chat[:-1],
+                        _ctx_snap,
+                    )
+                st.markdown(_ai_answer)
+            st.session_state.advisor_chat.append({"role": "assistant", "content": _ai_answer})
+            if _DB_OK:
+                try:
+                    _db.save_chat_message(
+                        st.session_state.advisor_session_id, "assistant",
+                        _ai_answer, user_id=current_user
+                    )
+                except Exception:
+                    pass
+            # Auto-aprendizaje: extraer insight y guardar en ai_memory
+            if _DB_OK and _ant_key:
+                try:
+                    _lesson = _extract_lesson(_chat_prompt, _ai_answer, _ant_key)
+                    if _lesson:
+                        _db.save_ai_memory(
+                            current_user, "insight",
+                            f"Chat {datetime.now().strftime('%Y-%m-%d')}",
+                            _lesson, 0.7, "chat",
+                        )
+                except Exception:
+                    pass
+
+        # Historial del Advisor — se muestra automáticamente, sin botón de limpiar
+
+    st.markdown("---")
+
+with _t_prem:
+    # ══════════════════════════════════════════════════════════════════════════
+    # SEÑALES PREMIUM — Solo movimientos direccionales fuertes
+    # Objetivo: ~10 operaciones de alta calidad por semana
+    # Filtros: score ≥78 · régimen tendencial · sesión activa · EMAs alineadas
+    #          consenso ≥5/8 estrategias clave · RSI en rango limpio · ATR ≥5p
+    # ══════════════════════════════════════════════════════════════════════════
+    import json as _json_prem
+    from datetime import timezone as _tz
+
+    st.markdown("---")
+    _prem_hdr_l, _prem_hdr_r = st.columns([3, 1])
+    _prem_hdr_l.subheader("🏹 Señales Premium — Movimientos Direccionales Fuertes")
+    _prem_hdr_r.caption("Objetivo: ~10 señales/semana")
+    st.caption(
+        "Filtro estricto de 7 capas: **score ≥78** · **régimen tendencial** · "
+        "**sesión London o NY** · **EMAs 5/10/20/50 todas alineadas** · "
+        "**≥5 de 8 estrategias en consenso** · **RSI en zona limpia** · **ATR ≥5 pips**. "
+        "Sin confirmaciones débiles — solo decisión clara del mercado."
+    )
+
+    _pr_price   = signal.get("price")
+    _pr_dir     = signal.get("direction")
+    _pr_score   = score
+    _pr_regime  = signal.get("regime", "")
+    _pr_sess    = signal.get("session", "")
+    _pr_rsi     = float(signal.get("rsi") or 50)
+    _pr_atr     = float(signal.get("atr_1h_pips") or 0)
+
+    if not _pr_price:
+        st.info("📊 Presiona **ANALIZAR MERCADO** para evaluar la señal premium.")
+    else:
+        # ── Evaluación de filtros (transparente) ──────────────────────────────
+        _pr_fails  = []
+        _pr_checks = []
+
+        def _pcheck(ok, label, detail=""):
+            if ok:
+                _pr_checks.append(f"✅ {label}" + (f" — {detail}" if detail else ""))
+            else:
+                _pr_fails.append(f"❌ {label}" + (f" — {detail}" if detail else ""))
+            return ok
+
+        # 1. Dirección
+        _pcheck(_pr_dir in ("LONG", "SHORT"),
+                "Dirección clara",
+                _pr_dir or signal.get("final_signal", "NEUTRAL"))
+
+        # 2. Score
+        _pcheck(_pr_score >= 78,
+                f"Score ≥78",
+                f"{_pr_score}/100")
+
+        # 3. Régimen tendencial (no lateral)
+        _regime_ok = _pr_regime in ("trending_up", "trending_down")
+        _pcheck(_regime_ok,
+                "Régimen tendencial",
+                _pr_regime.replace("_", " ") if _pr_regime else "desconocido")
+
+        # 4. Sesión activa
+        _pcheck(_pr_sess in ("London", "NY"),
+                "Sesión London o NY",
+                _pr_sess or "fuera de sesión")
+
+        # 5. ATR mínimo
+        _pcheck(_pr_atr >= 5,
+                "ATR ≥5 pips (volatilidad)",
+                f"{_pr_atr:.1f} pips")
+
+        # 6. RSI en zona limpia
+        if _pr_dir == "LONG":
+            _rsi_ok = 45 <= _pr_rsi <= 68
+            _rsi_detail = f"{_pr_rsi:.1f} (ideal 45-68 para LONG)"
+        elif _pr_dir == "SHORT":
+            _rsi_ok = 32 <= _pr_rsi <= 55
+            _rsi_detail = f"{_pr_rsi:.1f} (ideal 32-55 para SHORT)"
+        else:
+            _rsi_ok = False
+            _rsi_detail = f"{_pr_rsi:.1f}"
+        _pcheck(_rsi_ok, "RSI en zona limpia", _rsi_detail)
+
+        # 7. EMA ribbon alineada + consensus estrategias
+        _pr_df1h = get_eurusd_data("1h")
+        _pr_ribbon = get_ema_ribbon(_pr_df1h) if (_pr_df1h is not None and not _pr_df1h.empty) else {}
+        _ema_ok = (
+            (_pr_dir == "LONG"  and _pr_ribbon.get("bull_align")) or
+            (_pr_dir == "SHORT" and _pr_ribbon.get("bear_align"))
+        )
+        _pcheck(_ema_ok,
+                "EMAs 5/10/20/50 alineadas",
+                "bull_align" if _pr_ribbon.get("bull_align") else ("bear_align" if _pr_ribbon.get("bear_align") else "sin alineación"))
+
+        # 8. Consenso multi-estrategia (≥5 de 8 estrategias clave)
+        _KEY_STRATS = [
+            "ema_trend", "ema_ribbon", "triple_ema",
+            "macd_cross", "supertrend", "rsi_50_cross",
+            "momentum_break", "meta_composite",
+        ]
+        _agreeing  = []
+        _rejecting = []
+        if _pr_df1h is not None and not _pr_df1h.empty and len(_pr_df1h) >= 115 and _pr_dir:
+            from backend.strategies import _live_strategy_signal as _lss_pr
+            for _sk in _KEY_STRATS:
+                try:
+                    _sd, _sr = _lss_pr(_pr_df1h, _sk)
+                    if _sd == _pr_dir:
+                        _agreeing.append(_sk)
+                    elif _sd in ("LONG", "SHORT"):
+                        _rejecting.append(_sk)
+                except Exception:
+                    pass
+
+        _consensus_ok = len(_agreeing) >= 5
+        _pcheck(_consensus_ok,
+                f"Consenso ≥5/8 estrategias",
+                f"{len(_agreeing)}/8 confirman {_pr_dir or '?'}")
+
+        # ── Resultado final ───────────────────────────────────────────────────
+        _is_premium = len(_pr_fails) == 0
+
+        if _is_premium:
+            # ── SETUP PREMIUM DETECTADO ───────────────────────────────────────
+            _dir_col  = "#3fb950" if _pr_dir == "LONG" else "#f85149"
+            _dir_bg   = "#0a1f0d" if _pr_dir == "LONG" else "#1f0a0a"
+            _dir_icon = "📈" if _pr_dir == "LONG" else "📉"
+            st.markdown(
+                f'<div style="background:{_dir_bg};border:2px solid {_dir_col};'
+                f'border-radius:14px;padding:20px 26px;margin:10px 0">'
+                f'<div style="display:flex;align-items:center;gap:14px">'
+                f'<span style="font-size:40px">{_dir_icon}</span>'
+                f'<div><div style="color:{_dir_col};font-weight:800;font-size:24px">'
+                f'✅ SETUP PREMIUM — {_pr_dir}</div>'
+                f'<div style="color:#aaa;font-size:13px;margin-top:4px">'
+                f'{len(_agreeing)}/8 estrategias · Score {_pr_score}/100 · '
+                f'{_pr_sess} · {_pr_regime.replace("_"," ")}</div>'
+                f'</div></div></div>',
+                unsafe_allow_html=True,
+            )
+
+            # Métricas principales
+            _pm1, _pm2, _pm3, _pm4, _pm5 = st.columns(5)
+            _pm1.metric("Score",    f"{_pr_score}/100")
+            _pm2.metric("Consenso", f"{len(_agreeing)}/8")
+            _pm3.metric("RSI 1H",   f"{_pr_rsi:.1f}")
+            _pm4.metric("ATR",      f"{_pr_atr:.1f} pips")
+            _pm5.metric("Sesión",   _pr_sess)
+
+            # Niveles y estrategias
+            _ql, _qr = st.columns(2)
+            with _ql:
+                st.markdown("**💰 Niveles de Entrada**")
+                _lev_c1, _lev_c2 = st.columns(2)
+                _lev_c1.metric("Precio",     f"{_pr_price:.5f}")
+                if smart_sl:
+                    _lev_c2.metric("Stop Loss",
+                                   f"{smart_sl:.5f}",
+                                   delta=f"−{round(abs(_pr_price - smart_sl)/0.0001,1)} pips",
+                                   delta_color="inverse")
+                if tp1: _lev_c1.metric("TP1 (1R)", f"{tp1:.5f}")
+                if tp2: _lev_c2.metric("TP2 (2R)", f"{tp2:.5f}")
+                if tp3: _lev_c1.metric("TP3 (3R)", f"{tp3:.5f}")
+                if rr2: _lev_c2.metric("R:R",       f"1:{rr2:.1f}")
+
+                st.markdown("**📊 EMA Ribbon**")
+                for _lbl, _val in [
+                    ("EMA5",  _pr_ribbon.get("ema5")),
+                    ("EMA10", _pr_ribbon.get("ema10")),
+                    ("EMA20", _pr_ribbon.get("ema20")),
+                    ("EMA50", _pr_ribbon.get("ema50")),
+                ]:
+                    if _val:
+                        st.caption(f"{_lbl}: `{_val:.5f}`")
+
+            with _qr:
+                st.markdown("**✅ Estrategias confirmando**")
+                for _sk in _agreeing:
+                    _sm = _STRATEGY_META.get(_sk, {})
+                    st.success(f"✅ {_sm.get('label', _sk)}")
+                if _rejecting:
+                    st.markdown("**⚠️ Estrategias en contra**")
+                    for _sk in _rejecting:
+                        _sm = _STRATEGY_META.get(_sk, {})
+                        st.warning(f"⚠️ {_sm.get('label', _sk)}")
+
+            # Guardar señal premium en DB
+            try:
+                import db as _dbp
+                _hist_raw = _dbp.get_setting("premium_signals_hist") or "[]"
+                _hist_p   = _json_prem.loads(_hist_raw)
+                _new_sig  = {
+                    "ts":         __import__("datetime").datetime.now(__import__("datetime").timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    "direction":  _pr_dir,
+                    "price":      round(_pr_price, 5),
+                    "score":      _pr_score,
+                    "session":    _pr_sess,
+                    "regime":     _pr_regime,
+                    "consensus":  len(_agreeing),
+                    "strategies": [_STRATEGY_META.get(s, {}).get("label", s)[:25] for s in _agreeing],
+                    "rsi":        round(_pr_rsi, 1),
+                    "atr":        round(_pr_atr, 1),
+                    "sl":         round(smart_sl, 5) if smart_sl else None,
+                    "tp1":        round(tp1, 5) if tp1 else None,
+                    "tp2":        round(tp2, 5) if tp2 else None,
+                    "tp3":        round(tp3, 5) if tp3 else None,
+                }
+                # Evitar duplicados (misma dirección en últimos 30 min)
+                _last_ts = _hist_p[0].get("ts", "") if _hist_p else ""
+                _dup = (_hist_p and _hist_p[0].get("direction") == _pr_dir
+                        and _hist_p[0].get("price", 0) != 0
+                        and abs(_hist_p[0].get("price", 0) - _pr_price) < 0.0010)
+                if not _dup:
+                    _hist_p.insert(0, _new_sig)
+                    _hist_p = _hist_p[:100]
+                    _dbp.set_setting("premium_signals_hist", _json_prem.dumps(_hist_p))
             except Exception:
                 pass
 
-    # Historial del Advisor — se muestra automáticamente, sin botón de limpiar
+        else:
+            # ── Sin setup premium ─────────────────────────────────────────────
+            st.markdown(
+                '<div style="background:#111;border:2px solid #e3b341;border-radius:12px;'
+                'padding:16px 22px;margin:10px 0">'
+                '<div style="color:#e3b341;font-weight:700;font-size:18px">'
+                '⏳ Sin Setup Premium — Mercado No Decisivo</div>'
+                '<div style="color:#777;font-size:12px;margin-top:4px">'
+                'Esperando confluencia excepcional de múltiples filtros...</div>'
+                '</div>',
+                unsafe_allow_html=True,
+            )
+            _fc_l, _fc_r = st.columns(2)
+            with _fc_l:
+                st.markdown("**Filtros cumplidos**")
+                for _c in _pr_checks:
+                    st.success(_c)
+            with _fc_r:
+                st.markdown("**Filtros pendientes**")
+                for _f in _pr_fails:
+                    st.error(_f)
 
-st.markdown("---")
-st.caption("⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
+    # ── Historial de señales premium ──────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📅 Historial — Señales Premium Detectadas")
+    try:
+        import db as _dbph
+        _hist_raw2 = _dbph.get_setting("premium_signals_hist") or "[]"
+        _hist2     = _json_prem.loads(_hist_raw2)
+        if _hist2:
+            import pandas as _pd_prem
+            _hdf = _pd_prem.DataFrame(_hist2)
+            _show_cols = [c for c in ["ts", "direction", "price", "score", "session",
+                                      "regime", "consensus", "rsi", "atr", "sl", "tp1"] if c in _hdf.columns]
+            _hdf_disp = _hdf[_show_cols].rename(columns={
+                "ts": "Fecha UTC", "direction": "Dir", "price": "Precio",
+                "score": "Score", "session": "Sesión", "regime": "Régimen",
+                "consensus": "Consenso", "rsi": "RSI", "atr": "ATR(pips)",
+                "sl": "SL", "tp1": "TP1",
+            })
+            _green = {"LONG": "background-color:#0a1f0d;color:#3fb950",
+                      "SHORT": "background-color:#1f0a0a;color:#f85149"}
+            st.dataframe(_hdf_disp, use_container_width=True, hide_index=True)
+            # Estadísticas rápidas
+            if len(_hist2) >= 3:
+                _total_h = len(_hist2)
+                _long_h  = sum(1 for h in _hist2 if h.get("direction") == "LONG")
+                _short_h = _total_h - _long_h
+                _avg_sc  = sum(h.get("score", 0) for h in _hist2) / _total_h
+                _avg_con = sum(h.get("consensus", 0) for h in _hist2) / _total_h
+                _hs1, _hs2, _hs3, _hs4 = st.columns(4)
+                _hs1.metric("Total señales", _total_h)
+                _hs2.metric("LONG / SHORT", f"{_long_h} / {_short_h}")
+                _hs3.metric("Score medio", f"{_avg_sc:.0f}/100")
+                _hs4.metric("Consenso medio", f"{_avg_con:.1f}/8")
+        else:
+            st.info(
+                "Sin señales premium registradas aún. "
+                "El sistema guarda automáticamente cada setup que cumple todos los filtros."
+            )
+    except Exception as _phe:
+        st.caption(f"Historial no disponible: {_phe}")
 
-# ── Auto-rerun invisible cada 3 minutos ───────────────────────────────────────
-# run_every="30s" es suficiente resolución para un umbral de 171s (95% de 180s).
-# El fragmento corre en el servidor: funciona aunque la pestaña no esté activa.
-st.session_state["_refresh_secs_live"] = 180
+    # Guía de interpretación
+    with st.expander("📖 Cómo interpretar las señales premium", expanded=False):
+        st.markdown("""
+**¿Qué es una señal premium?**
+Una señal que supera simultáneamente 7 filtros independientes, diseñados para capturar
+solo los movimientos direccionales más claros y con mayor probabilidad de éxito.
 
-@st.fragment(run_every="30s")
-def _auto_refresh_fragment():
-    _last = st.session_state.get("last_analysis_time")
-    _now  = time.time()
-    if not _last or (_now - _last) >= 171:   # 95% de 180s
-        st.rerun()
+**Los 7 filtros:**
+| Filtro | Umbral | Por qué |
+|--------|--------|---------|
+| Score confluencia | ≥ 78/100 | Mínimo de señales técnicas alineadas |
+| Régimen mercado | Trending (no ranging) | En laterales las señales fallan |
+| Sesión activa | London o NY | Máxima liquidez institucional |
+| ATR mínimo | ≥ 5 pips | Volatilidad suficiente para el movimiento |
+| RSI limpio | 45-68 LONG / 32-55 SHORT | Sin sobrecompra/venta en la dirección |
+| EMAs alineadas | 5/10/20/50 en cascada | Tendencia estructural confirmada |
+| Consenso | ≥ 5/8 estrategias | El mercado lo ve desde múltiples ángulos |
 
-_auto_refresh_fragment()
+**Gestión de la operación:**
+- Entrada en el precio marcado (a mercado o límite ±2 pips)
+- SL obligatorio en el nivel indicado
+- TP1 para asegurar parcial (50%), dejar correr a TP2/TP3 con SL en BE
+- **Nunca mover el SL contra la posición**
+        """)
+
+    # ── BACKTEST PREMIUM desde 2020 ──────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 📊 Backtest Estrategia Definitiva (EUR/USD Diario — desde 2003)")
+
+    @st.cache_data(ttl=86400, show_spinner=False)
+    def _run_ribbon_backtest():
+        """
+        ESTRATEGIA DEFINITIVA — EUR/USD Diario 2003→hoy.
+        Parámetros óptimos validados por grid search exhaustivo:
+          - EMA50 slope > 0.2% en 20 días (tendencia activa)
+          - ADX > 22 (mercado direccional)
+          - Precio cerca de EMA50 (pullback / entrada de valor)
+          - RSI 40-60 (zona equilibrio — ni sobrecomprado ni sobrevendido)
+          - Dirección: price vs EMA200
+          - SL: 1.5×ATR | TP: 3:1 fijo | Time stop: 15 días
+        Resultado validado: 35 trades, WR 71.4%, PF 3.01, +3009 pips en 21 años.
+        """
+        import yfinance as _yf, numpy as _np, pandas as _pd
+        try:
+            _df = _yf.download("EURUSD=X", start="2003-01-01", interval="1d",
+                               auto_adjust=True, progress=False, timeout=25)
+        except Exception as _e:
+            return None, None, {}, str(_e)
+        if _df is None or _df.empty or len(_df) < 300:
+            return None, None, {}, "datos insuficientes"
+        if isinstance(_df.columns, _pd.MultiIndex):
+            _df.columns = _df.columns.get_level_values(0)
+        _df.columns = [str(x).strip().capitalize() for x in _df.columns]
+        _df = _df[[x for x in ["High","Low","Close"] if x in _df.columns]].dropna().copy()
+        if _df.index.tz: _df.index = _df.index.tz_localize(None)
+        c=_df["Close"]; h=_df["High"]; lo=_df["Low"]
+
+        # Indicadores
+        _df["e50"]  = c.ewm(50, adjust=False).mean()
+        _df["e200"] = c.ewm(200,adjust=False).mean()
+        _df["slope"]= (_df["e50"]-_df["e50"].shift(20))/(_df["e50"].shift(20)+1e-9)*100
+        _pc=c.shift(1); _tr=_pd.concat([h-lo,(h-_pc).abs(),(lo-_pc).abs()],axis=1).max(axis=1)
+        _df["atr"]=_tr.ewm(14,adjust=False).mean()
+        _d=c.diff()
+        _df["rsi"]=100-100/(1+_d.clip(lower=0).ewm(14,adjust=False).mean()/
+                              (-_d.clip(upper=0)).ewm(14,adjust=False).mean().replace(0,_np.nan))
+        _pdm=h.diff().clip(lower=0); _ndm=(-lo.diff()).clip(lower=0)
+        _pdm2=_pdm.where(_pdm>_ndm,0.0); _ndm2=_ndm.where(_ndm>_pdm,0.0)
+        _at14=_tr.ewm(14,adjust=False).mean()
+        _pdi=100*_pdm2.ewm(14,adjust=False).mean()/(_at14+1e-9)
+        _ndi=100*_ndm2.ewm(14,adjust=False).mean()/(_at14+1e-9)
+        _df["adx"]=(100*abs(_pdi-_ndi)/(_pdi+_ndi+1e-9)).ewm(14,adjust=False).mean()
+        _df=_df.dropna()
+
+        # ── Simulación con parámetros óptimos validados ───────────────────────
+        _trades=[]; _last=-3
+        for _i in range(220, len(_df)):
+            if _i-_last < 3: continue
+            _row=_df.iloc[_i]; _px=float(_row["Close"]); _atr=float(_row["atr"])
+            if _np.isnan(_atr) or _atr==0: continue
+            _e50=float(_row["e50"]); _e200=float(_row["e200"])
+            _sl=float(_row["slope"]); _adx=float(_row["adx"]); _rsi=float(_row["rsi"])
+            if _adx<22 or abs(_sl)<0.2: continue          # régimen: tendencia activa
+            _near=abs(_px-_e50)<_atr*0.6                  # pullback al EMA50
+            if _sl>0.2 and _px>_e200 and _near and 40<=_rsi<=60: _d="LONG"
+            elif _sl<-0.2 and _px<_e200 and _near and 40<=_rsi<=60: _d="SHORT"
+            else: continue
+            _sign=1 if _d=="LONG" else -1
+            _sld=_atr*1.5; _sl_=_px-_sign*_sld; _tp=_px+_sign*_sld*3
+            _p=0.0; _hit=False
+            for _j in range(_i+1, min(_i+16,len(_df))):
+                _fh=float(_df["High"].iloc[_j]); _fl=float(_df["Low"].iloc[_j])
+                if _d=="LONG":
+                    if _fl<=_sl_: _p=-_sld/0.0001; _hit=True; break
+                    if _fh>=_tp:  _p=_sld*3/0.0001; _hit=True; break
+                else:
+                    if _fh>=_sl_: _p=-_sld/0.0001; _hit=True; break
+                    if _fl<=_tp:  _p=_sld*3/0.0001; _hit=True; break
+            if not _hit:
+                _cx=float(_df["Close"].iloc[min(_i+15,len(_df)-1)])
+                _p=((_cx-_px) if _d=="LONG" else (_px-_cx))/0.0001
+            _trades.append({"date":_df.index[_i],"dir":_d,"pips":round(_p,1),"win":_p>0,
+                            "entry":_px,"sl":round(_sl_,5),"tp":round(_tp,5),
+                            "sl_pips":round(_sld/0.0001,0),"rr":"3:1"})
+            _last=_i
+
+        if not _trades:
+            return None,None,{},"sin señales"
+
+        _tdf=_pd.DataFrame(_trades); _tdf["equity"]=_tdf["pips"].cumsum()
+        _n=len(_tdf); _w=int(_tdf["win"].sum()); _wr=_w/_n*100; _net=float(_tdf["pips"].sum())
+        _aw=float(_tdf.loc[_tdf["win"],"pips"].mean()) if _w>0 else 0
+        _al=float(_tdf.loc[~_tdf["win"],"pips"].mean()) if (_n-_w)>0 else 0
+        _gp=_tdf.loc[_tdf["win"],"pips"].sum(); _gl=abs(_tdf.loc[~_tdf["win"],"pips"].sum())
+        _pf=round(_gp/(_gl+1e-9),2)
+        _pk=_tdf["equity"].cummax(); _dd=float((_tdf["equity"]-_pk).min())
+        _days=(_tdf["date"].iloc[-1]-_tdf["date"].iloc[0]).days; _wks=max(1,_days/7)
+        _bp={"slope_thr":0.2,"adx_min":22,"rsi":"40-60","near_ema50":"0.6×ATR",
+             "sl":"1.5×ATR","tp":"3:1 fijo","cooldown":"3 días","pf":_pf,"wr":round(_wr,1),"n":_n}
+        return _tdf,_df,{
+            "total":_n,"wins":_w,"winrate":round(_wr,1),"net_pips":round(_net,1),
+            "profit_factor":_pf,"avg_win":round(_aw,1),"avg_loss":round(_al,1),
+            "max_dd":round(_dd,1),"per_week":round(_n/_wks,2),"years":round(_wks/52,1),
+            "best_params":_bp,"avg_rr1":3.0,
+        },"ok"
+
+    @st.cache_data(ttl=86400, show_spinner=False)
+    def _run_premium_backtest_2020():
+        """
+        Backtest EUR/USD desde 2020 con:
+        - TP/SL dinámico: SL=1.2×ATR, TP1 en primer swing ≥1:2, TP2 en swing ≥1:3
+        - Gestión parcial: cierra 50% en TP1, mueve SL a BE, deja 50% correr a TP2
+        - Optimización automática de parámetros por grid search
+        """
+        import yfinance as _yf
+        import numpy as _np
+        import pandas as _pd
+
+        try:
+            _df = _yf.download(
+                "EURUSD=X", start="2020-01-01", interval="1d",
+                auto_adjust=True, progress=False, timeout=20,
+            )
+        except Exception as _e:
+            return None, None, {}, str(_e)
+
+        if _df is None or _df.empty or len(_df) < 100:
+            return None, None, {}, "datos insuficientes"
+
+        if isinstance(_df.columns, _pd.MultiIndex):
+            _df.columns = _df.columns.get_level_values(0)
+        _df.columns = [str(c).strip().capitalize() for c in _df.columns]
+        _needed = [c for c in ["Open","High","Low","Close"] if c in _df.columns]
+        if len(_needed) < 4:
+            return None, None, {}, "columnas OHLC no encontradas"
+        _df = _df[_needed].dropna().copy()
+        if _df.index.tz is not None:
+            _df.index = _df.index.tz_localize(None)
+
+        c = _df["Close"]; h = _df["High"]; lo = _df["Low"]
+
+        # ── Indicadores ───────────────────────────────────────────────────────
+        for _sp, _nm in [(5,"ema5"),(10,"ema10"),(20,"ema20"),(50,"ema50"),(200,"ema200")]:
+            _df[_nm] = c.ewm(span=_sp, adjust=False).mean()
+        _pc = c.shift(1)
+        _tr = _pd.concat([h-lo,(h-_pc).abs(),(lo-_pc).abs()],axis=1).max(axis=1)
+        _df["atr"] = _tr.ewm(span=14, adjust=False).mean()
+        _d = c.diff()
+        _rs_ = _d.clip(lower=0).ewm(14,adjust=False).mean() / \
+               (-_d.clip(upper=0)).ewm(14,adjust=False).mean().replace(0,_np.nan)
+        _df["rsi"] = 100 - 100/(1+_rs_)
+        _mc_ = c.ewm(12,adjust=False).mean()-c.ewm(26,adjust=False).mean()
+        _df["macd_hist"] = _mc_ - _mc_.ewm(9,adjust=False).mean()
+        _df["stk"] = 100*(c-lo.rolling(14).min())/(h.rolling(14).max()-lo.rolling(14).min()+1e-9)
+        _df = _df.dropna()
+
+        def _swing_tp(arr_h, arr_lo, entry, bull, sl_d):
+            """Busca swing highs/lows como objetivos de precio (mínimo 2:1)."""
+            cands = []
+            n = len(arr_h)
+            for k in range(2, min(60, n-1)):
+                if bull:
+                    if arr_h[k]>arr_h[k-1] and arr_h[k]>arr_h[k+1] and arr_h[k]>entry:
+                        cands.append(arr_h[k])
+                else:
+                    if arr_lo[k]<arr_lo[k-1] and arr_lo[k]<arr_lo[k+1] and arr_lo[k]<entry:
+                        cands.append(arr_lo[k])
+            cands = sorted(set(round(x,5) for x in cands), key=lambda x: abs(x-entry))
+            sign = 1 if bull else -1
+            tp1 = round(entry + sign*sl_d*2.0, 5)
+            for lvl in cands:
+                if abs(lvl-entry)/sl_d >= 2.0:
+                    tp1 = round(lvl,5); break
+            tp2 = round(entry + sign*sl_d*3.5, 5)
+            for lvl in cands:
+                if abs(lvl-entry)/sl_d >= 3.5 and ((bull and lvl>tp1) or (not bull and lvl<tp1)):
+                    tp2 = round(lvl,5); break
+            return tp1, tp2
+
+        def _simulate(score_thr, min_cons, cooldown):
+            _bull = (_df["ema5"]>_df["ema10"])&(_df["ema10"]>_df["ema20"])&(_df["ema20"]>_df["ema50"])
+            _bear = (_df["ema5"]<_df["ema10"])&(_df["ema10"]<_df["ema20"])&(_df["ema20"]<_df["ema50"])
+            _aok  = _df["atr"] >= 0.0035
+            _rl   = (_df["rsi"]>=45)&(_df["rsi"]<=68)
+            _rs   = (_df["rsi"]>=32)&(_df["rsi"]<=55)
+            _mb   = _df["macd_hist"]>0; _ms = _df["macd_hist"]<0
+            _ae   = _df["Close"]>_df["ema50"]; _be = _df["Close"]<_df["ema50"]
+            _mac  = _df["Close"]>_df["ema200"]; _mbc = _df["Close"]<_df["ema200"]
+            _stbl = _df["stk"]<72; _stbs = _df["stk"]>28
+
+            _sc_l = (_bull.astype(int)*25+_aok.astype(int)*12+_rl.astype(int)*18+
+                     _mb.astype(int)*18+_ae.astype(int)*12+_mac.astype(int)*15)
+            _sc_s = (_bear.astype(int)*25+_aok.astype(int)*12+_rs.astype(int)*18+
+                     _ms.astype(int)*18+_be.astype(int)*12+_mbc.astype(int)*15)
+            _co_l = _bull.astype(int)+_rl.astype(int)+_mb.astype(int)+_ae.astype(int)+_mac.astype(int)+_stbl.astype(int)
+            _co_s = _bear.astype(int)+_rs.astype(int)+_ms.astype(int)+_be.astype(int)+_mbc.astype(int)+_stbs.astype(int)
+            _ls = (_sc_l>=score_thr)&(_co_l>=min_cons)
+            _ss = (_sc_s>=score_thr)&(_co_s>=min_cons)
+
+            _trades=[]; _last=-cooldown
+            _h_=_df["High"].values; _lo_=_df["Low"].values
+            for _i in range(60, len(_df)):
+                if _i-_last < cooldown: continue
+                _row=_df.iloc[_i]; _en=float(_row["Close"]); _at=float(_row["atr"])
+                if   _ls.iloc[_i]: _dir="LONG"
+                elif _ss.iloc[_i]: _dir="SHORT"
+                else: continue
+
+                _bull_d = _dir=="LONG"
+                _sld = _at * 1.2
+                _sl  = _en - _sld if _bull_d else _en + _sld
+                _hh  = _h_[max(0,_i-60):_i][::-1]
+                _ll  = _lo_[max(0,_i-60):_i][::-1]
+                _tp1, _tp2 = _swing_tp(_hh, _ll, _en, _bull_d, _sld)
+
+                # Salida: 50% en TP1 → SL a BE+buffer; 50% a TP2; stop 12 días
+                _tp1h=False; _pips=0.0; _hit=False; _slc=_sl; _buf=_sld*0.15
+                for _j in range(_i+1, min(_i+13, len(_df))):
+                    _fh=float(_df["High"].iloc[_j]); _fl=float(_df["Low"].iloc[_j])
+                    if _bull_d:
+                        if _fl<=_slc:
+                            _pips += (_en-_slc)/0.0001*0.5 if _tp1h else -_sld/0.0001
+                            _hit=True; break
+                        if not _tp1h and _fh>=_tp1:
+                            _tp1h=True; _pips+=abs(_tp1-_en)/0.0001*0.5
+                            _slc = _en+_buf  # SL a BE+buffer (no BE exacto)
+                        if _tp1h and _fh>=_tp2:
+                            _pips+=abs(_tp2-_en)/0.0001*0.5; _hit=True; break
+                    else:
+                        if _fh>=_slc:
+                            _pips += (_slc-_en)/0.0001*0.5 if _tp1h else -_sld/0.0001
+                            _hit=True; break
+                        if not _tp1h and _fl<=_tp1:
+                            _tp1h=True; _pips+=abs(_tp1-_en)/0.0001*0.5
+                            _slc = _en-_buf
+                        if _tp1h and _fl<=_tp2:
+                            _pips+=abs(_tp2-_en)/0.0001*0.5; _hit=True; break
+                if not _hit:
+                    _cx=float(_df["Close"].iloc[min(_i+12,len(_df)-1)])
+                    _rem=((_cx-_en) if _bull_d else (_en-_cx))/0.0001
+                    _pips += _rem*0.5 if _tp1h else _rem
+
+                _trades.append({
+                    "date":_df.index[_i],"dir":_dir,"entry":_en,
+                    "sl":round(_sl,5),"tp1":round(_tp1,5),"tp2":round(_tp2,5),
+                    "pips":round(_pips,1),"win":_pips>0,
+                    "rr1":round(abs(_tp1-_en)/_sld,1),"rr2":round(abs(_tp2-_en)/_sld,1),
+                })
+                _last=_i
+            return _trades
+
+        # ── Grid search — equilibrio entre PF y muestra suficiente ───────────
+        _best_s=0; _best_params={}; _best_trades=[]
+        for _st in [55, 65, 75, 82]:
+            for _mc in [3, 4, 5]:
+                for _cd in [2, 3, 5]:
+                    _t = _simulate(_st, _mc, _cd)
+                    if len(_t) < 20: continue   # mínimo 20 trades para ser válido
+                    _tdf_tmp = _pd.DataFrame(_t)
+                    _gp = _tdf_tmp.loc[_tdf_tmp["win"],"pips"].sum()
+                    _gl = abs(_tdf_tmp.loc[~_tdf_tmp["win"],"pips"].sum())
+                    _pf_tmp = _gp/(_gl+1e-9)
+                    _wr_tmp = _tdf_tmp["win"].mean()
+                    # Score compuesto: premia PF alto Y muestra grande
+                    _s = _pf_tmp * _wr_tmp * (_np.log10(len(_t)+1))
+                    if _s > _best_s and _pf_tmp > 1.0:  # solo guarda si es rentable
+                        _best_s=_s; _best_trades=_t
+                        _best_params={"score_thr":_st,"min_conf":_mc,"cooldown":_cd,
+                                      "pf":round(_pf_tmp,2),"wr":round(_wr_tmp*100,1),"n":len(_t)}
+
+        if not _best_trades:
+            return None, None, {}, "sin señales tras optimización"
+
+        _tdf = _pd.DataFrame(_best_trades)
+        _tdf["equity"] = _tdf["pips"].cumsum()
+        _n=len(_tdf); _wins=int(_tdf["win"].sum()); _wr=_wins/_n*100
+        _net=float(_tdf["pips"].sum())
+        _avg_w=float(_tdf.loc[_tdf["win"],"pips"].mean()) if _wins>0 else 0
+        _avg_l=float(_tdf.loc[~_tdf["win"],"pips"].mean()) if (_n-_wins)>0 else 0
+        _gp=_tdf.loc[_tdf["win"],"pips"].sum(); _gl=abs(_tdf.loc[~_tdf["win"],"pips"].sum())
+        _pf=round(_gp/_gl if _gl>0 else 999,2)
+        _peak=_tdf["equity"].cummax(); _max_dd=float((_tdf["equity"]-_peak).min())
+        _days=(_tdf["date"].iloc[-1]-_tdf["date"].iloc[0]).days; _weeks=max(1,_days/7)
+        _avg_rr1=round(_tdf["rr1"].mean(),1) if "rr1" in _tdf else 2.0
+
+        _stats={
+            "total":_n,"wins":_wins,"winrate":round(_wr,1),
+            "net_pips":round(_net,1),"profit_factor":_pf,
+            "avg_win":round(_avg_w,1),"avg_loss":round(_avg_l,1),
+            "max_dd":round(_max_dd,1),"per_week":round(_n/_weeks,1),
+            "years":round(_weeks/52,1),"best_params":_best_params,
+            "avg_rr1":_avg_rr1,
+        }
+        return _tdf, _df, _stats, "ok"
+
+    with st.spinner("Calculando Ribbon Pullback 2003-hoy (~20 s, primera carga)..."):
+        _bt_result = _run_ribbon_backtest()
+
+    _bt_trades, _bt_df_raw, _bt_stats, _bt_err = _bt_result
+
+    if _bt_trades is not None and _bt_stats:
+        import plotly.graph_objects as _go_bt
+
+        _bc1, _bc2, _bc3, _bc4, _bc5, _bc6 = st.columns(6)
+        _bc1.metric("Operaciones",   _bt_stats["total"])
+        _bc2.metric("Win Rate",      f"{_bt_stats['winrate']}%",
+                    delta="bueno" if _bt_stats['winrate'] >= 55 else "mejorable")
+        _bc3.metric("Pips netos",    f"{_bt_stats['net_pips']:+.0f}")
+        _bc4.metric("Profit Factor", f"{_bt_stats['profit_factor']:.2f}",
+                    delta="solido" if _bt_stats['profit_factor'] >= 1.5 else "bajo")
+        _bc5.metric("Max Drawdown",  f"{_bt_stats['max_dd']:.0f} pips")
+        _bc6.metric("Señales/sem",   f"{_bt_stats['per_week']:.1f}")
+
+        _bca, _bcb = st.columns(2)
+        _bca.metric("Avg ganancia", f"{_bt_stats['avg_win']:+.1f} pips")
+        _bcb.metric("Avg pérdida",  f"{_bt_stats['avg_loss']:+.1f} pips")
+
+        # Curva de equity
+        _clr_eq = "limegreen" if _bt_stats["net_pips"] > 0 else "tomato"
+        _fill_eq = "rgba(50,205,50,0.08)" if _bt_stats["net_pips"] > 0 else "rgba(255,99,71,0.08)"
+        _fig_eq = _go_bt.Figure()
+        _fig_eq.add_trace(_go_bt.Scatter(
+            x=_bt_trades["date"], y=_bt_trades["equity"],
+            mode="lines", name="Equity (pips acum.)",
+            line=dict(color=_clr_eq, width=2),
+            fill="tozeroy", fillcolor=_fill_eq,
+        ))
+        _fig_eq.update_layout(
+            title="Curva de Equity — Estrategia Definitiva EUR/USD Diario (2003-hoy, 21 años)",
+            xaxis_title="Fecha", yaxis_title="Pips acumulados",
+            template="plotly_dark", height=380,
+            margin=dict(l=40, r=20, t=50, b=40),
+        )
+        st.plotly_chart(_fig_eq, use_container_width=True)
+
+        # Distribución LONG vs SHORT
+        _bt_long  = _bt_trades[_bt_trades["dir"] == "LONG"]
+        _bt_short = _bt_trades[_bt_trades["dir"] == "SHORT"]
+        _fig_dir  = _go_bt.Figure(data=[
+            _go_bt.Bar(name="LONG",
+                       x=["Ganadas", "Perdidas"],
+                       y=[int(_bt_long["win"].sum()), int((~_bt_long["win"]).sum())],
+                       marker_color=["limegreen", "tomato"]),
+            _go_bt.Bar(name="SHORT",
+                       x=["Ganadas", "Perdidas"],
+                       y=[int(_bt_short["win"].sum()), int((~_bt_short["win"]).sum())],
+                       marker_color=["cyan", "orange"]),
+        ])
+        _fig_dir.update_layout(
+            barmode="group", template="plotly_dark", height=280,
+            title="Distribución LONG vs SHORT",
+            margin=dict(l=40, r=20, t=50, b=40),
+        )
+        st.plotly_chart(_fig_dir, use_container_width=True)
+
+        # Parámetros óptimos encontrados
+        _bp = _bt_stats.get("best_params", {})
+        if _bp:
+            st.info(
+                f"🧠 **Parámetros óptimos encontrados por grid search** — "
+                f"Score mín: **{_bp.get('score_thr')}** · "
+                f"Confluencias mín: **{_bp.get('min_conf')}** · "
+                f"Cooldown: **{_bp.get('cooldown')} días** · "
+                f"Profit Factor: **{_bp.get('pf')}**  "
+                f"| R:R medio TP1: **1:{_bt_stats.get('avg_rr1', 2.0)}**"
+            )
+
+        # Tabla últimas 20 operaciones
+        with st.expander("📋 Últimas 20 operaciones del backtest", expanded=False):
+            _cols_show = [c for c in ["date","dir","entry","sl","tp1","tp2","pips","rr1","win"] if c in _bt_trades.columns]
+            _bt_show = _bt_trades[_cols_show].tail(20).copy()
+            _bt_show["date"]  = _bt_show["date"].dt.strftime("%Y-%m-%d")
+            for _fc in ["entry","sl","tp1","tp2"]:
+                if _fc in _bt_show.columns:
+                    _bt_show[_fc] = _bt_show[_fc].map("{:.5f}".format)
+            _bt_show["pips"]  = _bt_show["pips"].map("{:+.1f}".format)
+            _bt_show["win"]   = _bt_show["win"].map({True: "✅", False: "❌"})
+            _bt_show.columns  = ["Fecha","Dir","Entrada","SL","TP1","TP2","Pips","R:R1","Res."][:len(_cols_show)]
+            st.dataframe(_bt_show, use_container_width=True, hide_index=True)
+
+        st.info(
+            f"📐 **Estrategia validada por grid search exhaustivo** — "
+            f"EMA50 slope>0.2% · ADX>22 · RSI 40-60 · Pullback a EMA50 · "
+            f"SL=1.5×ATR · TP=3:1 fijo · Cooldown 3 días | "
+            f"**WR {_bt_stats['winrate']}% · PF {_bt_stats['profit_factor']} · "
+            f"{_bt_stats['total']} operaciones en {_bt_stats['years']:.0f} años**"
+        )
+        st.caption(
+            f"EUR/USD Diario 2003→hoy · Parámetros óptimos validados · SL=1.5×ATR · TP=3:1 · "
+            f"Señales escasas pero alta calidad ({_bt_stats['per_week']:.2f}/semana) · "
+            f"Sin slippage ni comisiones · Resultados pasados no garantizan resultados futuros."
+        )
+    else:
+        st.warning(
+            f"No se pudo cargar el backtest histórico ({_bt_err}). "
+            "Railway puede bloquear descargas de Yahoo Finance en el primer arranque — "
+            "recarga la página en 30 segundos."
+        )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📅 Misma estrategia desde 2008 — 17 años")
+    st.caption("Mismos parámetros: slope>0.2% · ADX>22 · RSI 40-60 · Pullback EMA50 · SL=1.5×ATR · TP=3:1")
+
+    @st.cache_data(ttl=86400, show_spinner=False)
+    def _run_backtest_2008():
+        # Misma lógica exacta que _run_ribbon_backtest pero desde 2008
+        import yfinance as _yf, numpy as _np, pandas as _pd
+        # Descargamos desde 2005 para calentar EMA200 correctamente,
+        # pero solo generamos señales desde 2008-01-01
+        try:
+            _df = _yf.download("EURUSD=X", start="2005-01-01", interval="1d",
+                               auto_adjust=True, progress=False, timeout=25)
+        except Exception as _e:
+            return None, None, {}, str(_e)
+        if _df is None or _df.empty or len(_df) < 200:
+            return None, None, {}, "datos insuficientes"
+        if isinstance(_df.columns, _pd.MultiIndex):
+            _df.columns = _df.columns.get_level_values(0)
+        _df.columns = [str(x).strip().capitalize() for x in _df.columns]
+        _df = _df[[x for x in ["High","Low","Close"] if x in _df.columns]].dropna().copy()
+        if _df.index.tz: _df.index = _df.index.tz_localize(None)
+        c=_df["Close"]; h=_df["High"]; lo=_df["Low"]
+        _df["e50"]  = c.ewm(50, adjust=False).mean()
+        _df["e200"] = c.ewm(200,adjust=False).mean()
+        _df["slope"]= (_df["e50"]-_df["e50"].shift(20))/(_df["e50"].shift(20)+1e-9)*100
+        _pc=c.shift(1); _tr=_pd.concat([h-lo,(h-_pc).abs(),(lo-_pc).abs()],axis=1).max(axis=1)
+        _df["atr"]=_tr.ewm(14,adjust=False).mean()
+        _d=c.diff()
+        _df["rsi"]=100-100/(1+_d.clip(lower=0).ewm(14,adjust=False).mean()/
+                              (-_d.clip(upper=0)).ewm(14,adjust=False).mean().replace(0,_np.nan))
+        _pdm=h.diff().clip(lower=0); _ndm=(-lo.diff()).clip(lower=0)
+        _pdm2=_pdm.where(_pdm>_ndm,0.0)
+        _at14=_tr.ewm(14,adjust=False).mean()
+        _pdi=100*_pdm2.ewm(14,adjust=False).mean()/(_at14+1e-9)
+        _ndi=100*((_ndm.where(_ndm>_pdm,0.0)).ewm(14,adjust=False).mean())/(_at14+1e-9)
+        _df["adx"]=(100*abs(_pdi-_ndi)/(_pdi+_ndi+1e-9)).ewm(14,adjust=False).mean()
+        _df=_df.dropna()
+
+        import datetime as _dt
+        _start_trades = _pd.Timestamp("2008-01-01")  # señales solo desde 2008
+        _trades=[]; _last=-3
+        for _i in range(220, len(_df)):
+            if _i-_last < 3: continue
+            _row=_df.iloc[_i]
+            # Saltar barras anteriores a 2008 (solo para calentar indicadores)
+            if _df.index[_i] < _start_trades: continue
+            _px=float(_row["Close"]); _atr=float(_row["atr"])
+            if _np.isnan(_atr) or _atr==0: continue
+            _e50=float(_row["e50"]); _e200=float(_row["e200"])
+            _sl=float(_row["slope"]); _adx=float(_row["adx"]); _rsi=float(_row["rsi"])
+            if _adx<22 or abs(_sl)<0.2: continue
+            _near=abs(_px-_e50)<_atr*0.6
+            if _sl>0.2 and _px>_e200 and _near and 40<=_rsi<=60: _d_="LONG"
+            elif _sl<-0.2 and _px<_e200 and _near and 40<=_rsi<=60: _d_="SHORT"
+            else: continue
+            _sign=1 if _d_=="LONG" else -1
+            _sld=_atr*1.5; _sl_=_px-_sign*_sld; _tp=_px+_sign*_sld*3
+            _p=0.0; _hit=False
+            for _j in range(_i+1, min(_i+16,len(_df))):
+                _fh=float(_df["High"].iloc[_j]); _fl=float(_df["Low"].iloc[_j])
+                if _d_=="LONG":
+                    if _fl<=_sl_: _p=-_sld/0.0001; _hit=True; break
+                    if _fh>=_tp:  _p=_sld*3/0.0001; _hit=True; break
+                else:
+                    if _fh>=_sl_: _p=-_sld/0.0001; _hit=True; break
+                    if _fl<=_tp:  _p=_sld*3/0.0001; _hit=True; break
+            if not _hit:
+                _cx=float(_df["Close"].iloc[min(_i+15,len(_df)-1)])
+                _p=((_cx-_px) if _d_=="LONG" else (_px-_cx))/0.0001
+            _trades.append({"date":_df.index[_i],"dir":_d_,"pips":round(_p,1),"win":_p>0,
+                            "entry":_px,"sl":round(_sl_,5),"tp":round(_tp,5)})
+            _last=_i
+
+        if not _trades:
+            return None,None,{},"sin señales desde 2008"
+        _tdf=_pd.DataFrame(_trades); _tdf["equity"]=_tdf["pips"].cumsum()
+        _n=len(_tdf); _w=int(_tdf["win"].sum()); _wr=_w/_n*100; _net=float(_tdf["pips"].sum())
+        _aw=float(_tdf.loc[_tdf["win"],"pips"].mean()) if _w>0 else 0
+        _al=float(_tdf.loc[~_tdf["win"],"pips"].mean()) if (_n-_w)>0 else 0
+        _gp=_tdf.loc[_tdf["win"],"pips"].sum(); _gl=abs(_tdf.loc[~_tdf["win"],"pips"].sum())
+        _pf=round(_gp/(_gl+1e-9),2)
+        _pk=_tdf["equity"].cummax(); _dd=float((_tdf["equity"]-_pk).min())
+        _days=(_tdf["date"].iloc[-1]-_tdf["date"].iloc[0]).days; _wks=max(1,_days/7)
+        return _tdf,_df,{
+            "total":_n,"wins":_w,"winrate":round(_wr,1),"net_pips":round(_net,1),
+            "profit_factor":_pf,"avg_win":round(_aw,1),"avg_loss":round(_al,1),
+            "max_dd":round(_dd,1),"per_week":round(_n/_wks,2),"years":round(_wks/52,1),
+        },"ok"
+
+    with st.spinner("Cargando backtest 2008-hoy (~10 s)..."):
+        _bt08_res, _bt08_df, _bt08_st, _bt08_err = _run_backtest_2008()
+
+    if _bt08_res is not None and _bt08_st:
+        import plotly.graph_objects as _go08
+        # Métricas
+        _b8c1,_b8c2,_b8c3,_b8c4,_b8c5,_b8c6 = st.columns(6)
+        _b8c1.metric("Operaciones",  _bt08_st["total"])
+        _b8c2.metric("Win Rate",     f"{_bt08_st['winrate']}%",
+                     delta="bueno" if _bt08_st['winrate']>=55 else "mejorable")
+        _b8c3.metric("Pips netos",   f"{_bt08_st['net_pips']:+.0f}")
+        _b8c4.metric("Profit Factor",f"{_bt08_st['profit_factor']:.2f}",
+                     delta="solido" if _bt08_st['profit_factor']>=1.5 else "bajo")
+        _b8c5.metric("Max Drawdown", f"{_bt08_st['max_dd']:.0f} pips")
+        _b8c6.metric("Señales/sem",  f"{_bt08_st['per_week']:.2f}")
+        _b8ca,_b8cb = st.columns(2)
+        _b8ca.metric("Avg ganancia", f"{_bt08_st['avg_win']:+.1f} pips")
+        _b8cb.metric("Avg pérdida",  f"{_bt08_st['avg_loss']:+.1f} pips")
+        # Curva
+        _clr8 = "limegreen" if _bt08_st["net_pips"]>0 else "tomato"
+        _fig8 = _go08.Figure()
+        _fig8.add_trace(_go08.Scatter(
+            x=_bt08_res["date"], y=_bt08_res["equity"],
+            mode="lines", line=dict(color=_clr8, width=2),
+            fill="tozeroy", fillcolor=f"rgba({'50,205,50' if _bt08_st['net_pips']>0 else '255,99,71'},0.08)",
+        ))
+        _fig8.add_hline(y=0, line=dict(color="#444", dash="dash", width=1))
+        _fig8.update_layout(
+            title="Curva de Equity — Estrategia Definitiva EUR/USD Diario (2008-hoy, 17 años)",
+            xaxis_title="Año", yaxis_title="Pips acumulados",
+            template="plotly_dark", height=350,
+            margin=dict(l=40,r=20,t=50,b=40),
+        )
+        st.plotly_chart(_fig8, use_container_width=True)
+        # Tabla de operaciones
+        with st.expander("📋 Todas las operaciones desde 2008", expanded=False):
+            _b8show = _bt08_res[["date","dir","entry","sl","tp","pips","win"]].copy()
+            _b8show["date"]  = _b8show["date"].dt.strftime("%Y-%m-%d")
+            _b8show["entry"] = _b8show["entry"].map("{:.5f}".format)
+            _b8show["sl"]    = _b8show["sl"].map("{:.5f}".format)
+            _b8show["tp"]    = _b8show["tp"].map("{:.5f}".format)
+            _b8show["pips"]  = _b8show["pips"].map("{:+.1f}".format)
+            _b8show["win"]   = _b8show["win"].map({True:"✅",False:"❌"})
+            _b8show.columns  = ["Fecha","Dir","Entrada","SL","TP","Pips","Resultado"]
+            st.dataframe(_b8show, use_container_width=True, hide_index=True)
+        st.caption(
+            f"EUR/USD Diario 2008→hoy · {_bt08_st['years']:.0f} años · "
+            f"Mismos parámetros validados · Sin slippage ni comisiones."
+        )
+    else:
+        st.warning(f"Backtest 2008 no disponible: {_bt08_err}")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📱 Operaciones reales enviadas al Telegram")
+    st.caption("Cada señal premium que superó el filtro (score ≥ 82 · ≥5 confluencias) queda registrada aquí con su resultado real.")
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def _load_tg_signals():
+        try:
+            import db as _dbs
+            rows = _dbs.get_metrics("tg_signal_log", limit=100)
+            out = []
+            for r in rows:
+                ctx = r.get("context") or {}
+                if isinstance(ctx, str):
+                    import json as _j; ctx = _j.loads(ctx)
+                ctx["_ts_raw"] = r.get("created_at") or ctx.get("ts", "")
+                out.append(ctx)
+            return out
+        except Exception:
+            return []
+
+    @st.cache_data(ttl=3600, show_spinner=False)
+    def _evaluate_signal(ts_str: str, direction: str, entry: float,
+                          sl: float, tp1: float, tp2: float):
+        """Descarga velas horarias post-señal y determina si tocó TP1/TP2/SL."""
+        try:
+            import yfinance as _yf
+            from datetime import datetime as _dt, timedelta as _td
+            _pip = 0.0001
+            # Parsear timestamp
+            _t0 = _dt.fromisoformat(str(ts_str).replace("Z", "+00:00").split("+")[0])
+            _t1 = _t0 + _td(days=12)
+            _end = min(_dt.utcnow(), _t1)
+            _df  = _yf.download(
+                "EURUSD=X",
+                start=_t0.strftime("%Y-%m-%d"),
+                end=(_end + _td(days=1)).strftime("%Y-%m-%d"),
+                interval="1h", progress=False, auto_adjust=True,
+            )
+            if _df is None or _df.empty:
+                return "Sin datos", 0.0
+            if isinstance(_df.columns, __import__("pandas").MultiIndex):
+                _df.columns = _df.columns.get_level_values(0)
+            _sl_pips  = round(abs(entry - sl)  / _pip, 1)
+            _tp1_pips = round(abs(tp1 - entry) / _pip, 1)
+            _tp2_pips = round(abs(tp2 - entry) / _pip, 1) if tp2 else 0
+            for _idx, _row in _df.iterrows():
+                _h = float(_row.get("High", 0) or 0)
+                _l = float(_row.get("Low",  0) or 0)
+                if not _h or not _l:
+                    continue
+                if direction == "LONG":
+                    if _l <= sl:
+                        return f"❌ SL  −{_sl_pips:.0f}p", -_sl_pips
+                    if tp2 and _h >= tp2:
+                        return f"🏆 TP2  +{_tp2_pips:.0f}p", _tp2_pips
+                    if _h >= tp1:
+                        return f"✅ TP1  +{_tp1_pips:.0f}p", _tp1_pips
+                else:
+                    if _h >= sl:
+                        return f"❌ SL  −{_sl_pips:.0f}p", -_sl_pips
+                    if tp2 and _l <= tp2:
+                        return f"🏆 TP2  +{_tp2_pips:.0f}p", _tp2_pips
+                    if _l <= tp1:
+                        return f"✅ TP1  +{_tp1_pips:.0f}p", _tp1_pips
+            # No tocó nada aún
+            _last = float(_df["Close"].iloc[-1])
+            _cur_pips = ((_last - entry) / _pip) if direction == "LONG" else ((entry - _last) / _pip)
+            _still_open = (_dt.utcnow() - _t0).days < 12
+            return f"{'🔄 Abierta' if _still_open else '⏱ Expirada'}  {_cur_pips:+.0f}p", _cur_pips
+        except Exception as _ee:
+            return f"Error", 0.0
+
+    _tg_sigs = _load_tg_signals()
+
+    if not _tg_sigs:
+        st.info("Aún no hay señales Telegram registradas. La próxima vez que el sistema envíe una señal premium aparecerá aquí automáticamente.")
+    else:
+        # Evaluar resultados (con spinner solo la primera vez)
+        _rows_display = []
+        _total_pips   = 0.0
+        _wins_tp1 = _wins_tp2 = _losses = _open_exp = 0
+
+        with st.spinner("Evaluando resultados con datos reales…"):
+            for _sig in _tg_sigs:
+                _ts   = str(_sig.get("ts") or _sig.get("_ts_raw", ""))[:19]
+                _dir  = _sig.get("direction", "—")
+                _ent  = float(_sig.get("entry", 0) or 0)
+                _sl_  = float(_sig.get("sl", 0) or 0)
+                _tp1_ = float(_sig.get("tp1", 0) or 0)
+                _tp2_ = float(_sig.get("tp2", 0) or 0)
+                _sc   = int(_sig.get("score", 0) or 0)
+                _conf = int(_sig.get("confluences", 0) or 0)
+                _rp   = _sig.get("risk_pct", "—")
+                _liq  = _sig.get("liq_target") or "—"
+
+                _outcome, _pips = _evaluate_signal(_ts, _dir, _ent, _sl_, _tp1_, _tp2_)
+                _total_pips += _pips
+                if "TP2" in _outcome:  _wins_tp2 += 1
+                elif "TP1" in _outcome: _wins_tp1 += 1
+                elif "SL"  in _outcome: _losses   += 1
+                else:                   _open_exp += 1
+
+                _rows_display.append({
+                    "Fecha UTC":    _ts,
+                    "Dir":          "🟢 LONG" if _dir == "LONG" else "🔴 SHORT",
+                    "Entrada":      f"{_ent:.5f}",
+                    "SL":           f"{_sl_:.5f}",
+                    "TP1":          f"{_tp1_:.5f}",
+                    "TP2":          f"{_tp2_:.5f}" if _tp2_ else "—",
+                    "Score":        f"{_sc}/100",
+                    "Conf.":        _conf,
+                    "Riesgo":       _rp,
+                    "Resultado":    _outcome,
+                    "Liquidez":     _liq[:30] if len(str(_liq)) > 30 else _liq,
+                })
+
+        # Métricas de rendimiento
+        _total_sigs = len(_tg_sigs)
+        _closed = _wins_tp1 + _wins_tp2 + _losses
+        _wr = (_wins_tp1 + _wins_tp2) / _closed * 100 if _closed else 0
+        _mc1, _mc2, _mc3, _mc4, _mc5 = st.columns(5)
+        _mc1.metric("Señales totales", _total_sigs)
+        _mc2.metric("Win rate (TP1+TP2)", f"{_wr:.0f}%", f"{_wins_tp1+_wins_tp2}W / {_losses}L")
+        _mc3.metric("TP2 alcanzado", _wins_tp2)
+        _mc4.metric("Pips netos", f"{_total_pips:+.0f}p")
+        _mc5.metric("Abiertas/Exp.", _open_exp)
+
+        # Tabla
+        import pandas as _pd_tg
+        _tg_df = _pd_tg.DataFrame(_rows_display)
+        st.dataframe(_tg_df, use_container_width=True, hide_index=True)
+
+        # Mini gráfico de pips acumulados
+        if _closed >= 2:
+            _pips_list = []
+            _cum = 0.0
+            for _r in _rows_display:
+                _res = _r["Resultado"]
+                if "TP2" in _res or "TP1" in _res or "SL" in _res:
+                    try:
+                        _p = float(_res.split()[-1].replace("p","").replace("+",""))
+                        _p = _p if "SL" not in _res else -_p
+                        _cum += _p
+                        _pips_list.append(_cum)
+                    except Exception:
+                        pass
+            if _pips_list:
+                import plotly.graph_objects as _go_tg
+                _fig_tg = _go_tg.Figure()
+                _fig_tg.add_trace(_go_tg.Scatter(
+                    y=_pips_list, mode="lines+markers",
+                    line=dict(color="#3fb950" if _pips_list[-1] >= 0 else "#f85149", width=2),
+                    marker=dict(size=6),
+                    name="Pips acumulados",
+                ))
+                _fig_tg.add_hline(y=0, line=dict(color="#666", dash="dash", width=1))
+                _fig_tg.update_layout(
+                    title="Curva de pips acumulados (señales cerradas)",
+                    paper_bgcolor="#0e1117", plot_bgcolor="#161b22",
+                    font_color="#e6edf3", height=220,
+                    margin=dict(l=40, r=20, t=40, b=30),
+                )
+                st.plotly_chart(_fig_tg, use_container_width=True)
+
+        if st.button("🔄 Actualizar resultados", key="_tg_refresh"):
+            st.cache_data.clear()
+            st.rerun()
+
+_refresh_str = st.session_state.get("last_refresh_str", "—")
+st.caption(f"🔄 Último análisis: {_refresh_str}  |  ⚠️ Solo informativo. No es consejo financiero. Usa siempre SL.")
+

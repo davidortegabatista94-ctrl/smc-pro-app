@@ -119,6 +119,20 @@ def tick(symbol):
     return jsonify(result)
 
 
+@app.route("/candles/<symbol>", methods=["GET"])
+def candles(symbol):
+    """
+    Velas OANDA con tick volume real.
+    Query params: tf (default 1h), count (default 200).
+    """
+    tf    = request.args.get("tf", "1h")
+    count = int(request.args.get("count", 200))
+    result = mt5.get_oanda_candles(symbol, tf, count)
+    if "error" in result and not result.get("candles"):
+        return jsonify(result), 503
+    return jsonify(result)
+
+
 @app.route("/status", methods=["GET"])
 def status():
     """Diagnóstico de configuración."""

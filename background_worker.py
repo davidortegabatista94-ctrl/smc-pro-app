@@ -18,14 +18,15 @@ from datetime import datetime, timezone
 
 _log = logging.getLogger("smc.bg")
 
-_CYCLE_SECS      = 180    # 3 minutos
-_STARTED         = False
-_LOCK            = threading.Lock()
-_BOT_MIN_SCORE   = 70     # score mínimo para ejecutar orden automática
-_MT5_SERVICE_URL = os.environ.get("MT5_SERVICE_URL", "").rstrip("/")
-_MT5_API_TOKEN   = os.environ.get("MT5_API_TOKEN", "")
-_SYMBOL          = "EURUSD"
-_BOT_VOLUME      = float(os.environ.get("BOT_DEFAULT_VOLUME", "0.01"))
+_CYCLE_SECS           = 180       # 3 minutos
+_STARTED              = False
+_LOCK                 = threading.Lock()
+_BOT_MIN_SCORE        = 70        # score mínimo para ejecutar orden automática
+_MT5_SERVICE_URL      = os.environ.get("MT5_SERVICE_URL", "").rstrip("/")
+_MT5_API_TOKEN        = os.environ.get("MT5_API_TOKEN", "")
+_SYMBOL               = "EURUSD"
+_BOT_VOLUME           = float(os.environ.get("BOT_DEFAULT_VOLUME", "0.01"))
+_STRAT_ALERT_COOLDOWN = 4 * 3600  # 4h entre alertas de la misma estrategia+dirección
 
 TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -62,7 +63,7 @@ def _loop() -> None:
 
 
 def _cycle() -> None:
-    signal = _quick_signal()
+    signal, df_1h = _quick_signal()
     if not signal:
         return
 
@@ -170,7 +171,16 @@ def _cycle() -> None:
     # 5 — Bot autónomo (ejecuta orden si está activado en DB y score ≥ umbral)
     _bot_trade_if_due(signal, score)
 
-    # 6 — Telegram
+    # 6 — Monitor posiciones: TP/SL/BE
+    _monitor_positions()
+
+    # 7 — ESTRATEGIA DEFINITIVA: única señal que llega al Telegram
+    _check_definitiva_entry(df_1h, signal, price)
+
+    # 8 — (alertas por estrategia desactivadas — solo DEFINITIVA al Telegram)
+    # _check_strategy_alerts(df_1h, price)
+
+    # 9 — Telegram horario / urgente
     _telegram_if_due(signal, score)
 
 
@@ -385,18 +395,24 @@ def _service_post(path: str, body: dict) -> dict | None:
 # Señal rápida (sin Streamlit, sin MT5)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _quick_signal() -> dict:
-    """EUR/USD 1H via yfinance: precio, EMA21/50, RSI, régimen, score."""
+def _quick_signal() -> tuple:
+    """EUR/USD 1H via yfinance: precio, EMA21/50, RSI, régimen, score.
+    Retorna (signal_dict, df) — df tiene 20d de datos para las estrategias.
+    """
     try:
         import yfinance as yf
         import pandas as pd
 
         df = yf.download(
-            "EURUSD=X", period="5d", interval="1h",
+            "EURUSD=X", period="20d", interval="1h",
             progress=False, auto_adjust=True,
         )
         if df is None or df.empty or len(df) < 30:
-            return {}
+            return {}, None
+
+        # Flatten MultiIndex columns (yfinance multi-ticker format)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
 
         close = df["Close"].squeeze()
         high  = df["High"].squeeze()
@@ -463,10 +479,1360 @@ def _quick_signal() -> dict:
             "ema50": round(ema50, 5),
             "atr_1h_pips": atr_pips,
             "dxy_dir": "",
-        }
+        }, df
     except Exception as exc:
         _log.debug("Quick signal error: %s", exc)
-        return {}
+        return {}, None
+
+
+def _enrich_volume_bg(df):
+    """Intenta patchear df con OANDA tick volume (background worker)."""
+    try:
+        if not _MT5_SERVICE_URL:
+            return df
+        import requests as _req
+        import pandas as _pd
+        r = _req.get(
+            f"{_MT5_SERVICE_URL}/candles/EURUSD",
+            params={"tf": "1h", "count": len(df) + 10},
+            timeout=6,
+        )
+        if r.status_code != 200:
+            return df
+        candles = r.json().get("candles", [])
+        if not candles:
+            return df
+        cv = _pd.DataFrame(candles)
+        cv["time"] = _pd.to_datetime(cv["time"], utc=True).dt.tz_localize(None)
+        cv = cv.set_index("time")["volume"].rename("Volume_oanda")
+        idx = df.index.tz_localize(None) if df.index.tz is not None else df.index
+        merged = cv.reindex(idx)
+        if merged.sum() > 0:
+            df = df.copy()
+            df["Volume_oanda"] = merged.values
+    except Exception as _e:
+        _log.debug(f"BG volume enrich: {_e}")
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Monitor de posiciones — TP / SL / Break Even
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _monitor_positions() -> None:
+    """Revisa posiciones abiertas cada ciclo y avisa por Telegram de:
+      - TP o SL alcanzado (posición desaparecida)
+      - Momento de mover SL a Break Even (precio = entrada + 1× riesgo)
+      - Cercanía al TP (a 3 pips o menos)
+    """
+    if not _MT5_SERVICE_URL:
+        return
+
+    try:
+        import db as _db
+        import json
+    except Exception:
+        return
+
+    positions = _service_get("/positions")
+    if not isinstance(positions, list):
+        return
+
+    now     = datetime.now(timezone.utc)
+    pip     = 0.0001
+    current: dict = {}
+
+    for pos in positions:
+        ticket    = str(pos.get("ticket", ""))
+        symbol    = pos.get("symbol", _SYMBOL)
+        direction = pos.get("type", "BUY")
+        entry     = float(pos.get("open_price", 0) or 0)
+        sl        = float(pos.get("sl",         0) or 0)
+        tp        = float(pos.get("tp",         0) or 0)
+        profit    = float(pos.get("profit",     0) or 0)
+
+        if not ticket or not entry:
+            continue
+
+        current[ticket] = {
+            "symbol": symbol, "direction": direction,
+            "entry": entry, "sl": sl, "tp": tp, "profit": profit,
+        }
+
+        # Precio en tiempo real
+        tick  = _service_get(f"/tick/{symbol}")
+        price = 0.0
+        if tick:
+            price = float(tick.get("ask" if direction == "BUY" else "bid", 0) or 0)
+        if not price:
+            continue
+
+        # ── Break Even ──────────────────────────────────────────────────────
+        if sl and entry:
+            be_key = f"pos_be_{ticket}"
+            if _db.get_setting(be_key) != "1":
+                risk = abs(entry - sl)
+                sl_already_at_be = (
+                    (direction == "BUY"  and sl >= entry - pip) or
+                    (direction == "SELL" and sl <= entry + pip)
+                )
+                be_trigger = (entry + risk) if direction == "BUY" else (entry - risk)
+                triggered  = (
+                    (direction == "BUY"  and price >= be_trigger) or
+                    (direction == "SELL" and price <= be_trigger)
+                )
+                if triggered and not sl_already_at_be:
+                    icon = "📈" if direction == "BUY" else "📉"
+                    _send_tg(
+                        f"⚡ *MUEVE SL A BREAK EVEN*\n"
+                        f"━━━━━━━━━━━━━━━━\n"
+                        f"💱 {symbol}: `{price:.5f}`\n"
+                        f"{icon} {direction} | Entrada: `{entry:.5f}`\n"
+                        f"✅ Pon SL en: `{entry:.5f}` (sin riesgo)\n"
+                        f"SL actual: `{sl:.5f}` · Riesgo: {round(risk/pip,1)} pips\n"
+                        f"💰 P&L: {profit:+.2f}\n"
+                        f"🕐 UTC {now.strftime('%H:%M')}"
+                    )
+                    _db.set_setting(be_key, "1")
+
+        # ── Cerca del TP (≤ 3 pips) ─────────────────────────────────────────
+        if tp:
+            near_key = f"pos_near_tp_{ticket}"
+            if _db.get_setting(near_key) != "1":
+                near = (
+                    (direction == "BUY"  and price >= tp - 3 * pip) or
+                    (direction == "SELL" and price <= tp + 3 * pip)
+                )
+                if near:
+                    _send_tg(
+                        f"🎯 *CERCA DEL TP — {symbol}*\n"
+                        f"━━━━━━━━━━━━━━━━\n"
+                        f"💱 Precio: `{price:.5f}` → TP: `{tp:.5f}`\n"
+                        f"{'📈' if direction=='BUY' else '📉'} {direction} | "
+                        f"Entrada: `{entry:.5f}`\n"
+                        f"💰 P&L: {profit:+.2f}\n"
+                        f"🕐 UTC {now.strftime('%H:%M')}"
+                    )
+                    _db.set_setting(near_key, "1")
+
+    # ── Detectar posiciones cerradas (TP o SL ejecutado) ────────────────────
+    prev: dict = {}
+    try:
+        raw = _db.get_setting("bg_tracked_positions") or "{}"
+        prev = json.loads(raw)
+    except Exception:
+        pass
+
+    for ticket, p in prev.items():
+        if ticket in current:
+            continue  # sigue abierta
+
+        sym    = p.get("symbol", _SYMBOL)
+        d      = p.get("direction", "BUY")
+        entry  = float(p.get("entry", 0))
+        sl_p   = float(p.get("sl",    0))
+        tp_p   = float(p.get("tp",    0))
+        profit = float(p.get("profit", 0))
+
+        hit_tp = profit >= 0
+        emoji  = "🎯" if hit_tp else "🛑"
+        result = "TP ALCANZADO ✅" if hit_tp else "SL ALCANZADO ❌"
+        _send_tg(
+            f"{emoji} *{result}*\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"💱 {sym} | Ticket #{ticket}\n"
+            f"{'📈' if d=='BUY' else '📉'} {d} | Entrada: `{entry:.5f}`\n"
+            f"SL: `{sl_p:.5f}` · TP: `{tp_p:.5f}`\n"
+            f"💰 Resultado: {profit:+.2f}\n"
+            f"🕐 UTC {now.strftime('%H:%M')}"
+        )
+        for suffix in ("be", "near_tp"):
+            try:
+                _db.set_setting(f"pos_{suffix}_{ticket}", "")
+            except Exception:
+                pass
+
+    # Guardar estado actual
+    try:
+        _db.set_setting("bg_tracked_positions", json.dumps(current))
+    except Exception:
+        pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Alertas por estrategia
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _check_strategy_alerts(df, price: float) -> None:
+    """Desactivado: las señales por estrategia individual generaban demasiado ruido.
+    La única alerta de entrada es la señal PREMIUM (_check_premium_entry),
+    que requiere score >= 82 y >= 5 confluencias simultáneas.
+    """
+    pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers para enriquecer el mensaje premium
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _find_liquidity_target(df, direction: str) -> tuple:
+    """
+    Localiza el pool de liquidez más cercano en la dirección del trade.
+    Para LONG: próximo swing high (stops de shorts acumulados ahí).
+    Para SHORT: próximo swing low (stops de longs acumulados ahí).
+    Retorna (nivel_precio, pips_de_distancia, descripción_str).
+    """
+    try:
+        h  = df["High"].values
+        lo = df["Low"].values
+        c  = df["Close"].values
+        px = float(c[-1])
+        n  = len(h)
+        pip = 0.0001
+
+        # Pivots de 3 barras en las últimas 80 velas
+        start = max(0, n - 80)
+        pivots = []
+        for i in range(start + 2, n - 1):
+            if direction == "LONG":
+                if h[i] > h[i - 1] and h[i] > h[i + 1] and h[i] > px:
+                    pivots.append(h[i])
+            else:
+                if lo[i] < lo[i - 1] and lo[i] < lo[i + 1] and lo[i] < px:
+                    pivots.append(lo[i])
+
+        if not pivots:
+            return None, None, None
+
+        if direction == "LONG":
+            target = min(p for p in pivots if p > px)
+            pips   = round((target - px) / pip, 0)
+            desc   = f"`{target:.5f}` (+{pips:.0f} pips)"
+        else:
+            target = max(p for p in pivots if p < px)
+            pips   = round((px - target) / pip, 0)
+            desc   = f"`{target:.5f}` (-{pips:.0f} pips)"
+
+        return target, pips, desc
+    except Exception:
+        return None, None, None
+
+
+def _generate_why_narrative(confluences: list, direction: str, regime: str,
+                             rsi: float, atr_pips: float,
+                             rsi_4h: float, has_4h: bool) -> str:
+    """
+    Genera 2-3 frases en lenguaje natural explicando por qué esta operación
+    tiene sentido ahora mismo. Sintetiza las confluencias más relevantes.
+    """
+    bull = direction == "LONG"
+    dir_word = "alcista" if bull else "bajista"
+
+    # Estructura de tendencia
+    if any("totalmente alineadas" in cf for cf in confluences):
+        trend_line = f"La estructura técnica está perfectamente alineada {dir_word}"
+    elif any("mayoritariamente" in cf for cf in confluences):
+        trend_line = f"Las medias muestran un sesgo {dir_word} claro"
+    else:
+        trend_line = f"El precio se posiciona correctamente en terreno {dir_word}"
+
+    # RSI
+    if bull:
+        if 50 <= rsi <= 65:
+            rsi_line = f"con RSI {rsi:.0f} en zona de fuerza sin sobrecompra"
+        elif rsi < 50:
+            rsi_line = f"con RSI {rsi:.0f} en pullback limpio listo para rebotar"
+        else:
+            rsi_line = f"con RSI {rsi:.0f}"
+    else:
+        if 35 <= rsi <= 50:
+            rsi_line = f"con RSI {rsi:.0f} en zona de debilidad sin sobreventa"
+        elif rsi > 50:
+            rsi_line = f"con RSI {rsi:.0f} en rebote que se agota"
+        else:
+            rsi_line = f"con RSI {rsi:.0f}"
+
+    sentence1 = f"{trend_line}, {rsi_line}."
+
+    # Momentum + 4H
+    if any("acaba de cruzar" in cf for cf in confluences):
+        mom = "El MACD acaba de cruzar marcando un cambio fresco de momentum"
+    elif any("MACD positivo" in cf or "MACD negativo" in cf for cf in confluences):
+        mom = "El MACD confirma el momentum en la misma dirección"
+    else:
+        mom = "El momentum técnico global apoya la señal"
+
+    if has_4h and any("4H" in cf and "confirmada" in cf for cf in confluences):
+        sentence2 = f"{mom}; el marco de 4H también confirma la tendencia con RSI {rsi_4h:.0f}."
+    elif has_4h and any("4H" in cf for cf in confluences):
+        sentence2 = f"{mom} y el 4H está del mismo lado."
+    else:
+        sentence2 = f"{mom}."
+
+    # Institucionales
+    inst = []
+    if any("COT" in cf and "CONFIRMA" in cf for cf in confluences):
+        inst.append("los institucionales (COT) operan en el mismo sentido")
+    if any("institucional" in cf.lower() and "alta" in cf.lower() for cf in confluences):
+        inst.append("el volumen institucional está por encima de la media")
+    if any("London" in cf or "NY" in cf for cf in confluences):
+        inst.append("estamos en sesión de máxima liquidez")
+
+    sentence3 = (
+        f"Además, {' y '.join(inst)}, lo que refuerza la validez de la señal."
+        if inst else
+        f"El ATR actual de {atr_pips:.0f} pips confirma que hay volatilidad suficiente para el movimiento esperado."
+    )
+
+    return f"{sentence1} {sentence2} {sentence3}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SEÑAL PREMIUM — El filtro más exigente del sistema
+# Solo se envía cuando TODO se alinea: técnico + fundamental + volumen + sesión
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PREMIUM_COOLDOWN_SECS = 6 * 3600   # máximo 1 señal premium cada 6h
+
+# Nivel de riesgo por calidad de señal
+_RISK_TABLE = [
+    (92, "1.0%",  "señal EXCEPCIONAL — máxima confianza del sistema"),
+    (87, "0.75%", "señal de ALTA CALIDAD"),
+    (82, "0.5%",  "buena señal — sé conservador en el tamaño"),
+]
+
+# Estrategias consideradas top-tier para el filtro de consenso
+_TOP_STRATEGIES = {
+    "ema_ribbon", "meta_composite", "precision_be",
+    "ema_trend", "supertrend", "rsi_reversion",
+}
+
+
+_DEFINITIVA_COOLDOWN = 8 * 3600   # máximo 3 señales al día
+
+
+def _check_definitiva_entry(df_1h, signal: dict, price: float) -> None:
+    """
+    ESTRATEGIA DEFINITIVA — única señal que llega al Telegram.
+    Combina los mejores filtros de todas las estrategias del sistema.
+
+    REQUISITOS OBLIGATORIOS (hard filters):
+      - Sesión London (7-12 UTC) o NY (12-17 UTC)
+      - ATR ≥ 6 pips (volatilidad suficiente)
+      - EMA ribbon alineado (5>10>20>50 para LONG)
+      - Precio al lado correcto de EMA200
+
+    CONFLUENCIAS SOFT (mínimo 5, score ≥ 70):
+      - MACD crossover reciente (+20)
+      - RSI zona óptima (+15)
+      - Confirmación 4H (+18)
+      - ADX > 22 tendencia fuerte (+15)
+      - Stochastic no sobreextendido (+10)
+      - Volumen institucional (+10)
+      - COT confirma (+10)
+      - Sin noticias alto impacto (+5/-20)
+
+    SALIDA: 25% en TP1 (2:1) → SL a BE → 75% en TP2 (5:1 o swing lejano)
+    """
+    if df_1h is None or df_1h.empty or len(df_1h) < 80 or not price:
+        return
+
+    direction = signal.get("direction")
+    if direction not in ("LONG", "SHORT"):
+        return
+
+    try:
+        import db as _db
+        import pandas as _pd
+        import numpy as _np
+
+        # ── Cooldown ─────────────────────────────────────────────────────────
+        _raw = _db.get_setting("definitiva_last_ts") or "0"
+        try:
+            if time.time() - float(_raw) < _DEFINITIVA_COOLDOWN:
+                return
+        except ValueError:
+            pass
+
+        # ── Indicadores base ─────────────────────────────────────────────────
+        c  = df_1h["Close"]; h = df_1h["High"]; lo = df_1h["Low"]
+        px = float(c.iloc[-1])
+
+        e5   = float(c.ewm(span=5,   adjust=False).mean().iloc[-1])
+        e10  = float(c.ewm(span=10,  adjust=False).mean().iloc[-1])
+        e20  = float(c.ewm(span=20,  adjust=False).mean().iloc[-1])
+        e50  = float(c.ewm(span=50,  adjust=False).mean().iloc[-1])
+        e200 = float(c.ewm(span=200, adjust=False).mean().iloc[-1])
+
+        _tr  = _pd.concat([h-lo,(h-c.shift()).abs(),(lo-c.shift()).abs()],axis=1).max(axis=1)
+        atr      = float(_tr.ewm(span=14, adjust=False).mean().iloc[-1])
+        atr_pips = atr / 0.0001
+
+        _d  = c.diff()
+        _g  = _d.clip(lower=0).ewm(14, adjust=False).mean()
+        _l  = (-_d.clip(upper=0)).ewm(14, adjust=False).mean()
+        rsi = float(100 - 100 / (1 + _g.iloc[-1] / (_l.iloc[-1] + 1e-9)))
+
+        _m12 = c.ewm(12, adjust=False).mean()
+        _m26 = c.ewm(26, adjust=False).mean()
+        _mac = _m12 - _m26
+        _sig = _mac.ewm(9, adjust=False).mean()
+        macd_hist = float((_mac - _sig).iloc[-1])
+        macd_prev = float((_mac - _sig).iloc[-2]) if len(c) > 2 else macd_hist
+
+        _stk = 100*(c - lo.rolling(14).min()) / (h.rolling(14).max() - lo.rolling(14).min() + 1e-9)
+        stk  = float(_stk.iloc[-1])
+
+        # ADX(14)
+        _pdm = h.diff().clip(lower=0); _ndm = (-lo.diff()).clip(lower=0)
+        _pdm2 = _pdm.where(_pdm > _ndm, 0.0); _ndm2 = _ndm.where(_ndm > _pdm, 0.0)
+        _pdi = 100 * _pdm2.ewm(14, adjust=False).mean() / (_tr.ewm(14, adjust=False).mean() + 1e-9)
+        _ndi = 100 * _ndm2.ewm(14, adjust=False).mean() / (_tr.ewm(14, adjust=False).mean() + 1e-9)
+        _dx  = 100 * abs(_pdi - _ndi) / (_pdi + _ndi + 1e-9)
+        adx  = float(_dx.ewm(14, adjust=False).mean().iloc[-1])
+
+        # 4H resample
+        try:
+            df4h = df_1h.resample("4h").agg({"Open":"first","High":"max","Low":"min","Close":"last"}).dropna()
+            c4   = df4h["Close"]
+            e21_4h = float(c4.ewm(21, adjust=False).mean().iloc[-1])
+            e50_4h = float(c4.ewm(50, adjust=False).mean().iloc[-1])
+            px4h   = float(c4.iloc[-1])
+            _d4    = c4.diff()
+            rsi_4h = float(100 - 100/(1+_d4.clip(lower=0).ewm(14,adjust=False).mean().iloc[-1]/
+                                        ((-_d4.clip(upper=0)).ewm(14,adjust=False).mean().iloc[-1]+1e-9)))
+            has_4h = True
+        except Exception:
+            has_4h = False; px4h = e21_4h = e50_4h = rsi_4h = 0
+
+        # Volumen
+        try:
+            from backend.indicators import _ensure_volume
+            _vol   = _ensure_volume(df_1h)
+            vol_r  = float(_vol.iloc[-1]) / (float(_vol.rolling(20).mean().iloc[-1]) + 1e-9)
+        except Exception:
+            vol_r = 1.0
+
+        # COT
+        cot_bias = "neutral"
+        try:
+            import json as _j
+            _cr = _db.get_setting("cot_cache")
+            if _cr: cot_bias = _j.loads(_cr).get("bias", "neutral")
+        except Exception:
+            pass
+
+        # Noticias
+        news_risk = "low"
+        try:
+            import json as _jn
+            _cal = _db.get_setting("calendar_cache")
+            if _cal:
+                _now_utc = datetime.now(timezone.utc)
+                for _ev in _jn.loads(_cal):
+                    if _ev.get("impact","").upper() == "HIGH":
+                        try:
+                            _et   = datetime.fromisoformat(_ev["date"].replace("Z","+00:00"))
+                            _mins = abs((_et - _now_utc).total_seconds() / 60)
+                            if _mins < 60:   news_risk = "high";   break
+                            elif _mins < 120: news_risk = "medium"
+                        except Exception: pass
+        except Exception:
+            pass
+
+        # ── FILTROS DEFINITIVA (misma lógica que el backtest validado) ──────────
+        bull = direction == "LONG"
+        h_utc = datetime.now(timezone.utc).hour
+
+        # 1. Solo London (7-12) o NY (12-17) — calidad de mercado
+        if not ((7 <= h_utc < 12) or (12 <= h_utc < 17)):
+            return
+
+        # 2. Volatilidad suficiente
+        if atr_pips < 5:
+            return
+
+        # 3. ADX > 22 — mercado en tendencia (no en rango)
+        if adx < 22:
+            return
+
+        # 4. Slope del EMA50 en 1H — adaptado de diario (0.2%/20días → 0.05%/20h)
+        # EMA50 en 1H = últimas 50 horas. Slope 20 bars = 20h = ~1 día
+        _slope_1h = 0.0
+        try:
+            _e50_series = c.ewm(50, adjust=False).mean()
+            _slope_1h = float((_e50_series.iloc[-1] - _e50_series.iloc[-21]) /
+                              (_e50_series.iloc[-21] + 1e-9) * 100)
+        except Exception:
+            pass
+        if abs(_slope_1h) < 0.05:
+            return   # Mercado plano — no operar
+
+        # 5. EMA200 — dirección macro
+        macro_ok = (px > e200) if bull else (px < e200)
+        if not macro_ok:
+            return
+
+        # 6. Precio cerca del EMA50 en 1H (pullback = entrada de valor)
+        _dist_e50 = abs(px - e50)
+        if _dist_e50 > atr * 0.7:
+            return   # Precio extendido — esperar pullback
+
+        # 7. RSI en zona 40-60 (como en el backtest validado)
+        if not (40 <= rsi <= 62):
+            return
+
+        # 8. Sin noticias de alto impacto
+        if news_risk == "high":
+            return
+
+        # 9. Slope en dirección correcta
+        if bull and _slope_1h < 0.05:
+            return
+        if not bull and _slope_1h > -0.05:
+            return
+
+        # ── REGIME CHECK via backend ──────────────────────────────────────────
+        regime_ok = False
+        regime_label = ""
+        try:
+            from backend.market_context import detect_market_regime
+            _reg_key, _reg_lbl, _reg_det = detect_market_regime(df_1h)
+            regime_label = _reg_lbl
+            regime_ok = _reg_key in ("trending_bull","trending_bear","volatile_trend")
+            if _reg_key == "trending_bull" and not bull: regime_ok = False
+            if _reg_key == "trending_bear" and bull:     regime_ok = False
+        except Exception:
+            regime_ok = True   # si falla, no bloquear
+
+        if not regime_ok:
+            return   # Régimen no apto (ranging/pre-news)
+
+        # ── CONFLUENCIAS COMBINADAS ───────────────────────────────────────────
+        confs = []; score = 0
+
+        # 1. MACD
+        if bull:
+            if macd_hist > 0 and macd_prev <= 0:
+                confs.append("⚡ MACD cruzó AL ALZA — cambio de momentum"); score += 20
+            elif macd_hist > 0:
+                confs.append("⚡ MACD positivo — momentum alcista");          score += 12
+        else:
+            if macd_hist < 0 and macd_prev >= 0:
+                confs.append("⚡ MACD cruzó A LA BAJA — cambio de momentum"); score += 20
+            elif macd_hist < 0:
+                confs.append("⚡ MACD negativo — momentum bajista");           score += 12
+
+        # 2. RSI zona óptima
+        if bull:
+            if 48 <= rsi <= 63: confs.append(f"📈 RSI {rsi:.0f} — zona pullback alcista"); score += 15
+            elif 40 <= rsi < 48: confs.append(f"📈 RSI {rsi:.0f} — pullback profundo");    score += 9
+        else:
+            if 37 <= rsi <= 52: confs.append(f"📉 RSI {rsi:.0f} — zona pullback bajista"); score += 15
+            elif 52 < rsi <= 60: confs.append(f"📉 RSI {rsi:.0f} — rebote bajista");       score += 9
+
+        # 3. 4H estructura
+        if has_4h:
+            if bull and px4h > e21_4h > e50_4h and 40 <= rsi_4h <= 72:
+                confs.append("🕯 4H ALCISTA confirmado"); score += 18
+            elif bull and px4h > e50_4h:
+                confs.append("🕯 4H sesgo alcista");       score += 10
+            elif not bull and px4h < e21_4h < e50_4h and 28 <= rsi_4h <= 60:
+                confs.append("🕯 4H BAJISTA confirmado"); score += 18
+            elif not bull and px4h < e50_4h:
+                confs.append("🕯 4H sesgo bajista");       score += 10
+
+        # 4. ADX fuerza
+        if adx >= 28: confs.append(f"💪 ADX {adx:.0f} — tendencia FUERTE");    score += 15
+        elif adx >= 22: confs.append(f"✅ ADX {adx:.0f} — tendencia confirmada"); score += 9
+
+        # 5. Stochastic
+        if bull and stk < 68:  confs.append(f"📉 Stoch {stk:.0f} sin sobrecompra"); score += 8
+        elif not bull and stk > 32: confs.append(f"📈 Stoch {stk:.0f} sin sobreventa"); score += 8
+
+        # 6. Régimen detectado
+        if regime_label:
+            confs.append(f"🌐 Régimen: {regime_label}"); score += 8
+
+        # 7. Estructura de mercado (BOS/ChoCH)
+        try:
+            from backend.indicators import detect_market_structure
+            _ms = detect_market_structure(df_1h)
+            _ms_str = _ms.get("estructura","")
+            _ms_score = int(_ms.get("score",0))
+            if (bull and "alcista" in _ms_str.lower()) or (not bull and "bajista" in _ms_str.lower()):
+                confs.append(f"🏗 Estructura: {_ms_str} (score {_ms_score})"); score += 12
+            elif _ms_score > 0:
+                score += 4
+        except Exception:
+            pass
+
+        # 8. Trend strength (ADX avanzado con +DI/-DI)
+        try:
+            from backend.indicators import calculate_trend_strength
+            _ts = calculate_trend_strength(df_1h)
+            _ts_lbl = _ts.get("tendencia","")
+            _ts_sc  = int(_ts.get("score",0))
+            if (bull and "alcista" in _ts_lbl.lower() and _ts_sc >= 2) or \
+               (not bull and "bajista" in _ts_lbl.lower() and _ts_sc >= 2):
+                confs.append(f"📐 Fuerza de tendencia: {_ts_lbl} ({_ts_sc}/3)"); score += 12
+        except Exception:
+            pass
+
+        # 9. AI Market Bias
+        ai_conf = 0
+        try:
+            from backend.indicators import ai_market_bias, ai_candlestick_patterns, detect_market_structure
+            _pats, _pat_sc = ai_candlestick_patterns(df_1h)
+            _ms2 = detect_market_structure(df_1h)
+            _ai = ai_market_bias(signal, {}, None, [], _pat_sc)
+            ai_bias = _ai.get("bias","NEUTRAL")
+            ai_conf = int(_ai.get("confidence",0))
+            if ai_bias == direction and ai_conf >= 55:
+                confs.append(f"🤖 AI bias: {ai_bias} — confianza {ai_conf}%"); score += 15
+            elif ai_bias == direction:
+                score += 6
+            elif ai_bias not in (direction, "NEUTRAL"):
+                score -= 8   # AI en contra
+            if _pats:
+                confs.append(f"🕯 Patrón IA: {', '.join(_pats[:2])}"); score += min(10, abs(_pat_sc))
+        except Exception:
+            pass
+
+        # 10. Volume delta (presión compradora/vendedora)
+        try:
+            from backend.indicators import get_volume_delta
+            _vd = get_volume_delta(df_1h)
+            _vd_bias = _vd.get("bias","neutral")
+            _vd_pct  = float(_vd.get("delta_pct",0))
+            if (bull and _vd_bias=="bullish" and _vd_pct > 5) or \
+               (not bull and _vd_bias=="bearish" and _vd_pct < -5):
+                confs.append(f"📊 Volume delta: {_vd_bias} ({_vd_pct:+.0f}%)"); score += 10
+        except Exception:
+            pass
+
+        # 11. Estrategia meta-composite (consenso de 6 estrategias)
+        try:
+            from backend.strategies import _live_strategy_signal
+            _meta_d, _meta_r = _live_strategy_signal(df_1h, "meta_composite")
+            if _meta_d == direction:
+                confs.append(f"🎯 Meta-composite: {_meta_d} ({_meta_r[:50]})"); score += 15
+        except Exception:
+            pass
+
+        # 12. Volumen relativo
+        if vol_r >= 1.8:  confs.append(f"📊 Vol {vol_r:.1f}x — ALTA actividad inst."); score += 10
+        elif vol_r >= 1.3: confs.append(f"📊 Vol {vol_r:.1f}x — sobre media");          score += 6
+
+        # 13. COT
+        if (bull and cot_bias=="bullish") or (not bull and cot_bias=="bearish"):
+            confs.append("🏦 COT confirma — inst. en el mismo lado"); score += 10
+        elif cot_bias == "neutral":
+            score += 2
+
+        # 14. Sesión premium
+        if 8 <= h_utc < 12 or 13 <= h_utc < 16:
+            confs.append(f"🌍 {'London' if h_utc<12 else 'NY'} peak — liquidez máxima"); score += 5
+
+        # ── UMBRAL DEFINITIVA ─────────────────────────────────────────────────
+        _log.info("DEFINITIVA: dir=%s score=%d conf=%d adx=%.0f ai_conf=%d regime=%s",
+                  direction, score, len(confs), adx, ai_conf, regime_label)
+
+        if score < 75 or len(confs) < 6:
+            return   # No cumple el estándar DEFINITIVA
+
+        # ── NIVELES: SL 1.0×ATR, TP1 25% a 2:1, TP2 75% a swing ≥5:1 ──────
+        sl, tp1, tp2, tp3, sl_pips, tp1_pips, tp2_pips, tp3_pips, \
+            rr1, rr2, rr3, liq_lvl, liq_pips, liq_desc = \
+            _smart_tpsl(df_1h, direction, px, atr * 0.85)  # SL 0.85×ATR (más ajustado)
+
+        # Calcular TP2 a ~5×SL para capturar la mayor parte del movimiento
+        _sign = 1 if bull else -1
+        _sl_d = abs(px - sl)
+        _tp2_def = round(px + _sign * _sl_d * 5.0, 5)
+        _tp2_pips_def = round(_sl_d * 5.0 / 0.0001, 0)
+        # Usar el que sea mayor (swing o 5×SL)
+        if bull:
+            tp2 = max(tp2, _tp2_def)
+        else:
+            tp2 = min(tp2, _tp2_def)
+        tp2_pips = round(abs(tp2 - px) / 0.0001, 0)
+        rr2 = round(tp2_pips / sl_pips, 1)
+
+        # ── RIESGO ADAPTATIVO ────────────────────────────────────────────────
+        risk_pct = "0.5%"
+        for _min_sc, _r, _n in _RISK_TABLE:
+            if score >= _min_sc: risk_pct = _r; break
+        try:
+            _wr = float(_db.get_setting("adaptive_win_rate") or "0")
+            if _wr >= 0.60:
+                _pct_f = float(risk_pct.replace("%","")) * 1.2
+                risk_pct = f"{min(_pct_f,1.5):.2f}%"
+            elif _wr > 0 and _wr < 0.38:
+                _pct_f = float(risk_pct.replace("%","")) * 0.6
+                risk_pct = f"{max(_pct_f,0.25):.2f}%"
+        except Exception:
+            pass
+        _rf = float(risk_pct.replace("%",""))/100
+        _ex5k=int(5000*_rf); _ex10k=int(10000*_rf); _ex20k=int(20000*_rf)
+
+        # ── NARRATIVA ────────────────────────────────────────────────────────
+        why = _generate_why_narrative(confs, direction, signal.get("regime",""),
+                                      rsi, atr_pips, rsi_4h if has_4h else 50.0, has_4h)
+
+        # ── MENSAJE TELEGRAM ─────────────────────────────────────────────────
+        dir_e = "🟢 LONG" if bull else "🔴 SHORT"
+        now_s = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        conf_b = "\n".join(f"  {cf}" for cf in confs)
+
+        if liq_lvl is not None:
+            liq_s = (f"🎯 *¿HACIA QUÉ LIQUIDEZ VA?*\n"
+                     f"Pool de liquidez en {liq_desc}\n"
+                     f"  ↳ Stops {'de shorts' if bull else 'de longs'} acumulados ahí son el imán.\n\n")
+        else:
+            liq_s = ""
+
+        msg = (
+            f"🏆 *ESTRATEGIA DEFINITIVA — SMC Pro*\n"
+            f"══════════════════════════════\n"
+            f"*{dir_e} EUR/USD*  |  Score: *{score}/100*  ·  {len(confs)} confluencias\n\n"
+
+            f"💡 *¿POR QUÉ AHORA?*\n{why}\n\n"
+
+            f"{liq_s}"
+
+            f"💰 *NIVELES DE ENTRADA*\n"
+            f"┌ Entrada:      `{px:.5f}`\n"
+            f"├ Stop Loss:    `{sl:.5f}`  (-{sl_pips:.0f} pips)\n"
+            f"├ TP1  25%:     `{tp1:.5f}`  (+{tp1_pips:.0f}p)  R:R 1:{rr1}\n"
+            f"└ TP2  75%:     `{tp2:.5f}`  (+{tp2_pips:.0f}p)  R:R 1:{rr2}\n\n"
+
+            f"📋 *PLAN DE SALIDA DEFINITIVA*\n"
+            f"  1️⃣ Al tocar TP1 → cerrar *25%*, SL → BE+3pips\n"
+            f"  2️⃣ Dejar correr *75%* hasta TP2 o swing lejano\n"
+            f"  3️⃣ Si en 12h no avanza → cerrar todo al precio actual\n\n"
+
+            f"💼 *RIESGO RECOMENDADO: {risk_pct}*\n"
+            f"  ↳ €5K→€{_ex5k} | €10K→€{_ex10k} | €20K→€{_ex20k}\n"
+            f"  ↳ SL en {sl_pips:.0f} pips = {round(sl_pips*_rf/sl_pips*100,2)}% de cuenta\n\n"
+
+            f"⚡ *CONFLUENCIAS*\n{conf_b}\n\n"
+
+            f"📌 ATR: {atr_pips:.1f}p | RSI: {rsi:.0f} | ADX: {adx:.0f} | "
+            f"Vol: {vol_r:.1f}x | COT: {cot_bias.upper()}\n"
+            f"⏰ {now_s}\n"
+            f"_Confirma en gráfico · Respeta siempre el SL_"
+        )
+
+        if _send_tg(msg):
+            _db.set_setting("definitiva_last_ts", str(time.time()))
+            # Guardar en historial de señales
+            try:
+                _db.save_metric(name="tg_signal_log", value=float(score), context={
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "strategy": "DEFINITIVA",
+                    "direction": direction, "entry": round(px,5),
+                    "sl": round(sl,5), "tp1": round(tp1,5),
+                    "tp2": round(tp2,5), "tp3": round(tp3,5),
+                    "sl_pips": int(sl_pips), "tp1_pips": int(tp1_pips),
+                    "tp2_pips": int(tp2_pips), "score": score,
+                    "confluences": len(confs), "atr_pips": round(atr_pips,1),
+                    "risk_pct": risk_pct, "rsi": round(rsi,1),
+                    "adx": round(adx,1), "liq_target": liq_desc,
+                    "exit_plan": "25%@TP1→BE / 75%@TP2",
+                })
+            except Exception:
+                pass
+            _log.info("DEFINITIVA SENT: %s score=%d conf=%d", direction, score, len(confs))
+        else:
+            _log.warning("DEFINITIVA: fallo al enviar Telegram")
+
+    except Exception as _de:
+        _log.warning("_check_definitiva_entry error: %s", _de)
+
+
+def _smart_tpsl(df, direction: str, px: float, atr: float):
+    """
+    Calcula SL y tres TPs usando pools de liquidez como objetivos naturales.
+    Garantiza mínimo 1:2 en TP1. Extiende a 1:3 o más si hay liquidez más lejana.
+    Retorna: sl, tp1, tp2, tp3, sl_pips, tp1_pips, tp2_pips, tp3_pips,
+             rr1, rr2, rr3, liq_lvl, liq_pips, liq_desc
+    """
+    import numpy as _np
+    pip  = 0.0001
+    bull = direction == "LONG"
+    sign = 1 if bull else -1
+
+    # SL: 1.2×ATR (más ajustado que 1.5 → mejora R:R sin peligrar)
+    sl_dist = atr * 1.2
+    sl      = round(px - sign * sl_dist, 5)
+    sl_pips = sl_dist / pip
+
+    # Buscar todos los pivots (swing highs/lows) en las últimas 100 velas
+    h  = df["High"].values
+    lo = df["Low"].values
+    n  = len(h)
+    liq_levels = []
+    for i in range(2, min(n - 1, 100)):
+        idx = n - 1 - i
+        if idx < 1:
+            break
+        if bull:
+            if h[idx] > h[idx - 1] and h[idx] > h[idx + 1] and h[idx] > px:
+                liq_levels.append(h[idx])
+        else:
+            if lo[idx] < lo[idx - 1] and lo[idx] < lo[idx + 1] and lo[idx] < px:
+                liq_levels.append(lo[idx])
+
+    # Ordenar de más cercano a más lejano
+    liq_levels = sorted(set(round(l, 5) for l in liq_levels),
+                        key=lambda l: abs(l - px))
+
+    # TP1: primer nivel de liquidez con R:R ≥ 2.0; si no existe → 2×SL
+    min_tp1 = px + sign * sl_dist * 2.0  # mínimo 1:2
+    tp1 = round(min_tp1, 5)
+    liq_tp1 = None
+    for lvl in liq_levels:
+        dist = abs(lvl - px)
+        rr   = dist / sl_dist
+        if rr >= 2.0:
+            liq_tp1 = lvl
+            tp1 = round(lvl, 5)
+            break
+
+    # TP2: siguiente nivel de liquidez con R:R ≥ 3.0; si no → 3×SL
+    min_tp2 = px + sign * sl_dist * 3.0
+    tp2 = round(min_tp2, 5)
+    for lvl in liq_levels:
+        dist = abs(lvl - px)
+        rr   = dist / sl_dist
+        if rr >= 3.0 and ((bull and lvl > tp1) or (not bull and lvl < tp1)):
+            tp2 = round(lvl, 5)
+            break
+
+    # TP3: nivel de liquidez lejano ≥ 4.5× o fijo
+    min_tp3 = px + sign * sl_dist * 4.5
+    tp3 = round(min_tp3, 5)
+    for lvl in liq_levels:
+        dist = abs(lvl - px)
+        rr   = dist / sl_dist
+        if rr >= 4.5 and ((bull and lvl > tp2) or (not bull and lvl < tp2)):
+            tp3 = round(lvl, 5)
+            break
+
+    tp1_pips = abs(tp1 - px) / pip
+    tp2_pips = abs(tp2 - px) / pip
+    tp3_pips = abs(tp3 - px) / pip
+    rr1 = round(tp1_pips / sl_pips, 1)
+    rr2 = round(tp2_pips / sl_pips, 1)
+    rr3 = round(tp3_pips / sl_pips, 1)
+
+    # Descripción del nivel de liquidez objetivo principal
+    if liq_tp1:
+        liq_pips = round(abs(liq_tp1 - px) / pip, 0)
+        liq_desc = f"`{liq_tp1:.5f}` ({'+' if bull else '-'}{liq_pips:.0f} pips)"
+        liq_lvl  = liq_tp1
+    else:
+        liq_pips = round(tp1_pips, 0)
+        liq_desc = f"`{tp1:.5f}` ({'+' if bull else '-'}{liq_pips:.0f} pips)"
+        liq_lvl  = tp1
+
+    return (sl, tp1, tp2, tp3,
+            round(sl_pips, 0), round(tp1_pips, 0), round(tp2_pips, 0), round(tp3_pips, 0),
+            rr1, rr2, rr3, liq_lvl, liq_pips, liq_desc)
+
+
+def _update_adaptive_params(signal_log: list) -> None:
+    """
+    Calcula win-rate de las últimas 20 señales cerradas y guarda en DB
+    para que el sistema ajuste el tamaño de posición dinámicamente.
+    """
+    try:
+        import db as _db
+        closed = [s for s in signal_log if s.get("outcome") in ("TP1", "TP2", "SL")]
+        if len(closed) < 5:
+            return
+        recent = closed[-20:]
+        wins   = sum(1 for s in recent if s.get("outcome") in ("TP1", "TP2"))
+        wrate  = wins / len(recent)
+        _db.set_setting("adaptive_win_rate", str(round(wrate, 4)))
+        _log.info("Adaptive win-rate actualizado: %.1f%% (%d señales)", wrate * 100, len(recent))
+    except Exception as _ae:
+        _log.debug("adaptive params error: %s", _ae)
+
+
+def _check_premium_entry(df_1h, signal: dict, price: float) -> None:
+    """
+    Motor de señales premium: evalúa 10 capas de confluencia.
+    Solo envía al Telegram cuando la puntuación >= 82 Y >= 5 confluencias.
+    Cooldown: 6h entre señales para evitar spam.
+    """
+    if df_1h is None or df_1h.empty or len(df_1h) < 60 or not price:
+        return
+
+    direction = signal.get("direction")
+    if direction not in ("LONG", "SHORT"):
+        return
+
+    try:
+        import db as _db
+        import pandas as _pd
+        import numpy as _np
+
+        # ── Cooldown global ───────────────────────────────────────────────
+        _last_raw = _db.get_setting("premium_signal_last_ts") or "0"
+        try:
+            _elapsed = time.time() - float(_last_raw)
+        except ValueError:
+            _elapsed = _PREMIUM_COOLDOWN_SECS + 1
+        if _elapsed < _PREMIUM_COOLDOWN_SECS:
+            return
+
+        # ── Calcular todos los indicadores ────────────────────────────────
+        c  = df_1h["Close"]
+        h  = df_1h["High"]
+        lo = df_1h["Low"]
+        o  = df_1h.get("Open", c)
+
+        px = float(c.iloc[-1])
+
+        # EMAs
+        e5   = float(c.ewm(span=5,   adjust=False).mean().iloc[-1])
+        e10  = float(c.ewm(span=10,  adjust=False).mean().iloc[-1])
+        e20  = float(c.ewm(span=20,  adjust=False).mean().iloc[-1])
+        e21  = float(c.ewm(span=21,  adjust=False).mean().iloc[-1])
+        e50  = float(c.ewm(span=50,  adjust=False).mean().iloc[-1])
+        e200 = float(c.ewm(span=200, adjust=False).mean().iloc[-1])
+
+        # RSI(14)
+        _d   = c.diff()
+        _g   = _d.clip(lower=0).ewm(span=14, adjust=False).mean()
+        _l   = (-_d.clip(upper=0)).ewm(span=14, adjust=False).mean()
+        rsi  = float(100 - 100 / (1 + _g.iloc[-1] / (_l.iloc[-1] + 1e-9)))
+
+        # ATR(14)
+        _tr  = _pd.concat([h - lo, (h - c.shift()).abs(),
+                            (lo - c.shift()).abs()], axis=1).max(axis=1)
+        atr      = float(_tr.ewm(span=14, adjust=False).mean().iloc[-1])
+        atr_pips = atr / 0.0001
+
+        # MACD (12/26/9)
+        _m12      = c.ewm(span=12, adjust=False).mean()
+        _m26      = c.ewm(span=26, adjust=False).mean()
+        _macd     = _m12 - _m26
+        _macd_sig = _macd.ewm(span=9, adjust=False).mean()
+        macd_hist = float((_macd - _macd_sig).iloc[-1])
+        macd_prev = float((_macd - _macd_sig).iloc[-2]) if len(df_1h) > 2 else macd_hist
+
+        # Stochastic(14,3)
+        _lo14  = lo.rolling(14).min()
+        _hi14  = h.rolling(14).max()
+        _stk   = 100 * (c - _lo14) / (_hi14 - _lo14 + 1e-9)
+        stk    = float(_stk.iloc[-1])
+
+        # ADX(14) — fuerza direccional: bloquea señales en mercado lateral
+        try:
+            _pdm = h.diff().clip(lower=0)
+            _ndm = (-lo.diff()).clip(lower=0)
+            _pdm2 = _pdm.where(_pdm > _ndm, 0.0)
+            _ndm2 = _ndm.where(_ndm > _pdm, 0.0)
+            _atr14 = _tr.ewm(span=14, adjust=False).mean()
+            _pdi = 100 * _pdm2.ewm(span=14, adjust=False).mean() / (_atr14 + 1e-9)
+            _ndi = 100 * _ndm2.ewm(span=14, adjust=False).mean() / (_atr14 + 1e-9)
+            _dx  = 100 * abs(_pdi - _ndi) / (_pdi + _ndi + 1e-9)
+            adx  = float(_dx.ewm(span=14, adjust=False).mean().iloc[-1])
+        except Exception:
+            adx = 25.0  # asumir mercado tendencial si falla
+
+        # BLOQUEO DURO: ADX < 18 = mercado lateral, no operar
+        if adx < 18:
+            return
+
+        # Tendencia semanal (resample 1H → W para filtro macro)
+        try:
+            _df_w  = df_1h.resample("W").agg({"Close": "last"}).dropna()
+            _cw    = _df_w["Close"]
+            _e50w  = float(_cw.ewm(span=50, adjust=False).mean().iloc[-1])
+            _e20w  = float(_cw.ewm(span=20, adjust=False).mean().iloc[-1])
+            _pw    = float(_cw.iloc[-1])
+            weekly_bull = _pw > _e50w
+            weekly_bear = _pw < _e50w
+            weekly_trending = abs(_pw - _e50w) / (_e50w + 1e-9) > 0.003
+            has_weekly = True
+        except Exception:
+            weekly_bull = weekly_bear = False
+            weekly_trending = True
+            has_weekly = False
+
+        # 4H (resample de 1H)
+        try:
+            df_4h   = df_1h.resample("4h").agg(
+                {"Open": "first", "High": "max", "Low": "min", "Close": "last"}
+            ).dropna()
+            c4      = df_4h["Close"]
+            e21_4h  = float(c4.ewm(span=21, adjust=False).mean().iloc[-1])
+            e50_4h  = float(c4.ewm(span=50, adjust=False).mean().iloc[-1])
+            px4h    = float(c4.iloc[-1])
+            _d4     = c4.diff()
+            _g4     = _d4.clip(lower=0).ewm(span=14, adjust=False).mean()
+            _l4     = (-_d4.clip(upper=0)).ewm(span=14, adjust=False).mean()
+            rsi_4h  = float(100 - 100 / (1 + _g4.iloc[-1] / (_l4.iloc[-1] + 1e-9)))
+            has_4h  = True
+        except Exception:
+            px4h = e21_4h = e50_4h = rsi_4h = 0
+            has_4h = False
+
+        # Volumen (ya enriquecido por _enrich_volume_bg)
+        try:
+            from backend.indicators import _ensure_volume
+            vol      = _ensure_volume(df_1h)
+            vol_avg  = float(vol.rolling(20).mean().iloc[-1])
+            vol_last = float(vol.iloc[-1])
+            vol_ratio = vol_last / vol_avg if vol_avg > 0 else 1.0
+        except Exception:
+            vol_ratio = 1.0
+
+        # COT (si está cacheado en DB)
+        cot_bias = "neutral"
+        try:
+            _cot_raw = _db.get_setting("cot_cache")
+            if _cot_raw:
+                import json as _j
+                _cot = _j.loads(_cot_raw)
+                cot_bias = _cot.get("bias", "neutral")
+        except Exception:
+            pass
+
+        # Noticias (si está cacheado)
+        news_risk = "low"
+        try:
+            _cal_raw = _db.get_setting("calendar_cache")
+            if _cal_raw:
+                import json as _jc
+                _cal = _jc.loads(_cal_raw)
+                _now_utc = datetime.now(timezone.utc)
+                for _ev in _cal:
+                    if _ev.get("impact", "").upper() == "HIGH":
+                        try:
+                            _et = datetime.fromisoformat(_ev["date"].replace("Z", "+00:00"))
+                            _mins = abs((_et - _now_utc).total_seconds() / 60)
+                            if _mins < 60:
+                                news_risk = "high"
+                                break
+                            elif _mins < 120:
+                                news_risk = "medium"
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # ── EVALUACIÓN DE 13 CONFLUENCIAS ─────────────────────────────────
+        bull = direction == "LONG"
+        confluences = []
+        score = 0
+
+        # 1. EMA Ribbon 5/10/20/50 alineadas — estructura de tendencia limpia
+        if bull:
+            if e5 > e10 > e20 > e50:
+                confluences.append("📊 EMA Ribbon 5/10/20/50 totalmente alineadas ALCISTAS")
+                score += 20
+            elif e5 > e20 and px > e50:
+                confluences.append("📊 EMAs mayoritariamente alcistas (e5>e20, precio>e50)")
+                score += 10
+        else:
+            if e5 < e10 < e20 < e50:
+                confluences.append("📊 EMA Ribbon 5/10/20/50 totalmente alineadas BAJISTAS")
+                score += 20
+            elif e5 < e20 and px < e50:
+                confluences.append("📊 EMAs mayoritariamente bajistas")
+                score += 10
+
+        # 2. MACD cruzando o confirmando — momentum institucional
+        if bull:
+            if macd_hist > 0 and macd_prev <= 0:
+                confluences.append("⚡ MACD acaba de cruzar al alza — cambio de momentum")
+                score += 15
+            elif macd_hist > 0:
+                confluences.append("⚡ MACD positivo — momentum alcista confirmado")
+                score += 10
+        else:
+            if macd_hist < 0 and macd_prev >= 0:
+                confluences.append("⚡ MACD acaba de cruzar a la baja — cambio de momentum")
+                score += 15
+            elif macd_hist < 0:
+                confluences.append("⚡ MACD negativo — momentum bajista confirmado")
+                score += 10
+
+        # 3. RSI en zona limpia — ni sobrecomprado ni sobrevendido
+        if bull:
+            if 48 <= rsi <= 63:
+                confluences.append(f"📈 RSI {rsi:.0f} en zona ALCISTA limpia (48-63)")
+                score += 14
+            elif 40 <= rsi < 48:
+                confluences.append(f"📈 RSI {rsi:.0f} — pullback limpio, listo para subir")
+                score += 8
+        else:
+            if 37 <= rsi <= 52:
+                confluences.append(f"📉 RSI {rsi:.0f} en zona BAJISTA limpia (37-52)")
+                score += 14
+            elif 52 < rsi <= 60:
+                confluences.append(f"📉 RSI {rsi:.0f} — rebote limpio, listo para caer")
+                score += 8
+
+        # 4. Confirmación en 4H — tendencia madre
+        if has_4h:
+            if bull and px4h > e21_4h > e50_4h and 40 <= rsi_4h <= 70:
+                confluences.append("🕯 Tendencia 4H ALCISTA confirmada (EMA21+50+RSI)")
+                score += 18
+            elif bull and px4h > e50_4h:
+                confluences.append("🕯 Precio sobre EMA50 en 4H — sesgo alcista")
+                score += 10
+            elif not bull and px4h < e21_4h < e50_4h and 30 <= rsi_4h <= 60:
+                confluences.append("🕯 Tendencia 4H BAJISTA confirmada (EMA21+50+RSI)")
+                score += 18
+            elif not bull and px4h < e50_4h:
+                confluences.append("🕯 Precio bajo EMA50 en 4H — sesgo bajista")
+                score += 10
+
+        # 5. Sesión de máxima liquidez — London o NY ÚNICAMENTE
+        h_utc = datetime.now(timezone.utc).hour
+        if 7 <= h_utc < 12:
+            confluences.append("🌍 Sesión London — máxima actividad institucional europea")
+            score += 10
+        elif 12 <= h_utc < 17:
+            confluences.append("🗽 Sesión NY — máxima liquidez USD + overlap")
+            score += 10
+        else:
+            score -= 8   # Asia/off-session: penalización fuerte
+
+        # 6. ATR y volatilidad
+        if atr_pips >= 10:
+            confluences.append(f"💥 ATR {atr_pips:.1f} pips — volatilidad EXCELENTE")
+            score += 10
+        elif atr_pips >= 7:
+            confluences.append(f"✅ ATR {atr_pips:.1f} pips — volatilidad suficiente")
+            score += 6
+        elif atr_pips < 5:
+            score -= 8
+
+        # 7. EMA200 — filtro macro
+        if (bull and px > e200) or (not bull and px < e200):
+            confluences.append("🌐 Precio al lado correcto de EMA200 — macro a favor")
+            score += 8
+
+        # 8. ADX — fuerza de la tendencia (nuevo)
+        if adx >= 30:
+            confluences.append(f"💪 ADX {adx:.0f} — tendencia FUERTE, momentum sólido")
+            score += 12
+        elif adx >= 22:
+            confluences.append(f"✅ ADX {adx:.0f} — tendencia confirmada")
+            score += 7
+
+        # 9. Stochastic — zona de entrada óptima (nuevo)
+        if bull and stk < 65:
+            confluences.append(f"📉 Stoch {stk:.0f} — sin sobrecompra, zona ALCISTA válida")
+            score += 8
+        elif not bull and stk > 35:
+            confluences.append(f"📈 Stoch {stk:.0f} — sin sobreventa, zona BAJISTA válida")
+            score += 8
+
+        # 10. Tendencia semanal (nuevo — filtro macro crítico)
+        if has_weekly:
+            if (bull and weekly_bull) or (not bull and weekly_bear):
+                confluences.append("📅 Tendencia SEMANAL alineada — macro en la misma dirección")
+                score += 12
+            else:
+                score -= 10  # Contra-tendencia semanal: penalización severa
+
+        # 11. Volumen institucional
+        if vol_ratio >= 1.8:
+            confluences.append(f"📊 Volumen {vol_ratio:.1f}x — actividad institucional ALTA")
+            score += 10
+        elif vol_ratio >= 1.3:
+            confluences.append(f"📊 Volumen {vol_ratio:.1f}x — actividad superior a media")
+            score += 5
+
+        # 12. COT institucional
+        if (bull and cot_bias == "bullish") or (not bull and cot_bias == "bearish"):
+            confluences.append("🏦 COT institucional CONFIRMA — grandes en el mismo lado")
+            score += 10
+        elif cot_bias == "neutral":
+            score += 2
+
+        # 13. Noticias — riesgo macroeconómico
+        if news_risk == "high":
+            confluences.append("⚠️ NOTICIA HIGH IMPACT en <60min — esperar")
+            score -= 20
+        elif news_risk == "medium":
+            confluences.append("⚠️ Evento macro próximo — SL ajustado")
+            score -= 8
+        else:
+            confluences.append("✅ Sin noticias de alto impacto próximas — entorno limpio")
+            score += 5
+
+        # ── UMBRAL ESTRICTO: score ≥ 87, ≥ 6 confluencias, sin noticias ────
+        _positive_conf = [c for c in confluences if not c.startswith("⚠️")]
+        _log.info(f"Premium check: dir={direction} score={score} adx={adx:.0f} conf={len(_positive_conf)}")
+
+        if score < 87 or len(_positive_conf) < 6:
+            return   # No es suficientemente buena — silencio total
+
+        if news_risk == "high" and score < 90:
+            return   # Noticias + señal mediocre = no tocar
+
+        # ── NIVELES INTELIGENTES: SL + TP dinámico por liquidez (mín 1:2) ──
+        sl, tp1, tp2, tp3, sl_pips, tp1_pips, tp2_pips, tp3_pips, \
+            rr1, rr2, rr3, liq_lvl, liq_pips, liq_desc = \
+            _smart_tpsl(df_1h, direction, px, atr)
+
+        # FILTRO R:R mínimo 2.5:1 — si el mercado no da espacio, no operamos
+        if rr1 < 2.5:
+            _log.info("Premium signal descartada: R:R insuficiente (%.1f < 2.5)", rr1)
+            return
+
+        # ── GESTIÓN DEL RIESGO según calidad + win-rate histórico ─────────
+        risk_pct = "0.5%"
+        risk_note = "señal buena — empieza conservador"
+        for _min_score, _r, _n in _RISK_TABLE:
+            if score >= _min_score:
+                risk_pct = _r
+                risk_note = _n
+                break
+
+        # Ajustar por win-rate reciente (cargado de DB)
+        try:
+            _wrate = float(_db.get_setting("adaptive_win_rate") or "0")
+            if _wrate > 0:
+                if _wrate >= 0.65 and news_risk == "low":
+                    _pct_f = float(risk_pct.replace("%","")) * 1.25
+                    risk_pct = f"{min(_pct_f, 1.5):.2f}%".replace(".00","").replace("0.","0.")
+                    risk_note += " ↑ boost por win-rate alto"
+                elif _wrate < 0.40:
+                    _pct_f = float(risk_pct.replace("%","")) * 0.5
+                    risk_pct = f"{max(_pct_f, 0.25):.2f}%"
+                    risk_note += " ↓ reducido por rachaola negativa"
+        except Exception:
+            pass
+
+        # Ajustar si hay noticia cercana
+        if news_risk == "high":
+            risk_pct = "0.25%"
+            risk_note = "REDUCIDO por noticia próxima"
+
+        # ── LIQUIDEZ OBJETIVO (ya calculada en _smart_tpsl) ───────────────
+
+        # ── NARRATIVA DEL POR QUÉ ─────────────────────────────────────────
+        why_text = _generate_why_narrative(
+            confluences, direction, signal.get("regime", ""),
+            rsi, atr_pips, rsi_4h if has_4h else 50.0, has_4h,
+        )
+
+        # ── EJEMPLOS DE RIESGO EN € ───────────────────────────────────────
+        _risk_float = float(risk_pct.replace("%", "")) / 100
+        _ex5k  = int(5000  * _risk_float)
+        _ex10k = int(10000 * _risk_float)
+        _ex20k = int(20000 * _risk_float)
+        risk_examples = f"€5K→€{_ex5k} | €10K→€{_ex10k} | €20K→€{_ex20k}"
+
+        # ── CONSTRUIR MENSAJE TELEGRAM ────────────────────────────────────
+        dir_emoji  = "🟢 LONG" if bull else "🔴 SHORT"
+        qual_emoji = ("🏆 EXCEPCIONAL" if score >= 92
+                      else "⭐⭐ MUY BUENA" if score >= 87
+                      else "⭐ BUENA")
+        now_str    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        conf_block = "\n".join(f"  {cf}" for cf in confluences)
+
+        # Liquidez section
+        if liq_lvl is not None:
+            liq_section = (
+                f"🎯 *¿HACIA QUÉ LIQUIDEZ VA?*\n"
+                f"Próximo pool de liquidez en {liq_desc}\n"
+                f"  ↳ Stops {'de posiciones short' if bull else 'de posiciones long'} acumulados ahí son el imán del movimiento.\n\n"
+            )
+        else:
+            liq_section = ""
+
+        msg = (
+            f"🎯 *ENTRADA PREMIUM — SMC Pro*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"*{dir_emoji} EUR/USD*  |  {qual_emoji}\n"
+            f"Puntuación: *{score}/100*  ·  {len(_positive_conf)} confluencias activas\n\n"
+
+            f"💡 *¿POR QUÉ ENTRAR AHORA?*\n"
+            f"{why_text}\n\n"
+
+            f"{liq_section}"
+
+            f"💰 *NIVELES DE LA OPERACIÓN*\n"
+            f"┌ Entrada:   `{px:.5f}`\n"
+            f"├ Stop Loss: `{sl:.5f}`  (-{sl_pips:.0f} pips)\n"
+            f"├ TP1:       `{tp1:.5f}`  (+{tp1_pips:.0f}p)  R:R 1:{rr1}\n"
+            f"├ TP2:       `{tp2:.5f}`  (+{tp2_pips:.0f}p)  R:R 1:{rr2}\n"
+            f"└ TP3:       `{tp3:.5f}`  (+{tp3_pips:.0f}p)  R:R 1:{rr3}\n\n"
+
+            f"💼 *GESTIÓN DEL RIESGO*\n"
+            f"• Riesgo recomendado: *{risk_pct}* de cuenta  ← {risk_note}\n"
+            f"  ↳ {risk_examples}\n"
+            f"• Plan: cerrar 40% en TP1 → SL a BE → 40% en TP2 → trail 20% a TP3\n"
+            f"• SL basado en 1.5×ATR ({atr_pips:.1f} pips de volatilidad actual)\n\n"
+
+            f"⚡ *CONFLUENCIAS DETECTADAS*\n"
+            f"{conf_block}\n\n"
+
+            f"📌 *CONTEXTO DE MERCADO*\n"
+            f"• RSI 1H: {rsi:.0f}  |  ATR: {atr_pips:.1f} pips\n"
+        )
+
+        if has_4h:
+            msg += f"• RSI 4H: {rsi_4h:.0f}  |  EMA50-4H: `{e50_4h:.5f}`\n"
+
+        msg += (
+            f"• COT institucional: {cot_bias.upper()}\n"
+            f"• Noticias próximas: {'⚠️ PRECAUCIÓN' if news_risk != 'low' else '✅ sin riesgo'}\n"
+            f"• Volumen relativo: {vol_ratio:.1f}x la media\n\n"
+            f"⏰ {now_str}\n"
+            f"_Confirma en el gráfico antes de entrar. Respeta siempre el SL._"
+        )
+
+        if _send_tg(msg):
+            _db.set_setting("premium_signal_last_ts", str(time.time()))
+            _log.info("PREMIUM SIGNAL SENT: %s score=%d conf=%d",
+                      direction, score, len(confluences))
+            # Guardar en DB para historial y backtest de señales reales
+            try:
+                _db.save_metric(
+                    name="tg_signal_log",
+                    value=float(score),
+                    context={
+                        "ts":           datetime.now(timezone.utc).isoformat(),
+                        "direction":    direction,
+                        "entry":        round(px, 5),
+                        "sl":           round(sl, 5),
+                        "tp1":          round(tp1, 5),
+                        "tp2":          round(tp2, 5),
+                        "tp3":          round(tp3, 5),
+                        "sl_pips":      int(sl_pips),
+                        "tp1_pips":     int(tp1_pips),
+                        "tp2_pips":     int(tp2_pips),
+                        "tp3_pips":     int(tp3_pips),
+                        "score":        score,
+                        "confluences":  len(_positive_conf),
+                        "atr_pips":     round(atr_pips, 1),
+                        "risk_pct":     risk_pct,
+                        "rsi":          round(rsi, 1),
+                        "rsi_4h":       round(rsi_4h, 1) if has_4h else None,
+                        "cot_bias":     cot_bias,
+                        "liq_target":   liq_desc,
+                        "session":      datetime.now(timezone.utc).strftime("%H UTC"),
+                    },
+                )
+            except Exception as _se:
+                _log.debug("save signal log error: %s", _se)
+        else:
+            _log.warning("Premium signal: fallo al enviar Telegram")
+
+    except Exception as _pe:
+        _log.warning("_check_premium_entry error: %s", _pe)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
