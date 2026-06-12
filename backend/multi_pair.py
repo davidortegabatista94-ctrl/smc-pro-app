@@ -239,6 +239,7 @@ def analyze_pair(
         "votes_long": 0, "votes_short": 0,
         "dxy_signal_dir": "",
         "confluence": False, "conflict": False, "setup_grade": "normal",
+        "calendar": {"calendar_available": False},
         "error": None,
     }
 
@@ -367,6 +368,27 @@ def analyze_pair(
                     vs += news_w
                     vote_log.append(f"+{news_w} SHORT — Noticias (fuerza {_strength:.2f}, {_ncount} titulares)")
 
+        # 4b. Calendario económico — el "porqué" programado de las velas
+        cal_block = False
+        cal_dir   = ""
+        try:
+            from backend.econ_calendar import calendar_context
+            cal = calendar_context(symbol)
+            result["calendar"] = cal
+            cal_block = bool(cal.get("block"))
+            cal_dir   = cal.get("bias", "") or ""
+            if cal.get("reason"):
+                vote_log.append(f"📅 {cal['reason']}")
+            # Sesgo direccional de una sorpresa macro reciente = señal fuerte (peso 2)
+            if cal_dir in ("LONG", "SHORT"):
+                if cal_dir == "LONG":
+                    vl += 2; vote_log.append(f"+2 LONG — {cal.get('bias_reason','')}")
+                else:
+                    vs += 2; vote_log.append(f"+2 SHORT — {cal.get('bias_reason','')}")
+        except Exception as _e:
+            _log.debug("calendar %s: %s", symbol, _e)
+            result["calendar"] = {"calendar_available": False}
+
         # 5. TP/SL from 1h data
         if not df_1h.empty and result["price"]:
             try:
@@ -398,6 +420,13 @@ def analyze_pair(
                 # Noticias fuertes empujan en contra de un técnico claro → no operamos
                 conflict = True
                 vote_log.append(f"⚠ CONFLICTO — Noticias fuertes ({news_dir}) vs técnico ({tech_dir}) → VETO")
+        # Calendario manda como filtro de riesgo: si hay evento de alto impacto
+        # demasiado cerca, NO abrimos (el precio salta sin estructura = casino).
+        if cal_block:
+            conflict = True
+            setup_grade = "evento_proximo"
+            vote_log.append("⏸ VETO calendario — evento macro inminente, esperar")
+
         result["confluence"]  = confluence
         result["conflict"]    = conflict
         result["setup_grade"] = setup_grade
@@ -408,7 +437,7 @@ def analyze_pair(
         result["vote_log"]    = vote_log
         total = vl + vs
         if conflict:
-            # Fail-closed: en conflicto fuerte no damos dirección operable
+            # Fail-closed: en conflicto fuerte o evento inminente no operamos
             result["direction"]  = None
             result["confidence"] = 0
         elif total == 0:

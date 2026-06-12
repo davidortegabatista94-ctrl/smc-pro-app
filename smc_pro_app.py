@@ -2537,6 +2537,26 @@ else:
             st.error("Módulo orchestrator no disponible. Revisa backend/orchestrator.py.")
             st.stop()
 
+        # ── Banner: próximos eventos macro (el "porqué" programado) ──────────
+        try:
+            import backend.econ_calendar as _ecal
+            _hi = _ecal.todays_high_impact()[:5]
+            if _hi:
+                _evs = " &nbsp;|&nbsp; ".join(
+                    f"<b>{e['currency']}</b> {e['title']} "
+                    f"<span style='color:#e0a83c'>en {e['in_hours']}h</span>"
+                    for e in _hi)
+                st.markdown(
+                    f"<div style='background:#161b22;border-left:4px solid #e0a83c;"
+                    f"border-radius:6px;padding:8px 14px;font-size:0.82rem;color:#c9d1d9'>"
+                    f"📅 <b>Eventos de alto impacto próximos</b> (el bot no abre nuevas "
+                    f"posiciones justo antes): {_evs}</div>",
+                    unsafe_allow_html=True)
+            else:
+                st.caption("📅 Sin eventos macro de alto impacto pendientes esta semana.")
+        except Exception:
+            pass
+
         # ── AUTO-EJECUTA análisis si los datos tienen >5 min o no existen ────
         _orch_stale = (st.session_state.orch_results is None
                        or (_ot.time() - st.session_state.orch_last_run) > 300)
@@ -2558,10 +2578,36 @@ else:
                         analysis_mode=st.session_state.orch_analysis_mode,
                         dxy_dir=_ad, news_list=_an,
                     )
+                    # ── BUCLE DE APRENDIZAJE ──────────────────────────────────
+                    # 1) Cerrar/evaluar trades en papel contra el mercado real
+                    try:
+                        import backend.learning as _L
+                        st.session_state.orch_eval = _L.evaluate_open_trades()
+                    except Exception as _le:
+                        _L = None
                     for _as, _ad2 in _ar.items():
                         _ad2["trading_mode"] = st.session_state.orch_mode
                         _ad2["min_score"]    = st.session_state.orch_min_score
+                        # 2) Ajuste de score según lo aprendido (acotado, honesto)
+                        if _L is not None:
+                            try:
+                                _adj, _adj_why = _L.edge_adjustment(_ad2)
+                                if _adj:
+                                    _ad2["score"] = max(0, min(98, int(_ad2.get("score") or 0) + _adj))
+                                    _ad2.setdefault("vote_log", []).append(
+                                        f"🧠 Aprendizaje {_adj:+d}: " + "; ".join(_adj_why[:3]))
+                                    _ad2["learn_adj"] = _adj
+                            except Exception:
+                                pass
                         _orch.log_decision(_ad2)
+                        # 3) Registrar como trade en papel si es operable (≥ umbral)
+                        if (_L is not None
+                                and _ad2.get("direction") in ("LONG", "SHORT")
+                                and int(_ad2.get("score") or 0) >= st.session_state.orch_min_score):
+                            try:
+                                _L.open_paper_trade(_ad2)
+                            except Exception:
+                                pass
                     st.session_state.orch_results  = _ar
                     st.session_state.orch_last_run = _ot.time()
                 except Exception as _ae:
@@ -2648,6 +2694,59 @@ else:
                     )
                     with _cols[_ci]:
                         st.markdown(_card, unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # ── SECCIÓN 1b: LO QUE EL BOT HA APRENDIDO ───────────────────────────
+        st.markdown("#### 🧠 Aprendizaje del bot")
+        st.caption("Cada señal operable se registra con su porqué y se verifica contra el "
+                   "mercado real (¿tocó TP o SL?). El bot mide qué razones ganan de verdad "
+                   "y ajusta el filtro. No es azar: es causa → resultado → ajuste.")
+        try:
+            import backend.learning as _Lr
+            _rep = _Lr.learning_report()
+            _ov  = _rep["overall"]
+            _ec  = st.session_state.get("orch_eval", {}) or {}
+            _lc1, _lc2, _lc3, _lc4 = st.columns(4)
+            _lc1.metric("Trades evaluados", _rep["total_closed"])
+            _lc2.metric("Win rate real", f"{_ov['win_rate']}%" if _ov["n"] else "—")
+            _lc3.metric("Expectancy", f"{_ov['expectancy_r']:+.2f}R" if _ov["n"] else "—")
+            _lc4.metric("Abiertos ahora", _ec.get("still_open", 0))
+
+            if _rep["total_closed"] < _Lr.MIN_SAMPLES:
+                st.info(f"📚 Fase de aprendizaje: {_rep['total_closed']}/{_Lr.MIN_SAMPLES} "
+                        f"trades cerrados antes de fiarnos de los patrones. El bot opera con "
+                        f"el filtro base (noticias + técnico + calendario) y va acumulando "
+                        f"evidencia. Sin atajos: las conclusiones necesitan muestra.")
+            else:
+                # Mostrar los features con edge claro (positivo y negativo)
+                _edge_rows = []
+                for _fk, _vals in _rep["by_feature"].items():
+                    for _val, _s in _vals.items():
+                        if _s.get("reliable") and abs(_s["expectancy_r"]) >= 0.15:
+                            _edge_rows.append({
+                                "Razón": f"{_fk} = {_val}",
+                                "Ops": _s["n"],
+                                "Win %": _s["win_rate"],
+                                "Expectancy R": _s["expectancy_r"],
+                            })
+                _edge_rows.sort(key=lambda r: r["Expectancy R"], reverse=True)
+                if _edge_rows:
+                    st.markdown("**Patrones aprendidos** (verde = el bot favorece; rojo = evita):")
+                    def _edge_color(v):
+                        try:
+                            return ("color:#00b87c;font-weight:bold" if float(v) > 0
+                                    else "color:#e03c50;font-weight:bold")
+                        except Exception:
+                            return ""
+                    st.dataframe(
+                        pd.DataFrame(_edge_rows).style.map(_edge_color, subset=["Expectancy R"]),
+                        use_container_width=True, hide_index=True, height=260,
+                    )
+                else:
+                    st.caption("Aún sin patrones con ventaja estadística clara. Operando con filtro base.")
+        except Exception as _lre:
+            st.caption(f"Panel de aprendizaje no disponible: {_lre}")
 
         st.markdown("---")
 
