@@ -24,6 +24,11 @@ news_cache.json
 install_log.txt
 install_status.txt
 
+# Estado de runtime del bot (se regenera, no versionar)
+backend/_econ_cache.json
+paper_trades.jsonl
+orchestrator_decisions.jsonl
+
 # Archivos de instalador Windows
 SMC_Pro_App_Setup.exe
 *.iss
