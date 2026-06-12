@@ -2512,272 +2512,249 @@ else:
         st.stop()
 
     if st.session_state.get("app_mode") == "orchestrator":
-        # ── MODO ORQUESTADOR — renderiza directamente sin tabs de trading ────
-        # Inicializar session_state aquí porque este bloque corre antes
-        # del bloque global de inicialización (líneas ~2700+)
+        # ── MODO ORQUESTADOR — dashboard auto-ejecutable, sin botones de análisis ──
         if "orch_mode"          not in st.session_state: st.session_state.orch_mode          = "paper"
         if "orch_analysis_mode" not in st.session_state: st.session_state.orch_analysis_mode = "intraday"
-        if "orch_pairs"         not in st.session_state: st.session_state.orch_pairs          = ["EURUSD","GBPUSD","USDJPY","AUDUSD"]
+        if "orch_pairs"         not in st.session_state: st.session_state.orch_pairs          = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD"]
         if "orch_min_score"     not in st.session_state: st.session_state.orch_min_score      = 70
         if "orch_results"       not in st.session_state: st.session_state.orch_results        = None
         if "orch_last_run"      not in st.session_state: st.session_state.orch_last_run       = 0.0
         if "orch_bt_results"    not in st.session_state: st.session_state.orch_bt_results     = None
         if "orch_sweep_df"      not in st.session_state: st.session_state.orch_sweep_df       = None
-        import time as _orch_time_home
-        _oc_back, _oc_title = st.columns([1, 6])
-        if _oc_back.button("← Volver", key="orch_home_back"):
+        import time as _ot
+
+        # ── Header con botón volver ──────────────────────────────────────────
+        _oh_back, _oh_title, _oh_status = st.columns([1, 5, 2])
+        if _oh_back.button("← Volver", key="orch_home_back"):
             st.session_state.app_mode = None
             st.rerun()
-        _oc_title.markdown("### Orquestador Bot — Decisión automática multi-par")
+        _oh_title.markdown("### Bot Orquestador — Dashboard en vivo")
+        _oh_age = int(_ot.time() - st.session_state.orch_last_run) if st.session_state.orch_last_run > 0 else -1
+        if _oh_age >= 0:
+            _oh_status.caption(f"Actualizado hace {_oh_age}s")
 
         if not _ORCH_OK:
             st.error("Módulo orchestrator no disponible. Revisa backend/orchestrator.py.")
             st.stop()
 
-        st.caption(
-            "Conecta todos los módulos existentes (análisis técnico, DXY, COT, noticias, IA) "
-            "en una única decisión por par. Paper trading por defecto."
-        )
-
-        # Configuración
-        st.markdown("---")
-        _oc_h1, _oc_h2, _oc_h3 = st.columns([1, 1, 1])
-        with _oc_h1:
-            st.markdown("**Modo**")
-            _oc_mode_h = st.radio("Modo", ["paper", "live"],
-                index=0 if st.session_state.orch_mode == "paper" else 1,
-                horizontal=True, key="orch_mode_home", label_visibility="collapsed")
-            st.session_state.orch_mode = _oc_mode_h
-            if _oc_mode_h == "live":
-                st.warning("LIVE: órdenes reales al broker.", icon="⚠️")
-            else:
-                st.info("PAPER: sin órdenes reales.", icon="📝")
-        with _oc_h2:
-            st.markdown("**Tipo de análisis**")
-            _oc_am_h_map = {"scalping": "Scalping 15m", "intraday": "Intraday 1h", "swing": "Swing 4h"}
-            _oc_am_h_keys = list(_oc_am_h_map.keys())
-            _oc_am_h_idx  = _oc_am_h_keys.index(st.session_state.orch_analysis_mode) if st.session_state.orch_analysis_mode in _oc_am_h_keys else 1
-            _oc_am_h_sel  = st.selectbox("Análisis", list(_oc_am_h_map.values()),
-                index=_oc_am_h_idx, key="orch_am_home", label_visibility="collapsed")
-            st.session_state.orch_analysis_mode = _oc_am_h_keys[list(_oc_am_h_map.values()).index(_oc_am_h_sel)]
-        with _oc_h3:
-            st.markdown("**Score mínimo**")
-            _oc_sc_h = st.slider("Score", 45, 90, st.session_state.orch_min_score,
-                step=5, key="orch_score_home", label_visibility="collapsed")
-            st.session_state.orch_min_score = _oc_sc_h
-
-        _oc_all_pairs_h = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
-        st.markdown("**Pares a analizar**")
-        _oc_pairs_h = st.multiselect("Pares", _oc_all_pairs_h,
-            default=st.session_state.orch_pairs, key="orch_pairs_home")
-        if _oc_pairs_h:
-            st.session_state.orch_pairs = _oc_pairs_h
-
-        st.markdown("---")
-        _oc_run_h = st.button("Analizar todos los pares", type="primary",
-            key="orch_run_home", use_container_width=False)
-        _oc_last_h = st.session_state.orch_last_run
-        if _oc_last_h > 0:
-            st.caption(f"Último análisis hace {int(_orch_time_home.time() - _oc_last_h)}s")
-
-        if _oc_run_h and _oc_pairs_h:
-            with st.spinner(f"Analizando {len(_oc_pairs_h)} pares..."):
+        # ── AUTO-EJECUTA análisis si los datos tienen >5 min o no existen ────
+        _orch_stale = (st.session_state.orch_results is None
+                       or (_ot.time() - st.session_state.orch_last_run) > 300)
+        if _orch_stale:
+            with st.spinner("Actualizando análisis de mercado..."):
                 try:
-                    _oc_dxy_h = ""
+                    _ad = ""
                     try:
-                        from backend.signals import get_dxy_yf as _gd_h
-                        _oc_dxy_h = (_gd_h("1h") or {}).get("direction", "")
-                    except Exception:
-                        pass
-                    _oc_news_h = []
+                        from backend.signals import get_dxy_yf as _agd
+                        _ad = (_agd("1h") or {}).get("direction", "")
+                    except Exception: pass
+                    _an = []
                     try:
-                        from backend.signals import get_rss_news as _gn_h
-                        _oc_news_h = _gn_h() or []
-                    except Exception:
-                        pass
-                    _oc_res_h = _orch.run_all_pairs_analysis(
-                        pairs=_oc_pairs_h,
+                        from backend.signals import get_rss_news as _agn
+                        _an = _agn() or []
+                    except Exception: pass
+                    _ar = _orch.run_all_pairs_analysis(
+                        pairs=st.session_state.orch_pairs,
                         analysis_mode=st.session_state.orch_analysis_mode,
-                        dxy_dir=_oc_dxy_h, news_list=_oc_news_h,
+                        dxy_dir=_ad, news_list=_an,
                     )
-                    for _sym_h, _dec_h in _oc_res_h.items():
-                        _dec_h["trading_mode"] = st.session_state.orch_mode
-                        _dec_h["min_score"]    = st.session_state.orch_min_score
-                        _dec_h["executed"]     = (
-                            st.session_state.orch_mode == "live"
-                            and _dec_h.get("direction") in ("LONG","SHORT")
-                            and int(_dec_h.get("score") or 0) >= st.session_state.orch_min_score
-                        )
-                        _orch.log_decision(_dec_h)
-                    st.session_state.orch_results  = _oc_res_h
-                    st.session_state.orch_last_run = _orch_time_home.time()
-                    st.success(f"Análisis completado — {len(_oc_res_h)} pares")
-                except Exception as _oe_h:
-                    st.error(f"Error: {_oe_h}")
+                    for _as, _ad2 in _ar.items():
+                        _ad2["trading_mode"] = st.session_state.orch_mode
+                        _ad2["min_score"]    = st.session_state.orch_min_score
+                        _orch.log_decision(_ad2)
+                    st.session_state.orch_results  = _ar
+                    st.session_state.orch_last_run = _ot.time()
+                except Exception as _ae:
+                    st.warning(f"Error al actualizar análisis: {_ae}")
 
-        # Cards por par
+        # ── AUTO-EJECUTA backtest histórico en primera apertura ──────────────
+        if st.session_state.orch_bt_results is None:
+            with st.spinner("Calculando historial de rendimiento... (~1-2 min, solo la primera vez)"):
+                try:
+                    _bns, _bnd, _bcd = 0.0, "", ""
+                    if st.session_state.orch_results:
+                        _eu2 = st.session_state.orch_results.get("EURUSD", {})
+                        _bnd = _eu2.get("news_sentiment", {}).get("direction", "NEUTRAL")
+                        _bns = 1.0 if _bnd == "LONG" else (-1.0 if _bnd == "SHORT" else 0.0)
+                        _bcd = _eu2.get("dxy_signal_dir", "")
+                    st.session_state.orch_bt_results = _orch.backtest_multiperiod(
+                        live_news_score=_bns, live_news_dir=_bnd, live_cot_dir=_bcd
+                    )
+                except Exception as _be:
+                    st.warning(f"Error en backtest histórico: {_be}")
+
+        # ── SECCIÓN 1: SEÑALES EN VIVO POR PAR ───────────────────────────────
         if st.session_state.orch_results:
+            _rs   = st.session_state.orch_results
+            _mn   = st.session_state.orch_min_score
+            _syms = list(_rs.keys())
+            # Resumen top: cuántas activas, cuántas LONG/SHORT/WAIT
+            _n_long  = sum(1 for d in _rs.values() if d.get("direction")=="LONG"  and int(d.get("score") or 0) >= _mn)
+            _n_short = sum(1 for d in _rs.values() if d.get("direction")=="SHORT" and int(d.get("score") or 0) >= _mn)
+            _n_wait  = len(_syms) - _n_long - _n_short
+            _sm1, _sm2, _sm3, _sm4 = st.columns(4)
+            _sm1.metric("Pares analizados", len(_syms))
+            _sm2.metric("LONG activos", _n_long, delta=None)
+            _sm3.metric("SHORT activos", _n_short, delta=None)
+            _sm4.metric("En espera", _n_wait)
             st.markdown("---")
-            st.markdown("#### Decisión actual por par")
-            _oc_rs_h   = st.session_state.orch_results
-            _oc_min_h  = st.session_state.orch_min_score
-            _oc_syms_h = list(_oc_rs_h.keys())
-            for _ri in range(0, len(_oc_syms_h), 4):
-                _row_syms_h = _oc_syms_h[_ri:_ri+4]
-                _row_cols_h = st.columns(len(_row_syms_h))
-                for _ci_h, _sym_h in enumerate(_row_syms_h):
-                    _d_h     = _oc_rs_h[_sym_h]
-                    _dir_h   = _d_h.get("direction") or "WAIT"
-                    _conf_h  = int(_d_h.get("confidence") or 0)
-                    _sc_h    = int(_d_h.get("score") or 0)
-                    _tp_h    = _d_h.get("tp1") or _d_h.get("tp")
-                    _sl_h    = _d_h.get("sl")
-                    _rr_h    = _d_h.get("rr")
-                    _name_h  = _d_h.get("name", _sym_h)
-                    _fb_h    = _d_h.get("flag_base","")
-                    _fq_h    = _d_h.get("flag_quote","")
-                    _vl_h    = int(_d_h.get("votes_long") or 0)
-                    _vs_h    = int(_d_h.get("votes_short") or 0)
-                    _valid_h = _sc_h >= _oc_min_h and _dir_h in ("LONG","SHORT")
-                    if _dir_h == "LONG":
-                        _dc_h = "#00b87c"; _bd_h = "#00b87c"; _dl_h = "LONG"
-                    elif _dir_h == "SHORT":
-                        _dc_h = "#e03c50"; _bd_h = "#e03c50"; _dl_h = "SHORT"
-                    else:
-                        _dc_h = "#a0aab4"; _bd_h = "#30363d"; _dl_h = "ESPERAR"
-                    _op_h = "1.0" if _valid_h else "0.6"
-                    _badge_h  = f'<div style="display:inline-block;padding:2px 8px;border-radius:4px;background:{_dc_h}22;color:{_dc_h};font-size:0.7rem;font-weight:700">SEÑAL ACTIVA</div>' if _valid_h else ""
-                    _price_h  = f'<div style="font-size:0.82rem;color:#8b949e">Precio: {_d_h.get("price",0):.5f}</div>' if _d_h.get("price") else ""
-                    _lvl_h    = (f'<div style="font-size:0.76rem;color:#8b949e">TP:<span style="color:#00b87c">{_tp_h:.5f}</span> SL:<span style="color:#e03c50">{_sl_h:.5f}</span>{f" RR{_rr_h:.1f}" if _rr_h else ""}</div>') if (_tp_h and _sl_h and _valid_h) else ""
-                    _card_h   = (
-                        f'<div style="background:#161b22;border:1px solid {_bd_h};border-left:4px solid {_dc_h};'
-                        f'border-radius:8px;padding:14px 16px;opacity:{_op_h};margin-bottom:8px">'
-                        f'<div style="font-size:0.95rem;font-weight:700;color:#e6edf3">{_fb_h}{_fq_h} {_name_h}</div>'
-                        f'<div style="font-family:monospace;font-size:1.5rem;font-weight:800;color:{_dc_h}">{_dl_h}</div>'
-                        f'<div style="font-size:0.8rem;color:#8b949e">Conf: {_conf_h}% | L:{_vl_h} S:{_vs_h} | Sc:{_sc_h}</div>'
-                        f'{_badge_h}{_price_h}{_lvl_h}</div>'
-                    )
-                    with _row_cols_h[_ci_h]:
-                        st.markdown(_card_h, unsafe_allow_html=True)
-
-        # Log compacto
-        st.markdown("---")
-        st.markdown("#### Últimas decisiones registradas")
-        try:
-            _oc_log_h = _orch.load_decisions_log(last_n=30)
-        except Exception:
-            _oc_log_h = []
-        if _oc_log_h:
-            _oc_log_rows_h = []
-            for _le_h in _oc_log_h:
-                _le_dir_h  = _le_h.get("direction","WAIT")
-                _le_sc_h   = int(_le_h.get("score") or 0)
-                _le_mn_h   = int(_le_h.get("min_score") or 0)
-                _le_valid_h= _le_sc_h >= _le_mn_h and _le_dir_h in ("LONG","SHORT")
-                _oc_log_rows_h.append({
-                    "Fecha/Hora": str(_le_h.get("logged_at",""))[:19].replace("T"," "),
-                    "Par":        _le_h.get("symbol","—"),
-                    "Dir":        _le_dir_h,
-                    "Score":      _le_sc_h,
-                    "Conf %":     int(_le_h.get("confidence") or 0),
-                    "Activa":     "SI" if _le_valid_h else "—",
-                    "Modo":       _le_h.get("trading_mode","paper"),
-                })
-            st.dataframe(pd.DataFrame(_oc_log_rows_h), use_container_width=True,
-                hide_index=True, height=280)
-        else:
-            st.info("Log vacío — pulsa 'Analizar todos los pares' para generar decisiones.")
-
-        # Backtest y calibración como expanders para no sobrecargar la página
-        with st.expander("Calibración de frecuencia (ops/día por cooldown) — datos 15m"):
-            st.caption(
-                "Usa la estrategia **EMA21 Pullback en 15m** (alta frecuencia). "
-                "Cooldown = velas de 15 min entre entradas. "
-                "Para 30 ops/día en un solo par, busca cooldown=2-4. "
-                "Para 30 ops/día en total, con 2 pares × 15 ops/día cada uno."
-            )
-            _oc_sw_btn_h = st.button("Calcular tabla de frecuencias (15m)", key="orch_sweep_home")
-            if _oc_sw_btn_h:
-                with st.spinner("Descargando datos 15m y ejecutando calibración (~30s)..."):
-                    try:
-                        from backend.strategies import get_hf_data as _ghf_h
-                        _df_sw_h = _ghf_h("EURUSD=X", days=55)
-                        if not _df_sw_h.empty:
-                            st.session_state.orch_sweep_df = _orch.cooldown_sweep(_df_sw_h)
-                        else:
-                            st.warning("Sin datos 15m disponibles. yfinance solo tiene 15m de los últimos 60 días.")
-                    except Exception as _se_h:
-                        st.error(f"Error: {_se_h}")
-            if st.session_state.orch_sweep_df is not None and not st.session_state.orch_sweep_df.empty:
-                _sw_h = st.session_state.orch_sweep_df.copy()
-                _best_h = int((_sw_h["Ops/día"] - 30).abs().idxmin())
-                def _hi_h(row):
-                    return ["background-color:#1c2f1c;color:#00b87c;font-weight:bold"]*len(row) if row.name==_best_h else [""]*len(row)
-                st.dataframe(_sw_h.style.apply(_hi_h, axis=1), use_container_width=True, hide_index=True)
-                _br = _sw_h.iloc[_best_h]
-                st.info(
-                    f"Cooldown **{int(_br['Cooldown (velas 15m)'])} velas** "
-                    f"(= cada {int(_br['= cada (min)'])} min) → "
-                    f"**{float(_br['Ops/día']):.1f} ops/día** por par | "
-                    f"WR: {float(_br['Win Rate %']):.1f}% | "
-                    f"PF: {float(_br['Profit Factor']):.2f}"
-                )
-
-        with st.expander("Backtest multi-periodo (2008, 2020, 2022, último año)"):
-            st.caption(
-                "Estrategia adaptativa: régimen variable + noticias (si disponibles) + COT. "
-                "Para los periodos históricos no hay noticias reales — el motor usa COT proxy. "
-                "Para el último mes (15m) usa las noticias actuales si pulsaste 'Analizar pares' antes."
-            )
-            _oc_bt_btn_h = st.button("Ejecutar backtest histórico", key="orch_bt_home",
-                help="Descarga datos y ejecuta hasta 6 backtests comparativos. ~1-2 minutos.")
-            if _oc_bt_btn_h:
-                with st.spinner("Descargando datos históricos y ejecutando backtests..."):
-                    try:
-                        # Pasar noticias/COT actuales si el usuario ya analizó los pares
-                        _bt_ns = 0.0; _bt_nd = ""; _bt_cd = ""
-                        if st.session_state.orch_results:
-                            _eu = st.session_state.orch_results.get("EURUSD", {})
-                            _bt_ns = float(_eu.get("news_sentiment", {}).get("direction", "") == "LONG") \
-                                   - float(_eu.get("news_sentiment", {}).get("direction", "") == "SHORT")
-                            _bt_nd = _eu.get("news_sentiment", {}).get("direction", "NEUTRAL")
-                            _bt_cd = _eu.get("dxy_signal_dir", "")
-                        st.session_state.orch_bt_results = _orch.backtest_multiperiod(
-                            live_news_score=_bt_ns,
-                            live_news_dir=_bt_nd,
-                            live_cot_dir=_bt_cd,
+            # Cards por par (4 por fila)
+            for _ri in range(0, len(_syms), 4):
+                _cols = st.columns(min(4, len(_syms) - _ri))
+                for _ci, _sym in enumerate(_syms[_ri:_ri+4]):
+                    _d     = _rs[_sym]
+                    _dir   = _d.get("direction") or "WAIT"
+                    _conf  = int(_d.get("confidence") or 0)
+                    _sc    = int(_d.get("score") or 0)
+                    _tp    = _d.get("tp1") or _d.get("tp")
+                    _sl    = _d.get("sl")
+                    _rr    = _d.get("rr")
+                    _pr    = _d.get("price")
+                    _name  = _d.get("name", _sym)
+                    _fb    = _d.get("flag_base", "")
+                    _fq    = _d.get("flag_quote", "")
+                    _valid = _sc >= _mn and _dir in ("LONG","SHORT")
+                    _dc    = "#00b87c" if _dir=="LONG" else ("#e03c50" if _dir=="SHORT" else "#a0aab4")
+                    _dl    = "LONG" if _dir=="LONG" else ("SHORT" if _dir=="SHORT" else "ESPERAR")
+                    _op    = "1.0" if _valid else "0.55"
+                    _badge_h = f'<span style="background:{_dc}22;color:{_dc};font-size:0.68rem;font-weight:700;padding:1px 7px;border-radius:3px">ACTIVA</span>' if _valid else ""
+                    _pr_h  = f'<div style="font-size:0.8rem;color:#8b949e;margin-top:3px">Precio: {_pr:.5f}</div>' if _pr else ""
+                    _lvl_h = ""
+                    if _tp and _sl and _valid and _pr:
+                        # Calcular % ganancia potencial
+                        _pct_tp = abs(_tp - _pr) / _pr * 100
+                        _pct_sl = abs(_sl - _pr) / _pr * 100
+                        _lvl_h = (
+                            f'<div style="font-size:0.76rem;color:#8b949e;margin-top:2px">'
+                            f'TP: <span style="color:#00b87c">+{_pct_tp:.2f}%</span>'
+                            f' &nbsp; SL: <span style="color:#e03c50">-{_pct_sl:.2f}%</span>'
+                            f'{f" &nbsp; RR 1:{_rr:.1f}" if _rr else ""}'
+                            f'</div>'
                         )
-                    except Exception as _bte_h:
-                        st.error(f"Error: {_bte_h}")
-            if st.session_state.orch_bt_results:
-                _bt_rows_h = []
-                for _pn_h, _pr_h in st.session_state.orch_bt_results.items():
-                    _is_proj = _pr_h.get("is_projection", False)
-                    _has_err = "error" in _pr_h and "winrate" not in _pr_h
-                    if _has_err:
-                        _bt_rows_h.append({"Periodo":_pn_h,"TF":"—","Ops":"—",
-                            "Ops/día":"—","WR%":"—","PF":"—","MaxDD%":"—","Pips":"—",
-                            "Info":_pr_h.get("error","")[:60]})
-                    elif _is_proj:
-                        _bt_rows_h.append({"Periodo":f"📊 {_pn_h}","TF":_pr_h.get("tf","—"),
-                            "Ops":"estimado","Ops/día":_pr_h.get("ops_per_day","—"),
-                            "WR%":_pr_h.get("winrate","—"),"PF":_pr_h.get("profit_factor","—"),
-                            "MaxDD%":_pr_h.get("max_dd","—"),"Pips":"proporcional",
-                            "Info":_pr_h.get("note","")[:80]})
-                    else:
-                        _bt_rows_h.append({"Periodo":_pn_h,"TF":_pr_h.get("tf","—"),
-                            "Ops":_pr_h.get("total","—"),"Ops/día":_pr_h.get("ops_per_day","—"),
-                            "WR%":_pr_h.get("winrate","—"),"PF":_pr_h.get("profit_factor","—"),
-                            "MaxDD%":_pr_h.get("max_dd","—"),"Pips":_pr_h.get("net_pips","—"),
-                            "Info":_pr_h.get("signals","")[:50]})
-                st.dataframe(pd.DataFrame(_bt_rows_h), use_container_width=True, hide_index=True)
-                st.info(
-                    "**Filas 📊**: proyección multi-par — los 30 ops/día se alcanzan "
-                    "con 5-7 pares en paralelo sobre datos 15m. "
-                    "Las filas históricas (2008/2020/2022) usan datos diarios: "
-                    "máx ~1 op/día — no existe 15m histórico gratuito para esos años."
-                )
-                st.caption("Sin spread/slippage modelado. WR objetivo: 45-55%. RR 1:3 → breakeven en 25%.")
+                    _card = (
+                        f'<div style="background:#161b22;border:1px solid {_dc if _valid else "#30363d"};'
+                        f'border-left:4px solid {_dc};border-radius:8px;padding:14px 16px;'
+                        f'opacity:{_op};margin-bottom:6px">'
+                        f'<div style="font-size:0.92rem;font-weight:700;color:#e6edf3">{_fb}{_fq} {_name}</div>'
+                        f'<div style="font-family:monospace;font-size:1.55rem;font-weight:800;color:{_dc};line-height:1.2">{_dl}</div>'
+                        f'<div style="font-size:0.78rem;color:#8b949e">Conf: {_conf}% &nbsp;·&nbsp; Score: {_sc}</div>'
+                        f'{_badge_h}{_pr_h}{_lvl_h}'
+                        f'</div>'
+                    )
+                    with _cols[_ci]:
+                        st.markdown(_card, unsafe_allow_html=True)
+
+        st.markdown("---")
+
+        # ── SECCIÓN 2: RENDIMIENTO HISTÓRICO (auto-calculado) ─────────────────
+        st.markdown("#### Rendimiento histórico del sistema")
+        st.caption("Auto-calculado al abrir la página. Estrategia EMA21 Bounce + noticias + COT. En **% de ganancia**.")
+
+        if st.session_state.orch_bt_results:
+            _bt    = st.session_state.orch_bt_results
+            _btrow = []
+            for _pn, _pr in _bt.items():
+                _isproj = _pr.get("is_projection", False)
+                _haserr = "error" in _pr and "winrate" not in _pr
+                if _haserr:
+                    _btrow.append({
+                        "Periodo":   _pn, "TF": "—", "Ops/día": "—",
+                        "WR %":      "—", "PF": "—",
+                        "Retorno %": "—", "MaxDD %": "—",
+                        "Info":      _pr.get("error","")[:70],
+                    })
+                elif _isproj:
+                    _btrow.append({
+                        "Periodo":   f"📊 {_pn}", "TF": _pr.get("tf","—"),
+                        "Ops/día":   _pr.get("ops_per_day","—"),
+                        "WR %":      f"{_pr.get('winrate','—')}",
+                        "PF":        f"{_pr.get('profit_factor','—')}",
+                        "Retorno %": "proporcional",
+                        "MaxDD %":   _pr.get("max_dd","—"),
+                        "Info":      _pr.get("note","")[:70],
+                    })
+                else:
+                    _ret = _pr.get("retorno_pct")
+                    _ret_str = f"{_ret:+.1f}%" if isinstance(_ret, (int,float)) else "—"
+                    _wr  = _pr.get("winrate","—")
+                    _wr_str = f"{_wr}%" if isinstance(_wr,(int,float)) else "—"
+                    _pf  = _pr.get("profit_factor","—")
+                    _dd  = _pr.get("max_dd","—")
+                    _dd_str = f"{_dd}%" if isinstance(_dd,(int,float)) else "—"
+                    _btrow.append({
+                        "Periodo":   _pn, "TF": _pr.get("tf","—"),
+                        "Ops/día":   _pr.get("ops_per_day","—"),
+                        "WR %":      _wr_str, "PF": _pf,
+                        "Retorno %": _ret_str,
+                        "MaxDD %":   _dd_str,
+                        "Info":      _pr.get("signals","")[:50],
+                    })
+            _bt_df = pd.DataFrame(_btrow)
+            def _bt_color(row):
+                ret = row.get("Retorno %","")
+                if isinstance(ret, str) and ret.startswith("+"):
+                    return ["background-color:#1c2f1c"] * len(row)
+                if isinstance(ret, str) and ret.startswith("-"):
+                    return ["background-color:#2f1c1c"] * len(row)
+                if isinstance(row.get("Periodo",""), str) and "📊" in str(row.get("Periodo","")):
+                    return ["background-color:#1c2040"] * len(row)
+                return [""] * len(row)
+            st.dataframe(_bt_df.style.apply(_bt_color, axis=1),
+                         use_container_width=True, hide_index=True)
+            st.caption(
+                "Verde = retorno positivo | Rojo = negativo | Azul 📊 = proyección multi-par. "
+                "Sin spread/slippage. RR 1:3 → breakeven en 25% WR. "
+                "Datos diarios (2008/2020/2022): máx ~1 op/día por limitación de datos históricos gratuitos."
+            )
+        else:
+            st.info("Calculando historial... por favor espera.")
+
+        st.markdown("---")
+
+        # ── SECCIÓN 3: LOG DE SEÑALES RECIENTES ──────────────────────────────
+        st.markdown("#### Señales recientes")
+        try:
+            _log = _orch.load_decisions_log(last_n=50)
+        except Exception:
+            _log = []
+        if _log:
+            _lrows = []
+            for _le in _log:
+                _ld   = _le.get("direction","WAIT")
+                _lsc  = int(_le.get("score") or 0)
+                _lmn  = int(_le.get("min_score") or 0)
+                _lval = _lsc >= _lmn and _ld in ("LONG","SHORT")
+                _pr2  = _le.get("price")
+                _tp2  = _le.get("tp1") or _le.get("tp")
+                _pct_tp2 = f"+{abs(_tp2-_pr2)/_pr2*100:.2f}%" if (_pr2 and _tp2 and _lval) else "—"
+                _lrows.append({
+                    "Hora":     str(_le.get("logged_at",""))[:19].replace("T"," "),
+                    "Par":      _le.get("symbol","—"),
+                    "Dir":      _ld,
+                    "Conf %":   int(_le.get("confidence") or 0),
+                    "TP %":     _pct_tp2,
+                    "Activa":   "SI" if _lval else "—",
+                    "Modo":     _le.get("trading_mode","paper"),
+                })
+            def _lcol(val):
+                if val == "LONG":  return "color:#00b87c;font-weight:bold"
+                if val == "SHORT": return "color:#e03c50;font-weight:bold"
+                if val == "SI":    return "color:#00b87c;font-weight:bold"
+                return ""
+            st.dataframe(
+                pd.DataFrame(_lrows).style.applymap(_lcol, subset=["Dir","Activa"]),
+                use_container_width=True, hide_index=True, height=300,
+            )
+        else:
+            st.info("Sin señales registradas aún. El sistema se actualiza automáticamente cada 5 minutos.")
+
+        # Auto-rerun cada 5 minutos para mantener datos frescos
+        @st.fragment(run_every=300)
+        def _orch_autorefresh():
+            _age2 = int(_ot.time() - st.session_state.orch_last_run) if st.session_state.orch_last_run > 0 else 9999
+            if _age2 > 290:
+                st.rerun()
+        _orch_autorefresh()
 
         st.stop()
 

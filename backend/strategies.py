@@ -890,6 +890,8 @@ def run_adaptive_backtest(
     except Exception:
         n_days = max(1, len(df) // (is_daily and 1 or 13 * 4))
 
+    retorno_pct = round((equity[-1] - equity[0]) / equity[0] * 100, 2) if equity[0] > 0 else 0.0
+
     return {
         "total":          total,
         "wins":           len(wins),
@@ -898,6 +900,7 @@ def run_adaptive_backtest(
         "be_winrate":     round(1 / (1 + RR) * 100, 1),
         "net_pips":       round(np_, 1),
         "net_pnl":        round(npnl, 2),
+        "retorno_pct":    retorno_pct,
         "max_dd":         round(max_dd, 1),
         "profit_factor":  pf,
         "rr_ratio":       RR,
