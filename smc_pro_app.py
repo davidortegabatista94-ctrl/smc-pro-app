@@ -2689,17 +2689,23 @@ else:
             st.info("Log vacío — pulsa 'Analizar todos los pares' para generar decisiones.")
 
         # Backtest y calibración como expanders para no sobrecargar la página
-        with st.expander("Calibración de frecuencia (ops/día por cooldown)"):
-            _oc_sw_btn_h = st.button("Calcular tabla de frecuencias", key="orch_sweep_home")
+        with st.expander("Calibración de frecuencia (ops/día por cooldown) — datos 15m"):
+            st.caption(
+                "Usa la estrategia **EMA21 Pullback en 15m** (alta frecuencia). "
+                "Cooldown = velas de 15 min entre entradas. "
+                "Para 30 ops/día en un solo par, busca cooldown=2-4. "
+                "Para 30 ops/día en total, con 2 pares × 15 ops/día cada uno."
+            )
+            _oc_sw_btn_h = st.button("Calcular tabla de frecuencias (15m)", key="orch_sweep_home")
             if _oc_sw_btn_h:
-                with st.spinner("Ejecutando backtest de calibración (~30s)..."):
+                with st.spinner("Descargando datos 15m y ejecutando calibración (~30s)..."):
                     try:
-                        from backend.strategies import get_backtest_data as _gbt_h
-                        _df_sw_h = _gbt_h("1h")
+                        from backend.strategies import get_hf_data as _ghf_h
+                        _df_sw_h = _ghf_h("EURUSD=X", days=55)
                         if not _df_sw_h.empty:
                             st.session_state.orch_sweep_df = _orch.cooldown_sweep(_df_sw_h)
                         else:
-                            st.warning("Sin datos 1h para calibración.")
+                            st.warning("Sin datos 15m disponibles. yfinance solo tiene 15m de los últimos 60 días.")
                     except Exception as _se_h:
                         st.error(f"Error: {_se_h}")
             if st.session_state.orch_sweep_df is not None and not st.session_state.orch_sweep_df.empty:
@@ -2707,8 +2713,15 @@ else:
                 _best_h = int((_sw_h["Ops/día"] - 30).abs().idxmin())
                 def _hi_h(row):
                     return ["background-color:#1c2f1c;color:#00b87c;font-weight:bold"]*len(row) if row.name==_best_h else [""]*len(row)
-                st.dataframe(_sw_h.style.apply(_hi_h,axis=1), use_container_width=True, hide_index=True)
-                st.caption("Fila verde = más cercana a 30 ops/día.")
+                st.dataframe(_sw_h.style.apply(_hi_h, axis=1), use_container_width=True, hide_index=True)
+                _br = _sw_h.iloc[_best_h]
+                st.info(
+                    f"Cooldown **{int(_br['Cooldown (velas 15m)'])} velas** "
+                    f"(= cada {int(_br['= cada (min)'])} min) → "
+                    f"**{float(_br['Ops/día']):.1f} ops/día** por par | "
+                    f"WR: {float(_br['Win Rate %']):.1f}% | "
+                    f"PF: {float(_br['Profit Factor']):.2f}"
+                )
 
         with st.expander("Backtest multi-periodo (2008, 2020, 2022, último año)"):
             _oc_bt_btn_h = st.button("Ejecutar backtest histórico", key="orch_bt_home",
@@ -7896,25 +7909,23 @@ with _t_orch:
         st.markdown("---")
         st.markdown("#### Calibración de frecuencia — ¿cuántas operaciones/día?")
         st.caption(
-            "El parámetro **cooldown** controla cuántas velas (1h) deben pasar "
-            "entre dos entradas consecutivas. Cooldown bajo = más ops, menos calidad. "
-            "Usa el backtest existente sobre datos reales del último año."
+            "Estrategia **EMA21 Pullback en datos 15m**. "
+            "Cooldown = velas de 15 min entre entradas. "
+            "Para 30 ops/día en un par: cooldown 2-4. "
+            "Para 30 ops/día total: 2 pares × 15 ops/día."
         )
 
-        _oc_sweep_btn = st.button("Calcular tabla de frecuencias", key="orch_sweep_btn")
+        _oc_sweep_btn = st.button("Calcular tabla de frecuencias (15m)", key="orch_sweep_btn")
         if _oc_sweep_btn:
-            with st.spinner("Ejecutando backtest de calibración (puede tardar ~30s)..."):
+            with st.spinner("Descargando datos 15m y calculando calibración (~30s)..."):
                 try:
-                    from backend.strategies import get_backtest_data as _oc_get_bt
-                    _oc_df_sweep = _oc_get_bt("1h")
+                    from backend.strategies import get_hf_data as _oc_get_hf
+                    _oc_df_sweep = _oc_get_hf("EURUSD=X", days=55)
                     if not _oc_df_sweep.empty:
-                        _oc_sweep_res = _orch.cooldown_sweep(
-                            _oc_df_sweep,
-                            cooldowns=[1, 2, 3, 4, 6, 8, 10, 15, 20],
-                        )
+                        _oc_sweep_res = _orch.cooldown_sweep(_oc_df_sweep)
                         st.session_state.orch_sweep_df = _oc_sweep_res
                     else:
-                        st.warning("No se pudieron descargar datos 1h para calibración.")
+                        st.warning("Sin datos 15m. yfinance solo tiene 15m de los últimos 60 días.")
                 except Exception as _oc_se:
                     st.error(f"Error en calibración: {_oc_se}")
 
@@ -7942,27 +7953,28 @@ with _t_orch:
                 use_container_width=True, hide_index=True,
             )
             _oc_best_row = _oc_sw.iloc[_oc_best_i]
-            _oc_cd_best  = int(_oc_best_row["Cooldown (velas 1h)"])
+            _oc_cd_best  = int(_oc_best_row["Cooldown (velas 15m)"])
+            _oc_min_best = int(_oc_best_row["= cada (min)"])
             _oc_ops_best = float(_oc_best_row["Ops/día"])
             st.info(
-                f"Cooldown **{_oc_cd_best} velas** es el más cercano a 30 ops/día "
-                f"({_oc_ops_best:.1f} ops/día estimadas). "
-                f"WR: {_oc_best_row['Win Rate %']:.1f}% | PF: {_oc_best_row['Profit Factor']:.2f}"
+                f"Cooldown **{_oc_cd_best} velas** (= cada {_oc_min_best} min) → "
+                f"**{_oc_ops_best:.1f} ops/día** por par. "
+                f"WR: {float(_oc_best_row['Win Rate %']):.1f}% | "
+                f"PF: {float(_oc_best_row['Profit Factor']):.2f} | "
+                f"Para 30 ops/día: usa 2 pares con este cooldown."
             )
             st.caption(
-                "Advertencia (CLAUDE.md): a menor cooldown, más operaciones, pero cada operación "
-                "suma costes ciertos (spread + comisión) contra retorno incierto. "
-                "30 ops/día sobre EUR/USD implicaría ~1 entrada cada 26 min en horario activo — "
-                "territorio de sobreoperar documentado como causa #1 de pérdidas minoristas."
+                "Con RR 1:3 el breakeven es 25% WR. Cualquier WR >25% es profitable. "
+                "El objetivo de 50% WR + 1:3 RR da PF=3.0 (excelente si sostenido out-of-sample)."
             )
 
         # ── SECCIÓN 4: BACKTEST MULTI-PERIODO ─────────────────────────────────
         st.markdown("---")
         st.markdown("#### Backtest histórico multi-periodo")
         st.caption(
-            "Ejecuta `run_full_backtest()` sobre 4 periodos históricos distintos. "
-            "2008/2020/2022: datos diarios (sin noticias). "
-            "Último año: datos 1h. Sin spread/slippage modelado — resultados indicativos."
+            "5 periodos: 2008/2020/2022 (datos diarios, estrategia EMA+EMA200 corregida), "
+            "Último año (1h, EMA+EMA200), Último mes (15m, EMA21 Pullback HF). "
+            "Sin spread/slippage modelado — resultados indicativos."
         )
 
         _oc_bt_btn = st.button(

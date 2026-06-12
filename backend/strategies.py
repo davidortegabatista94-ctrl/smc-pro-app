@@ -144,15 +144,17 @@ def get_longterm_data_2008():
 
 def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2, cooldown=6):
     """
-    Estrategia multi-confluencia equilibrada — EUR/USD 1h.
-    Objetivo: 3-5 entradas/semana, 40%+ win rate, R:R 1:3.
+    Estrategia multi-confluencia con filtro EMA200 — funciona en 1h y datos diarios.
 
-    LONG:  EMA9>EMA21>EMA50, MACD+, RSI 42-73, vela alcista
-    SHORT: EMA9<EMA21<EMA50, MACD-, RSI 27-58, vela bajista
-    SL=1.2xATR (6-20p) | TP=3.0xSL | Cooldown configurable (default 6 velas).
-    cooldown=6  → ~3-5 ops/semana (calidad alta)
-    cooldown=3  → ~10-15 ops/semana
-    cooldown=1  → ~25-35 ops/día (calidad baja, más ruido)
+    LONG:  EMA9>EMA21>EMA50 + precio>EMA200 + MACD+ + RSI 42-73 + vela alcista
+    SHORT: EMA9<EMA21<EMA50 + precio<EMA200 + MACD- + RSI 27-58 + vela bajista
+    SL=1.2×ATR sin cap fijo (escala con el timeframe) | TP=3.0×SL | RR 1:3
+
+    Fixes v2:
+    - Eliminado el cap de 20 pips en SL (causaba WR ~15% en datos diarios 2008)
+    - pnl calculado con el SL/TP de la ENTRADA, no del ATR actual
+    - Filtro EMA200: evita operar contra la tendencia principal
+    - Auto-detecta datos diarios y ajusta cooldown a 2 días
     """
     if df.empty or len(df) < 60:
         return None
@@ -161,23 +163,31 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2, cooldown
     high  = df["High"].copy()
     low   = df["Low"].copy()
 
-    # EMAs para tendencia
-    ema9  = close.ewm(span=9,  adjust=False).mean()
-    ema21 = close.ewm(span=21, adjust=False).mean()
-    ema50 = close.ewm(span=50, adjust=False).mean()
+    # Auto-detect timeframe: daily data if avg bar >= 18h
+    try:
+        bar_secs   = (df.index[-1] - df.index[0]).total_seconds() / max(len(df) - 1, 1)
+        is_daily   = bar_secs >= 18 * 3600
+    except Exception:
+        is_daily   = False
 
-    # RSI(14)
+    # On daily data, default cooldown of 6 (hours) makes no sense → use 2 (days)
+    if is_daily and cooldown == 6:
+        cooldown = 2
+
+    ema9   = close.ewm(span=9,   adjust=False).mean()
+    ema21  = close.ewm(span=21,  adjust=False).mean()
+    ema50  = close.ewm(span=50,  adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()  # macro trend filter
+
     dc   = close.diff()
     gain = dc.clip(lower=0).rolling(14).mean()
     loss = (-dc.clip(upper=0)).rolling(14).mean()
     rsi  = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
 
-    # MACD histogram
     macd_line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
     macd_sig  = macd_line.ewm(span=9, adjust=False).mean()
     hist      = macd_line - macd_sig
 
-    # ATR(14)
     tr  = pd.concat([high - low,
                      (high - close.shift()).abs(),
                      (low  - close.shift()).abs()], axis=1).max(axis=1)
@@ -186,92 +196,100 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2, cooldown
     RR      = 3.0
     pip_val = 1.0
 
-    trades       = []
-    equity       = [10000.0]
-    in_trade     = False
+    trades         = []
+    equity         = [10000.0]
+    in_trade       = False
     ep = dr = tp_p = sl_p = ei = None
-    last_entry_i = -999   # cooldown: mínimo N velas entre entradas
+    entry_sl_size  = 0.0   # SL size at entry — used for accurate pnl, not current ATR
+    entry_tp_size  = 0.0
+    last_entry_i   = -999
 
     for i in range(55, len(df) - 1):
-        # Filtro ventana horaria
-        if use_windows and hasattr(df.index[i], "hour"):
+        # Ventana horaria solo para datos intraday
+        if use_windows and not is_daily and hasattr(df.index[i], "hour"):
             hs = (df.index[i].hour + utc_offset) % 24
             if not (7 <= hs < 20) and not in_trade:
                 continue
 
         c      = float(close.iloc[i])
-        e9     = float(ema9.iloc[i]);  e21 = float(ema21.iloc[i])
-        e50    = float(ema50.iloc[i])
+        e9     = float(ema9.iloc[i]);  e21  = float(ema21.iloc[i])
+        e50    = float(ema50.iloc[i]); e200 = float(ema200.iloc[i])
         r      = float(rsi.iloc[i])   if not np.isnan(rsi.iloc[i])  else 50.0
         hv     = float(hist.iloc[i])  if not np.isnan(hist.iloc[i]) else 0.0
-        av     = float(atr.iloc[i])   if not np.isnan(atr.iloc[i])  else PIP * 12
+        av     = float(atr.iloc[i])   if not np.isnan(atr.iloc[i])  else c * 0.001
         prev_c = float(close.iloc[i - 1])
 
-        # SL dinámico: 1.2x ATR, mínimo 6p, máximo 20p
-        sl_d = max(min(av * 1.2, PIP * 20), PIP * 6)
+        # SL: 1.2×ATR sin cap fijo de pips.
+        # En datos 1h con ATR=10p → SL≈12p | En datos 1d con ATR=100p → SL≈120p
+        # Mínimo = 4 pips para evitar ruido de spread.
+        sl_d = max(av * 1.2, PIP * 4)
         tp_d = sl_d * RR
 
         # ── Gestionar trade abierto ─────────────────────────────────────────
         if in_trade:
             hc = float(high.iloc[i]); lc = float(low.iloc[i])
-            sl_pips_real = sl_d / PIP; tp_pips_real = tp_d / PIP
+            # pnl usa SL/TP de la ENTRADA (no el ATR actual)
+            sl_pr = entry_sl_size / PIP
+            tp_pr = entry_tp_size / PIP
             if dr == "LONG":
                 if lc <= sl_p:
-                    pnl = -sl_pips_real * pip_val
+                    pnl = -sl_pr * pip_val
                     equity.append(equity[-1] + pnl)
                     trades.append({"dir": "LONG", "outcome": "SL",
-                                   "pips": round(-sl_pips_real, 1), "pnl": round(pnl, 2),
+                                   "pips": round(-sl_pr, 1), "pnl": round(pnl, 2),
                                    "time": str(df.index[ei])[:16]})
                     in_trade = False
                 elif hc >= tp_p:
-                    pnl = tp_pips_real * pip_val
+                    pnl = tp_pr * pip_val
                     equity.append(equity[-1] + pnl)
                     trades.append({"dir": "LONG", "outcome": "TP",
-                                   "pips": round(tp_pips_real, 1), "pnl": round(pnl, 2),
+                                   "pips": round(tp_pr, 1), "pnl": round(pnl, 2),
                                    "time": str(df.index[ei])[:16]})
                     in_trade = False
             else:
                 if hc >= sl_p:
-                    pnl = -sl_pips_real * pip_val
+                    pnl = -sl_pr * pip_val
                     equity.append(equity[-1] + pnl)
                     trades.append({"dir": "SHORT", "outcome": "SL",
-                                   "pips": round(-sl_pips_real, 1), "pnl": round(pnl, 2),
+                                   "pips": round(-sl_pr, 1), "pnl": round(pnl, 2),
                                    "time": str(df.index[ei])[:16]})
                     in_trade = False
                 elif lc <= tp_p:
-                    pnl = tp_pips_real * pip_val
+                    pnl = tp_pr * pip_val
                     equity.append(equity[-1] + pnl)
                     trades.append({"dir": "SHORT", "outcome": "TP",
-                                   "pips": round(tp_pips_real, 1), "pnl": round(pnl, 2),
+                                   "pips": round(tp_pr, 1), "pnl": round(pnl, 2),
                                    "time": str(df.index[ei])[:16]})
                     in_trade = False
             continue
 
         # ── Condiciones de entrada ──────────────────────────────────────────
-        cooldown_ok = (i - last_entry_i) >= cooldown   # no entrar dos veces en N velas
-        min_atr     = av > PIP * 4              # volatilidad mínima
+        cooldown_ok = (i - last_entry_i) >= cooldown
+        min_atr     = av > c * 0.0003   # 0.03% del precio — escala para 1h y 1d
 
-        bull_align  = e9 > e21 > e50            # tendencia alcista confirmada
-        bear_align  = e9 < e21 < e50            # tendencia bajista confirmada
-        macd_long   = hv > 0                    # momentum alcista
-        macd_short  = hv < 0                    # momentum bajista
-        long_rsi    = 42 <= r <= 73             # RSI saludable alcista (no sobrecomprado)
-        short_rsi   = 27 <= r <= 58             # RSI saludable bajista (no sobrevendido)
-        bull_candle = c > prev_c                # vela alcista confirma entrada
-        bear_candle = c < prev_c                # vela bajista confirma entrada
+        bull_align  = e9 > e21 > e50
+        bear_align  = e9 < e21 < e50
+        macd_long   = hv > 0
+        macd_short  = hv < 0
+        long_rsi    = 42 <= r <= 73
+        short_rsi   = 27 <= r <= 58
+        bull_candle = c > prev_c
+        bear_candle = c < prev_c
+        trend_up    = c > e200   # filtro macro: no ir LONG en downtrend mayor
+        trend_down  = c < e200   # filtro macro: no ir SHORT en uptrend mayor
 
-        # LONG: tendencia alcista + MACD+ + RSI saludable + vela alcista
         if (bull_align and macd_long and long_rsi and
-                min_atr and bull_candle and cooldown_ok):
+                min_atr and bull_candle and cooldown_ok and trend_up):
             ep = c;  dr = "LONG"
             tp_p = c + tp_d;  sl_p = c - sl_d
+            entry_sl_size = sl_d;  entry_tp_size = tp_d
             in_trade = True; ei = i; last_entry_i = i
 
-        # SHORT: tendencia bajista + MACD- + RSI saludable + vela bajista
         elif (bear_align and macd_short and short_rsi and
-              min_atr and bear_candle and cooldown_ok):
+              min_atr and bear_candle and cooldown_ok and trend_down):
             ep = c;  dr = "SHORT"
             tp_p = c - tp_d;  sl_p = c + sl_d
+            entry_sl_size = sl_d;  entry_tp_size = tp_d
             in_trade = True; ei = i; last_entry_i = i
 
     # Cerrar trade abierto al final
@@ -320,6 +338,225 @@ def run_full_backtest(df, sl_pips=None, use_windows=True, utc_offset=2, cooldown
         "equity":        equity,
         "trades":        trades[-300:],
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ESTRATEGIA ALTA FRECUENCIA — EMA21 Pullback en 15m
+# Objetivo: ~15-25 ops/día por par | ~45-55% WR | 1:3 RR
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_hf_data(symbol: str = "EURUSD=X", days: int = 55) -> "pd.DataFrame":
+    """
+    Descarga datos 15m para backtest de alta frecuencia.
+    yfinance soporta 15m hasta ~60 días. Descarga bloques de 55d y concatena.
+    """
+    yf = _get_yf()
+    if not yf:
+        return pd.DataFrame()
+    try:
+        df = yf.download(symbol, period=f"{min(days, 59)}d", interval="15m",
+                         auto_adjust=True, progress=False)
+        df = flatten_columns(df)
+        df.dropna(inplace=True)
+        return df
+    except Exception as e:
+        logging.warning("get_hf_data(%s) error: %s", symbol, e)
+        return pd.DataFrame()
+
+
+def run_hf_backtest(df: "pd.DataFrame", cooldown: int = 2,
+                    use_windows: bool = True, utc_offset: int = 2) -> dict | None:
+    """
+    Estrategia EMA21 Pullback — optimizada para datos 15m.
+
+    Objetivo: ~15-25 ops/día por par (30 ops/día cruzando 2 pares).
+    WR objetivo: 45-55% con RR 1:3.
+
+    Entrada LONG: EMA9>EMA21>EMA50 (uptrend) + precio>EMA200 (macro up)
+                  + precio toca EMA21 desde arriba (pullback)
+                  + RSI 35-58 (zona de pullback, no sobrecomprado)
+                  + MACD hist > 0 (momentum intacto) + vela alcista
+    Entrada SHORT: espejo exacto.
+
+    SL: 1.0×ATR desde entrada | TP: 3.0×SL | Cooldown: 2 velas (30 min en 15m)
+
+    Por qué pullback > breakout en win rate:
+      - Entramos a mejor precio → el mercado tiene que moverse menos contra nosotros para SL
+      - La tendencia ya está confirmada → menor tasa de falsas señales
+      - Con RR 1:3 solo necesitamos 25% WR para break-even; 45% es edge real
+    """
+    if df.empty or len(df) < 60:
+        return None
+
+    close = df["Close"].copy()
+    high  = df["High"].copy()
+    low   = df["Low"].copy()
+
+    ema9   = close.ewm(span=9,   adjust=False).mean()
+    ema21  = close.ewm(span=21,  adjust=False).mean()
+    ema50  = close.ewm(span=50,  adjust=False).mean()
+    ema200 = close.ewm(span=200, adjust=False).mean()
+
+    dc   = close.diff()
+    gain = dc.clip(lower=0).rolling(14).mean()
+    loss = (-dc.clip(upper=0)).rolling(14).mean()
+    rsi  = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+
+    macd_line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+    macd_sig  = macd_line.ewm(span=9, adjust=False).mean()
+    hist      = macd_line - macd_sig
+
+    tr  = pd.concat([high - low,
+                     (high - close.shift()).abs(),
+                     (low  - close.shift()).abs()], axis=1).max(axis=1)
+    atr = tr.rolling(14).mean()
+
+    RR = 3.0
+
+    trades         = []
+    equity         = [10000.0]
+    in_trade       = False
+    ep = dr = tp_p = sl_p = ei = None
+    entry_sl_size  = entry_tp_size = 0.0
+    last_entry_i   = -999
+
+    for i in range(55, len(df) - 1):
+        if use_windows and hasattr(df.index[i], "hour"):
+            hs = (df.index[i].hour + utc_offset) % 24
+            if not (7 <= hs < 20) and not in_trade:
+                continue
+
+        c      = float(close.iloc[i])
+        lw     = float(low.iloc[i])
+        hw     = float(high.iloc[i])
+        e9     = float(ema9.iloc[i]);  e21  = float(ema21.iloc[i])
+        e50    = float(ema50.iloc[i]); e200 = float(ema200.iloc[i])
+        r      = float(rsi.iloc[i])   if not np.isnan(rsi.iloc[i])  else 50.0
+        hv     = float(hist.iloc[i])  if not np.isnan(hist.iloc[i]) else 0.0
+        av     = float(atr.iloc[i])   if not np.isnan(atr.iloc[i])  else PIP * 6
+        prev_c = float(close.iloc[i - 1])
+
+        sl_d = max(av * 1.0, PIP * 3)
+        tp_d = sl_d * RR
+
+        if in_trade:
+            sl_pr = entry_sl_size / PIP
+            tp_pr = entry_tp_size / PIP
+            if dr == "LONG":
+                if lw <= sl_p:
+                    pnl = -sl_pr
+                    equity.append(equity[-1] + pnl)
+                    trades.append({"dir": "LONG", "outcome": "SL",
+                                   "pips": round(-sl_pr, 1), "pnl": round(pnl, 2),
+                                   "time": str(df.index[ei])[:16]})
+                    in_trade = False
+                elif hw >= tp_p:
+                    pnl = tp_pr
+                    equity.append(equity[-1] + pnl)
+                    trades.append({"dir": "LONG", "outcome": "TP",
+                                   "pips": round(tp_pr, 1), "pnl": round(pnl, 2),
+                                   "time": str(df.index[ei])[:16]})
+                    in_trade = False
+            else:
+                if hw >= sl_p:
+                    pnl = -sl_pr
+                    equity.append(equity[-1] + pnl)
+                    trades.append({"dir": "SHORT", "outcome": "SL",
+                                   "pips": round(-sl_pr, 1), "pnl": round(pnl, 2),
+                                   "time": str(df.index[ei])[:16]})
+                    in_trade = False
+                elif lw <= tp_p:
+                    pnl = tp_pr
+                    equity.append(equity[-1] + pnl)
+                    trades.append({"dir": "SHORT", "outcome": "TP",
+                                   "pips": round(tp_pr, 1), "pnl": round(pnl, 2),
+                                   "time": str(df.index[ei])[:16]})
+                    in_trade = False
+            continue
+
+        cooldown_ok     = (i - last_entry_i) >= cooldown
+        min_atr         = av > c * 0.00020        # 0.02% del precio
+
+        bull_trend      = e9 > e21 > e50
+        bear_trend      = e9 < e21 < e50
+        trend_up        = c > e200
+        trend_down      = c < e200
+
+        # Pullback: el mínimo de la vela rozó EMA21 (LONG) o el máximo rozó EMA21 (SHORT)
+        near_ema21_long  = lw <= e21 + av * 0.7
+        near_ema21_short = hw >= e21 - av * 0.7
+
+        long_rsi   = 35 <= r <= 58
+        short_rsi  = 42 <= r <= 65
+        bull_close = c > prev_c
+        bear_close = c < prev_c
+
+        if (bull_trend and near_ema21_long and long_rsi and hv > 0
+                and min_atr and bull_close and cooldown_ok and trend_up):
+            ep = c;  dr = "LONG"
+            tp_p = c + tp_d;  sl_p = c - sl_d
+            entry_sl_size = sl_d;  entry_tp_size = tp_d
+            in_trade = True; ei = i; last_entry_i = i
+
+        elif (bear_trend and near_ema21_short and short_rsi and hv < 0
+              and min_atr and bear_close and cooldown_ok and trend_down):
+            ep = c;  dr = "SHORT"
+            tp_p = c - tp_d;  sl_p = c + sl_d
+            entry_sl_size = sl_d;  entry_tp_size = tp_d
+            in_trade = True; ei = i; last_entry_i = i
+
+    if in_trade and ep is not None:
+        lp   = float(close.iloc[-1])
+        pcl  = (lp - ep) / PIP if dr == "LONG" else (ep - lp) / PIP
+        pnlc = pcl
+        equity.append(equity[-1] + pnlc)
+        trades.append({"dir": dr, "outcome": "OPEN",
+                       "pips": round(pcl, 1), "pnl": round(pnlc, 2),
+                       "time": str(df.index[ei])[:16]})
+
+    if not trades:
+        return None
+
+    wins    = [t for t in trades if t["outcome"] == "TP"]
+    losses  = [t for t in trades if t["outcome"] == "SL"]
+    total   = len(trades)
+    wr      = len(wins) / total * 100 if total > 0 else 0
+    np_     = sum(t["pips"] for t in trades)
+    npnl    = sum(t["pnl"]  for t in trades)
+
+    peak = equity[0]; max_dd = 0.0
+    for e in equity:
+        if e > peak: peak = e
+        dd = (peak - e) / peak * 100
+        if dd > max_dd: max_dd = dd
+
+    gw = sum(t["pnl"] for t in wins)        if wins   else 0.0
+    gl = abs(sum(t["pnl"] for t in losses)) if losses else 1.0
+    pf = round(gw / max(gl, 0.01), 2)
+
+    idx = df.index
+    try:
+        n_days = max(1, (idx[-1].date() - idx[0].date()).days)
+    except Exception:
+        n_days = max(1, len(df) // (13 * 4))   # 13h activas × 4 barras/h
+
+    return {
+        "total":         total,
+        "wins":          len(wins),
+        "losses":        len(losses),
+        "winrate":       round(wr, 1),
+        "be_winrate":    round(1 / (1 + RR) * 100, 1),
+        "net_pips":      round(np_, 1),
+        "net_pnl":       round(npnl, 2),
+        "max_dd":        round(max_dd, 1),
+        "profit_factor": pf,
+        "rr_ratio":      RR,
+        "ops_per_day":   round(total / n_days, 1),
+        "n_days":        n_days,
+        "equity":        equity,
+        "trades":        trades[-300:],
+    }
+
 
 # ── Afinidad de estrategias por régimen de mercado ───────────────────────────
 _STRATEGY_REGIME_AFFINITY = {

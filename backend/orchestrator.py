@@ -178,18 +178,21 @@ def cooldown_sweep(
     utc_offset: int = 2,
 ) -> pd.DataFrame:
     """
-    Runs run_full_backtest() with different cooldown values.
-    Shows the tradeoff: more ops ↔ lower quality.
+    Runs run_hf_backtest() (15m pullback strategy) with different cooldown values.
+    Shows the ops/day vs quality tradeoff clearly.
 
-    Cooldown = number of bars to skip after each entry.
-    Default bars = 1h data.
+    df should be 15m data (use get_hf_data() to download it).
+    Cooldown = number of 15m bars to skip after each entry.
+    cooldown=1 → ~1 op each 15min (aggressive)
+    cooldown=4 → ~1 op each hour (balanced)
+    cooldown=8 → ~1 op each 2h (conservative)
 
-    Returns DataFrame: cooldown | ops_total | ops_per_day | winrate | profit_factor | net_pips | max_dd
+    Returns DataFrame with ops/day, winrate, profit_factor per cooldown.
     """
-    from backend.strategies import run_full_backtest
+    from backend.strategies import run_hf_backtest
 
     if cooldowns is None:
-        cooldowns = [1, 2, 3, 4, 6, 8, 10, 15, 20]
+        cooldowns = [1, 2, 3, 4, 6, 8, 10, 12, 16]
 
     if df.empty or len(df) < 60:
         return pd.DataFrame()
@@ -198,24 +201,25 @@ def cooldown_sweep(
     try:
         n_days = max(1, (idx[-1].date() - idx[0].date()).days)
     except Exception:
-        n_days = max(1, len(df) // 24)
+        n_days = max(1, len(df) // (13 * 4))
 
     rows = []
     for cd in cooldowns:
         try:
-            result = run_full_backtest(
-                df, use_windows=use_windows, utc_offset=utc_offset, cooldown=cd
+            result = run_hf_backtest(
+                df, cooldown=cd, use_windows=use_windows, utc_offset=utc_offset
             )
             if result is None:
                 continue
             rows.append({
-                "Cooldown (velas 1h)": cd,
-                "Ops totales":         result["total"],
-                "Ops/día":             round(result["total"] / n_days, 1),
-                "Win Rate %":          result["winrate"],
-                "Profit Factor":       result["profit_factor"],
-                "Pips netos":          result["net_pips"],
-                "Max DD %":            result["max_dd"],
+                "Cooldown (velas 15m)": cd,
+                "= cada (min)":         cd * 15,
+                "Ops totales":          result["total"],
+                "Ops/día":              round(result["total"] / n_days, 1),
+                "Win Rate %":           result["winrate"],
+                "Profit Factor":        result["profit_factor"],
+                "Pips netos":           result["net_pips"],
+                "Max DD %":             result["max_dd"],
             })
         except Exception as e:
             _log.warning("cooldown_sweep cd=%d error: %s", cd, e)
@@ -252,21 +256,25 @@ PERIOD_NOTES = {
 
 def backtest_multiperiod() -> dict[str, dict]:
     """
-    Runs run_full_backtest() on 4 historical periods using existing data functions.
+    Backtest multi-periodo con dos estrategias:
+    - Periodos históricos (2008/2020/2022): datos diarios + run_full_backtest() v2
+      (SL escalado por ATR sin cap de pips + filtro EMA200)
+    - Último mes (15m): run_hf_backtest() — EMA21 pullback, objetivo 30 ops/día
 
-    2008/2020/2022: datos diarios via get_longterm_data_2008() — sin noticias históricas.
-    Último año:     datos 1h via get_backtest_data("1h") — máxima granularidad.
-
-    Honest note: backtest no incluye spread/slippage real.
-    Asume ejecución perfecta. Los resultados son indicativos, no garantizados.
+    Nota honesta: sin spread/slippage real. Resultados indicativos.
+    Los 30 ops/día son un objetivo para datos 15m intraday.
+    En periodos históricos solo hay datos diarios → ops/día siempre < 1.
 
     Returns {period_name: result_dict | error_dict}
     """
-    from backend.strategies import run_full_backtest, get_longterm_data_2008, get_backtest_data
+    from backend.strategies import (
+        run_full_backtest, run_hf_backtest,
+        get_longterm_data_2008, get_backtest_data, get_hf_data,
+    )
 
     results: dict[str, dict] = {}
 
-    # ── Download long-term daily data once ────────────────────────────────────
+    # ── Datos diarios históricos (descarga única) ─────────────────────────────
     _log.info("Descargando datos EUR/USD diarios desde 2008...")
     df_all_daily = pd.DataFrame()
     try:
@@ -276,47 +284,41 @@ def backtest_multiperiod() -> dict[str, dict]:
         _log.warning("get_longterm_data_2008 error: %s", e)
 
     daily_periods = {
-        "2008 — Crisis financiera": ("2008-01-01", "2009-12-31"),
-        "2020 — COVID crash":       ("2020-01-01", "2021-06-30"),
-        "2022 — Subidas Fed agresivas": ("2022-01-01", "2022-12-31"),
+        "2008 — Crisis financiera":    ("2008-01-01", "2009-12-31"),
+        "2020 — COVID crash":          ("2020-01-01", "2021-06-30"),
+        "2022 — Subidas Fed agresivas":("2022-01-01", "2022-12-31"),
     }
 
     for name, (s, e) in daily_periods.items():
         if df_all_daily.empty:
-            results[name] = {
-                "error": "No se pudieron descargar datos diarios históricos.",
-                "note": PERIOD_NOTES.get(name, ""),
-            }
+            results[name] = {"error": "No se pudieron descargar datos diarios históricos.",
+                             "note": PERIOD_NOTES.get(name, "")}
             continue
         try:
             df_p = df_all_daily[(df_all_daily.index >= s) & (df_all_daily.index <= e)].copy()
             if df_p.empty or len(df_p) < 60:
-                results[name] = {
-                    "error": f"Datos insuficientes ({len(df_p)} barras para {s}→{e}).",
-                    "note": PERIOD_NOTES.get(name, ""),
-                }
+                results[name] = {"error": f"Datos insuficientes ({len(df_p)} barras para {s}→{e}).",
+                                 "note": PERIOD_NOTES.get(name, "")}
                 continue
 
+            # v2: SL sin cap fijo + filtro EMA200 + cooldown=2 días
             r = run_full_backtest(df_p, use_windows=False, utc_offset=0, cooldown=2)
             if r is None:
                 results[name] = {"error": "Backtest retornó None.", "note": PERIOD_NOTES.get(name, "")}
                 continue
 
-            idx = df_p.index
-            try:
-                n_days = max(1, (idx[-1].date() - idx[0].date()).days)
-            except Exception:
-                n_days = max(1, len(df_p))
-
+            idx    = df_p.index
+            n_days = max(1, (idx[-1].date() - idx[0].date()).days) if hasattr(idx[0], "date") else max(1, len(df_p))
             r["ops_per_day"] = round(r["total"] / n_days, 2)
             r["n_days"]      = n_days
             r["bars"]        = len(df_p)
             r["note"]        = PERIOD_NOTES.get(name, "")
-            r["tf"]          = "1d (diario)"
+            r["tf"]          = "1d diario — estrategia EMA+EMA200+MACD"
+            r["freq_note"]   = "Datos diarios: max ~1 op/día. Los 30 ops/día requieren datos 15m (solo disponibles últimos 60 días)"
             results[name]    = r
 
-        except Exception as e:
-            results[name] = {"error": str(e), "note": PERIOD_NOTES.get(name, "")}
+        except Exception as ex:
+            results[name] = {"error": str(ex), "note": PERIOD_NOTES.get(name, "")}
 
     # ── Último año con datos 1h ───────────────────────────────────────────────
     name_1h = "Último año (1h intraday)"
@@ -324,27 +326,44 @@ def backtest_multiperiod() -> dict[str, dict]:
         _log.info("Descargando datos EUR/USD 1h (último año)...")
         df_1h = get_backtest_data("1h")
         if df_1h.empty or len(df_1h) < 100:
-            results[name_1h] = {
-                "error": f"Datos 1h insuficientes ({len(df_1h)} barras).",
-                "note": PERIOD_NOTES.get(name_1h, ""),
-            }
+            results[name_1h] = {"error": f"Datos 1h insuficientes ({len(df_1h)} barras).",
+                                "note": PERIOD_NOTES.get(name_1h, "")}
         else:
-            r = run_full_backtest(df_1h, use_windows=True, utc_offset=2, cooldown=6)
+            r = run_full_backtest(df_1h, use_windows=True, utc_offset=2, cooldown=4)
             if r is None:
                 results[name_1h] = {"error": "Backtest 1h retornó None.", "note": PERIOD_NOTES.get(name_1h, "")}
             else:
-                idx = df_1h.index
-                try:
-                    n_days = max(1, (idx[-1].date() - idx[0].date()).days)
-                except Exception:
-                    n_days = max(1, len(df_1h) // 24)
+                idx    = df_1h.index
+                n_days = max(1, (idx[-1].date() - idx[0].date()).days) if hasattr(idx[0], "date") else max(1, len(df_1h) // 24)
                 r["ops_per_day"] = round(r["total"] / n_days, 2)
                 r["n_days"]      = n_days
                 r["bars"]        = len(df_1h)
                 r["note"]        = PERIOD_NOTES.get(name_1h, "")
-                r["tf"]          = "1h (intraday)"
+                r["tf"]          = "1h intraday — EMA+EMA200+MACD"
+                r["freq_note"]   = "1h: objetivo ~1-3 ops/día con calidad alta"
                 results[name_1h] = r
-    except Exception as e:
-        results[name_1h] = {"error": str(e), "note": PERIOD_NOTES.get(name_1h, "")}
+    except Exception as ex:
+        results[name_1h] = {"error": str(ex), "note": PERIOD_NOTES.get(name_1h, "")}
+
+    # ── Último mes con datos 15m (estrategia HF pullback) ────────────────────
+    name_hf = "Último mes — 15m HF Pullback"
+    try:
+        _log.info("Descargando datos EUR/USD 15m (último mes)...")
+        df_15m = get_hf_data("EURUSD=X", days=55)
+        if df_15m.empty or len(df_15m) < 100:
+            results[name_hf] = {"error": f"Datos 15m insuficientes ({len(df_15m)} barras).",
+                                "note": "Estrategia EMA21 Pullback alta frecuencia"}
+        else:
+            r = run_hf_backtest(df_15m, cooldown=2, use_windows=True, utc_offset=2)
+            if r is None:
+                results[name_hf] = {"error": "HF backtest retornó None.",
+                                    "note": "Estrategia EMA21 Pullback alta frecuencia"}
+            else:
+                r["note"]      = "EMA21 Pullback en 15m | SL=1×ATR | TP=3×SL | Cooldown=2 barras (30 min)"
+                r["tf"]        = "15m intraday — EMA21 Pullback"
+                r["freq_note"] = "Objetivo ~15-25 ops/día por par | ~30 ops/día cruzando 2 pares"
+                results[name_hf] = r
+    except Exception as ex:
+        results[name_hf] = {"error": str(ex), "note": "EMA21 Pullback HF"}
 
     return results
