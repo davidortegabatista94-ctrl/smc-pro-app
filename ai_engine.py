@@ -393,6 +393,145 @@ Responde SOLO con JSON (sin markdown):
 
 # ── Market snapshot builder ───────────────────────────────────────────────────
 
+def synthesize_trading_decision(ctx: dict) -> dict:
+    """
+    Weighted-vote synthesis of ALL trading signals → single decisive recommendation.
+    Resolves contradictions via institutional hierarchy, then calls AI for the
+    natural-language verdict (3 reasons + 1 verdict sentence).
+
+    Resolution hierarchy (highest weight wins):
+      DXY + COT (institutional) > KB backtested strategy > TF alignment > Score > AI bias > Macro
+    """
+    import json as _j
+
+    mode = ctx.get("mode", "intraday")
+
+    # Mode-aware TF weights (scalping ignores daily, swing ignores 15m)
+    tf_w = {
+        "scalping": {"15m": 3, "1h": 2, "4h": 1, "1d": 0},
+        "intraday": {"15m": 1, "1h": 3, "4h": 2, "1d": 1},
+        "swing":    {"15m": 0, "1h": 1, "4h": 3, "1d": 3},
+    }.get(mode, {"15m": 1, "1h": 3, "4h": 2, "1d": 1})
+
+    vl = vs = 0
+    log: list[str] = []
+
+    def _vote(direction: str, weight: int, label: str) -> None:
+        nonlocal vl, vs
+        if direction == "LONG":
+            vl += weight; log.append(f"+{weight} LONG — {label}")
+        elif direction == "SHORT":
+            vs += weight; log.append(f"+{weight} SHORT — {label}")
+
+    # 1. Technical timeframes
+    for tf, data in ctx.get("timeframes", {}).items():
+        w = tf_w.get(tf, 1)
+        if w == 0:
+            continue
+        s = data.get("signal", "")
+        if   s == "COMPRA": _vote("LONG",  w, f"TF {tf} alcista")
+        elif s == "VENTA":  _vote("SHORT", w, f"TF {tf} bajista")
+
+    # 2. DXY — institutional (weight 2)
+    dxy = ctx.get("dxy_dir", "")
+    if   dxy == "DOWN": _vote("LONG",  2, "DXY bajista → EUR sube")
+    elif dxy == "UP":   _vote("SHORT", 2, "DXY alcista → EUR baja")
+
+    # 3. COT — institutional positioning (weight 2)
+    cot = ctx.get("cot_dir", "")
+    if   cot == "LONG":  _vote("LONG",  2, "COT: institucionales largos")
+    elif cot == "SHORT": _vote("SHORT", 2, "COT: institucionales cortos")
+
+    # 4. KB backtested strategy (weight 2)
+    kb = ctx.get("kb_dir", "")
+    if   kb == "LONG":  _vote("LONG",  2, "Estrategia KB certificada")
+    elif kb == "SHORT": _vote("SHORT", 2, "Estrategia KB certificada")
+
+    # 5. Confluence score direction (weight 1, only if ≥65)
+    sc = ctx.get("score", 0)
+    sd = ctx.get("score_dir", "")
+    if sc >= 65 and sd:
+        _vote(sd, 1, f"Score confluencia {sc}/100")
+
+    # 6. AI structural market bias (weight 1)
+    ab = ctx.get("ai_bias_dir", "")
+    if ab: _vote(ab, 1, "Bias estructural IA")
+
+    # 7. Macro / fundamental signal (weight 1)
+    md = ctx.get("macro_dir", "")
+    if md: _vote(md, 1, "Contexto macro/fundamental")
+
+    # Net result
+    total = vl + vs
+    if total == 0:
+        direction, confidence = "WAIT", 0
+    elif vl > vs:
+        direction  = "LONG"
+        confidence = min(95, round(vl / total * 100))
+    elif vs > vl:
+        direction  = "SHORT"
+        confidence = min(95, round(vs / total * 100))
+    else:
+        direction, confidence = "WAIT", 50
+
+    # Fallback (no AI)
+    reasons   = (log[:3] if log else ["Sin datos suficientes para síntesis"])
+    verdict   = f"{direction} — {confidence}% confluencia ({vl}L vs {vs}S votos ponderados)"
+    risk_note = None
+
+    # AI natural-language verdict — fast, low-token call
+    system_prompt = (
+        "Eres analista institucional senior de FX. Responde SOLO con JSON válido, sin texto extra.\n"
+        "Formato exacto: {\"reasons\":[\"frase1\",\"frase2\",\"frase3\"],"
+        "\"verdict\":\"oración\",\"risk_note\":null}\n"
+        "Reglas:\n"
+        "- reasons: exactamente 3 strings en español, máx 12 palabras cada uno\n"
+        "- Selecciona los 3 factores MÁS IMPORTANTES que justifican 'direction'\n"
+        "- verdict: 1 oración ≤20 palabras explicando la decisión tomada\n"
+        "- risk_note: null o advertencia específica ≤10 palabras si hay riesgo real\n"
+        "- NO contradigas el 'direction' ya calculado por el sistema de votos"
+    )
+    payload = {
+        "direction": direction, "confidence": confidence,
+        "votes_long": vl, "votes_short": vs,
+        "vote_log": log[:8],
+        "price": ctx.get("price"), "session": ctx.get("session", ""),
+        "regime": ctx.get("regime", ""), "score": sc,
+        "dxy": dxy, "cot": cot, "mode": mode,
+        "atr_pips": ctx.get("atr_pips"),
+        "context_reasons": ctx.get("context_reasons", [])[:4],
+    }
+    try:
+        raw = call_ai([
+            {"role": "system", "content": system_prompt},
+            {"role": "user",   "content": _j.dumps(payload, ensure_ascii=False, default=str)},
+        ], max_tokens=350, temperature=0.15)
+        p = _parse_json(raw)
+        if p and isinstance(p.get("reasons"), list) and len(p["reasons"]) >= 1:
+            reasons   = p["reasons"][:3]
+            verdict   = p.get("verdict", verdict)
+            risk_note = p.get("risk_note") or None
+    except Exception as _e:
+        _log.warning("synthesize_trading_decision AI: %s", _e)
+
+    return {
+        "direction":  direction,
+        "confidence": confidence,
+        "votes_long": vl,
+        "votes_short": vs,
+        "vote_log":   log,
+        "reasons":    reasons,
+        "verdict":    verdict,
+        "risk_note":  risk_note,
+        "entry": ctx.get("price"),
+        "tp1":   ctx.get("tp1"),
+        "tp2":   ctx.get("tp2"),
+        "sl":    ctx.get("sl"),
+        "rr":    ctx.get("rr"),
+        "mode":  mode,
+    }
+
+
 def build_market_snapshot(signal: dict, score: int, session: str, dxy_dir: str,
                            vol_spikes: list, delta: dict | None,
                            context_reasons: list | None,

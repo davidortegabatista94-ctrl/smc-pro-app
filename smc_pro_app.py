@@ -2628,6 +2628,10 @@ else:
         st.session_state._cal_fetched_ts = 0.0
     if "cot_data" not in st.session_state:
         st.session_state.cot_data = None
+    if "decision_mode" not in st.session_state:
+        st.session_state.decision_mode = "intraday"
+    if "decision_cache" not in st.session_state:
+        st.session_state.decision_cache = None
     cfg = load_user_config()
 
     if "mt5_login" not in st.session_state:
@@ -2833,6 +2837,41 @@ h3{font-size:.9rem!important;text-transform:uppercase;letter-spacing:.04em!impor
 .t-row:hover{background:var(--surface-2);color:var(--text)}
 .t-val{font-family:var(--mono);font-weight:600;color:var(--text);font-size:.78rem}
 .t-green{color:var(--green)}.t-red{color:var(--red)}.t-amber{color:var(--amber)}.t-blue{color:var(--blue-light)}
+
+/* ── Decision Engine ───────────────────────────────────────────────────── */
+.de-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:22px 26px;margin-bottom:4px}
+.de-card-long {border-left:4px solid var(--green)!important}
+.de-card-short{border-left:4px solid var(--red)!important}
+.de-card-wait {border-left:4px solid var(--amber)!important}
+.de-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px}
+.de-title{font-family:var(--mono);font-size:10px;letter-spacing:1.6px;color:var(--text-3);text-transform:uppercase}
+.de-mode-badge{font-family:var(--mono);font-size:9px;color:var(--text-2);background:var(--bg);border:1px solid var(--border);padding:2px 8px;border-radius:3px;text-transform:uppercase;letter-spacing:.08em}
+.de-main{display:grid;grid-template-columns:auto 1fr auto;gap:20px;align-items:center;margin-bottom:16px}
+.de-dir{font-family:var(--mono);font-size:2.6rem;font-weight:800;letter-spacing:-1px;line-height:1}
+.de-dir-long {color:var(--green)}
+.de-dir-short{color:var(--red)}
+.de-dir-wait {color:var(--amber)}
+.de-votes{display:flex;flex-direction:column;gap:7px}
+.de-vote-lbl{font-family:var(--mono);font-size:9px;color:var(--text-3);letter-spacing:.06em;text-transform:uppercase}
+.de-vrow{display:flex;align-items:center;gap:8px}
+.de-vname{font-family:var(--mono);font-size:10px;color:var(--text-2);width:42px}
+.de-vtrack{flex:1;height:5px;background:var(--border);border-radius:3px;overflow:hidden}
+.de-vfill-l{height:100%;background:var(--green);border-radius:3px;transition:width .5s ease}
+.de-vfill-s{height:100%;background:var(--red);border-radius:3px;transition:width .5s ease}
+.de-vcount{font-family:var(--mono);font-size:10px;color:var(--text-2);width:28px;text-align:right}
+.de-conf{text-align:center}
+.de-conf-num{font-family:var(--mono);font-size:2.1rem;font-weight:700;line-height:1}
+.de-conf-lbl{font-family:var(--mono);font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:.1em;margin-top:2px}
+.de-levels{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;background:var(--bg);border:1px solid var(--border);border-radius:4px;padding:11px 14px;margin-bottom:14px}
+.de-lv{display:flex;flex-direction:column;gap:3px}
+.de-lv-k{font-family:var(--mono);font-size:9px;color:var(--text-3);text-transform:uppercase;letter-spacing:.08em}
+.de-lv-v{font-family:var(--mono);font-size:12px;font-weight:600}
+.de-reasons{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+.de-reason{display:flex;align-items:flex-start;gap:9px;font-size:12.5px;color:var(--text);line-height:1.45;padding:4px 0}
+.de-reason-dot{font-family:var(--mono);font-size:10px;color:var(--blue-light);flex-shrink:0;margin-top:2px}
+.de-verdict{font-style:italic;color:var(--text-2);font-size:11.5px;border-top:1px solid var(--border);padding-top:9px;line-height:1.5}
+.de-risk{background:rgba(224,60,80,.08);border:1px solid rgba(224,60,80,.25);border-radius:4px;padding:5px 11px;margin-top:8px;font-size:11px;color:var(--red);font-family:var(--mono)}
+.de-spinner{text-align:center;padding:32px;color:var(--text-2);font-family:var(--mono);font-size:12px}
 </style>""", unsafe_allow_html=True)
 
     mt5_login = st.session_state.mt5_login or None
@@ -3889,6 +3928,186 @@ if st.session_state.analysis_executed:
     with col_sc2:
         st.write("**Desglose del score:**")
         for r in score_reasons: st.write(f"• {r}")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # ── DECISION ENGINE — Síntesis total sin contradicciones ─────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    st.markdown('<div id="sec-decision"></div>', unsafe_allow_html=True)
+    st.markdown("---")
+
+    _de_mode_labels = {
+        "scalping": "Scalping 15m",
+        "intraday": "Intraday 1h",
+        "swing":    "Swing 4h",
+    }
+    _de_col_title, _de_col_modes, _de_col_btn = st.columns([3, 3, 1])
+    with _de_col_title:
+        st.subheader("Decisión Analizada")
+        st.caption("Síntesis de todos los factores → una sola dirección sin contradicciones")
+    with _de_col_modes:
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        _de_m_cols = st.columns(3)
+        for _di, (_dmk, _dml) in enumerate(_de_mode_labels.items()):
+            _is_active = st.session_state.decision_mode == _dmk
+            if _de_m_cols[_di].button(
+                _dml,
+                key=f"de_mode_{_dmk}",
+                type="primary" if _is_active else "secondary",
+                use_container_width=True,
+            ):
+                st.session_state.decision_mode = _dmk
+                st.session_state.decision_cache = None
+                st.rerun()
+    with _de_col_btn:
+        st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+        if st.button("Re-analizar", key="de_rerun_btn", use_container_width=True):
+            st.session_state.decision_cache = None
+            st.rerun()
+
+    # Cache key — invalidate when analysis refreshes or mode changes
+    _de_ck = f"{st.session_state.decision_mode}_{st.session_state.get('last_analysis_time', 0)}"
+    _de_cached = st.session_state.get("decision_cache")
+    _de_valid  = bool(_de_cached and _de_cached.get("_ck") == _de_ck)
+
+    if not _de_valid and _AI_ENGINE_OK and signal:
+        # Derive macro direction from macro context
+        _de_macro_dir = ""
+        _de_macro = st.session_state.get("macro_context", {})
+        if _de_macro:
+            try:
+                _de_fred = _de_macro.get("fred", {})
+                _de_dxy_trend = str(_de_fred.get("dxy_trend", "")).upper()
+                if "DOWN" in _de_dxy_trend or "FALL" in _de_dxy_trend:
+                    _de_macro_dir = "LONG"
+                elif "UP" in _de_dxy_trend or "RISE" in _de_dxy_trend:
+                    _de_macro_dir = "SHORT"
+                elif str(_de_macro.get("bias", "")).upper() in ("LONG", "SHORT"):
+                    _de_macro_dir = str(_de_macro.get("bias", "")).upper()
+            except Exception:
+                pass
+
+        # COT direction
+        _de_cot_dir = ""
+        _de_cot = st.session_state.get("cot_data")
+        if _de_cot:
+            try:
+                _de_cot_dir = interpret_cot_for_signal(_de_cot).get("direction", "")
+            except Exception:
+                pass
+
+        _de_ctx = {
+            "mode":            st.session_state.decision_mode,
+            "timeframes":      signal.get("timeframes", {}),
+            "dxy_dir":         dxy_dir,
+            "cot_dir":         _de_cot_dir,
+            "kb_dir":          signal.get("kb_direction", ""),
+            "score":           score,
+            "score_dir":       signal.get("direction", ""),
+            "ai_bias_dir":     ai_bias.get("bias", "") if isinstance(ai_bias, dict) else "",
+            "macro_dir":       _de_macro_dir,
+            "price":           signal.get("price"),
+            "session":         session,
+            "regime":          signal.get("kb_regime_label", ""),
+            "atr_pips":        signal.get("atr_1h_pips"),
+            "tp1":             tp1,
+            "tp2":             tp2,
+            "sl":              smart_sl,
+            "rr":              rr2,
+            "context_reasons": st.session_state.get("market_context_reasons") or [],
+        }
+        with st.spinner("Sintetizando decisión…"):
+            _de_result = _ai_engine.synthesize_trading_decision(_de_ctx)
+        _de_result["_ck"] = _de_ck
+        st.session_state.decision_cache = _de_result
+    elif _de_valid:
+        _de_result = _de_cached
+    else:
+        # No AI or no signal yet
+        _de_result = None
+
+    if _de_result:
+        _ded      = _de_result.get("direction", "WAIT")
+        _dec      = _de_result.get("confidence", 0)
+        _devl     = _de_result.get("votes_long", 0)
+        _devs     = _de_result.get("votes_short", 0)
+        _de_tot   = _devl + _devs or 1
+        _de_pct_l = round(_devl / _de_tot * 100)
+        _de_pct_s = round(_devs / _de_tot * 100)
+        _de_reasons  = _de_result.get("reasons", [])
+        _de_verdict  = _de_result.get("verdict", "")
+        _de_risknote = _de_result.get("risk_note")
+
+        _de_dir_css  = {"LONG": "de-dir-long", "SHORT": "de-dir-short", "WAIT": "de-dir-wait"}.get(_ded, "de-dir-wait")
+        _de_card_css = {"LONG": "de-card-long", "SHORT": "de-card-short", "WAIT": "de-card-wait"}.get(_ded, "de-card-wait")
+        _de_conf_col = {"LONG": "#00b87c", "SHORT": "#e03c50", "WAIT": "#c97d0a"}.get(_ded, "#c97d0a")
+        _de_dir_txt  = {"LONG": "▲ LONG", "SHORT": "▼ SHORT", "WAIT": "– ESPERAR"}.get(_ded, "–")
+
+        def _de_fmt_px(v): return f"{v:.5f}" if v else "—"
+        def _de_fmt_rr(v): return f"{v:.1f}R" if v else "—"
+
+        _de_entry = _de_result.get("entry")
+        _de_tp1   = _de_result.get("tp1")
+        _de_tp2   = _de_result.get("tp2")
+        _de_sl    = _de_result.get("sl")
+        _de_rr    = _de_result.get("rr")
+        _de_mname = _de_mode_labels.get(st.session_state.decision_mode, "Intraday 1h").upper()
+
+        _de_reason_html = "".join(
+            f'<div class="de-reason"><span class="de-reason-dot">▶</span>{_r}</div>'
+            for _r in _de_reasons
+        )
+        _de_risk_html = (
+            f'<div class="de-risk">⚠ {_de_risknote}</div>' if _de_risknote else ""
+        )
+
+        st.markdown(f"""<div class="de-card {_de_card_css}">
+  <div class="de-header">
+    <span class="de-title">DECISIÓN ANALIZADA — SÍNTESIS TOTAL</span>
+    <span class="de-mode-badge">{_de_mname}</span>
+  </div>
+  <div class="de-main">
+    <div class="de-dir {_de_dir_css}">{_de_dir_txt}</div>
+    <div class="de-votes">
+      <div class="de-vote-lbl">Votos ponderados por fuente institucional</div>
+      <div class="de-vrow">
+        <span class="de-vname" style="color:var(--green)">LONG</span>
+        <div class="de-vtrack"><div class="de-vfill-l" style="width:{_de_pct_l}%"></div></div>
+        <span class="de-vcount" style="color:var(--green)">{_devl}</span>
+      </div>
+      <div class="de-vrow">
+        <span class="de-vname" style="color:var(--red)">SHORT</span>
+        <div class="de-vtrack"><div class="de-vfill-s" style="width:{_de_pct_s}%"></div></div>
+        <span class="de-vcount" style="color:var(--red)">{_devs}</span>
+      </div>
+    </div>
+    <div class="de-conf">
+      <div class="de-conf-num" style="color:{_de_conf_col}">{_dec}%</div>
+      <div class="de-conf-lbl">Confianza</div>
+    </div>
+  </div>
+  <div class="de-levels">
+    <div class="de-lv"><span class="de-lv-k">Entrada</span><span class="de-lv-v" style="color:var(--text)">{_de_fmt_px(_de_entry)}</span></div>
+    <div class="de-lv"><span class="de-lv-k">TP 1</span><span class="de-lv-v" style="color:var(--green)">{_de_fmt_px(_de_tp1)}</span></div>
+    <div class="de-lv"><span class="de-lv-k">TP 2</span><span class="de-lv-v" style="color:#00c98a">{_de_fmt_px(_de_tp2)}</span></div>
+    <div class="de-lv"><span class="de-lv-k">SL / RR</span><span class="de-lv-v" style="color:var(--red)">{_de_fmt_px(_de_sl)} / {_de_fmt_rr(_de_rr)}</span></div>
+  </div>
+  <div class="de-reasons">{_de_reason_html}</div>
+  <div class="de-verdict">"{_de_verdict}"</div>
+  {_de_risk_html}
+</div>""", unsafe_allow_html=True)
+
+        # Vote breakdown (expander — no visual noise by default)
+        _de_vlog = _de_result.get("vote_log", [])
+        if _de_vlog:
+            with st.expander("Desglose de votos por fuente", expanded=False):
+                for _vl_item in _de_vlog:
+                    _vl_col = "#00b87c" if "LONG" in _vl_item else "#e03c50"
+                    st.markdown(
+                        f'<div class="t-row"><span>{_vl_item}</span></div>',
+                        unsafe_allow_html=True,
+                    )
+    else:
+        st.info("Análisis en curso — el motor de decisión se activa tras el primer ciclo completo.")
 
     # ── GRÁFICO ───────────────────────────────────────────────────────────────
     st.markdown('<div id="sec-chart"></div>', unsafe_allow_html=True)
