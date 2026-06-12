@@ -1395,10 +1395,18 @@ def _enrich_df_volume(df: pd.DataFrame, symbol: str = "EURUSD", tf: str = "1h") 
 
 def get_multiple_timeframes():
     out = {}
-    for tf in ["15m", "1h", "4h", "1d"]:
-        df = get_eurusd_data(tf)
-        if not df.empty:
-            out[tf] = df
+    _tfs = ["15m", "1h", "4h", "1d"]
+    # Descarga los 4 timeframes EN PARALELO (cada uno ~1-1.5s en serie → ~1.5s total)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        _futs = {pool.submit(get_eurusd_data, tf): tf for tf in _tfs}
+        for _f in as_completed(_futs):
+            _tf = _futs[_f]
+            try:
+                df = _f.result()
+                if df is not None and not df.empty:
+                    out[_tf] = df
+            except Exception:
+                pass
     return out
 
 # ============================================
