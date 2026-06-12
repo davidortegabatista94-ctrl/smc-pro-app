@@ -2453,24 +2453,29 @@ else:
     if st.session_state.current_user is None:
         st.markdown("""
         <style>
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap');
-        .stApp {{ background:#04080f!important; font-family:'Inter',sans-serif!important; }}
-        .block-container {{ max-width:420px!important; padding-top:100px!important; }}
-        #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{{display:none!important}}
-        [data-testid="stWidgetLabel"] label {{font-size:.62rem!important;font-weight:700!important;color:#57697c!important;text-transform:uppercase!important;letter-spacing:.1em!important;}}
-        .stTextInput input,.stSelectbox>div>div {{background:#080d17!important;border:1px solid #172032!important;border-radius:4px!important;color:#c8d3e0!important;font-family:'JetBrains Mono',monospace!important;font-size:.85rem!important;}}
-        button[kind="primaryFormSubmit"],button[kind="primary"] {{background:#1566d3!important;border:none!important;border-radius:4px!important;font-weight:700!important;letter-spacing:.06em!important;text-transform:uppercase!important;font-size:.76rem!important;padding:10px 20px!important;}}
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+        .stApp{background:radial-gradient(900px 520px at 50% -160px, rgba(47,107,237,.12), transparent 62%), #0a0e17!important;font-family:'Inter',sans-serif!important}
+        .block-container{max-width:430px!important;padding-top:80px!important}
+        #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important}
+        [data-testid="stForm"]{background:linear-gradient(180deg,#121826,#0a0e17)!important;border:1px solid #232c3d!important;border-radius:18px!important;padding:30px 28px 26px!important;box-shadow:0 24px 70px rgba(0,0,0,.55)!important}
+        [data-testid="stWidgetLabel"] label{font-size:.8rem!important;font-weight:600!important;color:#93a1b5!important;text-transform:none!important;letter-spacing:.01em!important}
+        .stTextInput input,[data-baseweb="select"]>div{background:#0a0e17!important;border:1px solid #232c3d!important;border-radius:10px!important;color:#e6ecf5!important;font-family:'Inter',sans-serif!important;font-size:.92rem!important;padding:11px 13px!important}
+        .stTextInput input:focus{border-color:#2f6bed!important;box-shadow:0 0 0 3px rgba(47,107,237,.22)!important}
+        button[kind="primaryFormSubmit"],button[kind="primary"]{background:#2f6bed!important;border:none!important;border-radius:10px!important;font-weight:600!important;letter-spacing:0!important;text-transform:none!important;font-size:.94rem!important;padding:13px 20px!important;box-shadow:0 6px 20px rgba(47,107,237,.32)!important;transition:all .16s!important}
+        button[kind="primaryFormSubmit"]:hover{background:#3b78f0!important;transform:translateY(-1px)!important}
         </style>""", unsafe_allow_html=True)
         st.markdown("""
-        <div style="margin-bottom:32px;text-align:center">
-          <div style="font-size:1.6rem;font-weight:900;color:#c8d3e0;letter-spacing:-.04em;font-family:Inter,sans-serif">SMC Pro</div>
-          <div style="font-size:.62rem;color:#57697c;letter-spacing:.18em;text-transform:uppercase;margin-top:4px;font-family:Inter,sans-serif">Trading Terminal · EUR/USD</div>
-          <div style="width:40px;height:2px;background:#1566d3;margin:12px auto 0"></div>
+        <div style="text-align:center;margin-bottom:28px">
+          <div style="width:56px;height:56px;margin:0 auto 16px;border-radius:15px;background:linear-gradient(135deg,#2f6bed,#5b9bff);display:flex;align-items:center;justify-content:center;box-shadow:0 10px 28px rgba(47,107,237,.42)">
+            <span style="font-size:1.7rem;font-weight:900;color:#fff;font-family:Inter,sans-serif;line-height:1">S</span>
+          </div>
+          <div style="font-size:1.75rem;font-weight:800;color:#e6ecf5;letter-spacing:-.03em;font-family:Inter,sans-serif">SMC&nbsp;Pro</div>
+          <div style="font-size:.84rem;color:#93a1b5;margin-top:6px;font-family:Inter,sans-serif">Plataforma de trading sistemático</div>
         </div>""", unsafe_allow_html=True)
         with st.form("_login_form"):
             _lu = st.selectbox("Usuario", ["david", "javi"])
             _lp = st.text_input("Contraseña", type="password", placeholder="••••••••")
-            _ls = st.form_submit_button("ACCEDER", use_container_width=True)
+            _ls = st.form_submit_button("Iniciar sesión", use_container_width=True)
         if _ls:
             _auth_ok = False
             if _DB_OK:
@@ -3016,73 +3021,89 @@ else:
     if st.session_state.get("app_mode") is None:
         st.markdown("""
         <style>
-        .mode-container{display:flex;gap:24px;margin-top:32px}
-        .mode-card{background:#1a1f2e;border:1px solid #2d3748;border-radius:16px;
-                   padding:32px 24px;flex:1;text-align:center}
-        .mode-card h2{font-size:2rem;margin-bottom:8px}
-        .mode-card p{color:#a0aec0;margin-bottom:16px}
-        .mode-card ul{text-align:left;color:#cbd5e0;line-height:2rem;list-style:none;padding-left:8px}
+        .mode-card{background:linear-gradient(180deg,var(--surface),var(--bg-2));
+                   border:1px solid var(--border);border-radius:16px;padding:26px 24px;height:330px;
+                   display:flex;flex-direction:column;box-shadow:var(--shadow);
+                   transition:transform .18s ease,border-color .18s,box-shadow .18s}
+        .mode-card:hover{transform:translateY(-4px);border-color:var(--border-2);box-shadow:var(--shadow-lg)}
+        .mode-ico{width:50px;height:50px;border-radius:13px;display:flex;align-items:center;
+                  justify-content:center;font-size:1.45rem;margin-bottom:15px}
+        .mode-card h2{font-size:1.28rem!important;font-weight:700!important;color:var(--text)!important;
+                      margin:0 0 3px!important;letter-spacing:-.02em!important}
+        .mode-card .sub{color:var(--text-2);font-size:.86rem;margin-bottom:15px}
+        .mode-card ul{text-align:left;color:#c3cdda;line-height:1.85;list-style:none;padding:0;margin:0;font-size:.85rem}
+        .mode-card li{padding-left:21px;position:relative}
+        .mode-card li::before{content:'✓';position:absolute;left:0;color:var(--green);font-weight:700}
         </style>
         """, unsafe_allow_html=True)
 
-        st.markdown(f"## ¡Bienvenido, {current_user_name}! ¿Qué quieres hacer hoy?")
+        st.markdown(
+            f"<div style='padding:6px 0 2px'>"
+            f"<div style='font-size:1.7rem;font-weight:800;color:var(--text);letter-spacing:-.03em'>"
+            f"Hola, {current_user_name}</div>"
+            f"<div style='font-size:.95rem;color:var(--text-2);margin-top:4px'>"
+            f"Elige el espacio en el que quieres trabajar hoy.</div></div>",
+            unsafe_allow_html=True)
         st.markdown("")
 
-        _mc1, _mc2, _mc3 = st.columns(3)
+        _mc1, _mc2, _mc3 = st.columns(3, gap="medium")
         with _mc1:
             st.markdown("""
             <div class="mode-card">
-                <h2>⚡ Trading Activo</h2>
-                <p>Señales EUR/USD en tiempo real</p>
+                <div class="mode-ico" style="background:rgba(47,107,237,.14);color:#5b9bff">⚡</div>
+                <h2>Trading Activo</h2>
+                <div class="sub">Señales EUR/USD en tiempo real</div>
                 <ul>
-                    <li>🎯 Señales premium multi-filtro</li>
-                    <li>📊 Backtest de 17 estrategias</li>
-                    <li>🤖 Bot automático OANDA</li>
-                    <li>📱 Alertas Telegram</li>
-                    <li>🧠 Asesor IA</li>
+                    <li>Señales premium multi-filtro</li>
+                    <li>Backtest de 17 estrategias</li>
+                    <li>Bot automático OANDA</li>
+                    <li>Alertas por Telegram</li>
+                    <li>Asesor con IA</li>
                 </ul>
             </div>
             """, unsafe_allow_html=True)
             st.markdown("")
-            if st.button("⚡ Entrar a Trading", use_container_width=True, type="primary"):
+            if st.button("Entrar a Trading", use_container_width=True, type="primary"):
                 st.session_state.app_mode = "trading"
                 st.rerun()
 
         with _mc2:
             st.markdown("""
             <div class="mode-card">
-                <h2>📈 Inversión LP</h2>
-                <p>Cartera optimizada a 1-5 años</p>
+                <div class="mode-ico" style="background:rgba(22,199,132,.14);color:#16c784">📈</div>
+                <h2>Inversión a largo plazo</h2>
+                <div class="sub">Cartera optimizada a 1–5 años</div>
                 <ul>
-                    <li>💎 35+ activos analizados</li>
-                    <li>📊 Scoring fundamental+técnico+macro</li>
-                    <li>🌍 ETFs, acciones, bonos, oro</li>
-                    <li>💼 Constructor de cartera</li>
-                    <li>📈 Proyección de crecimiento</li>
+                    <li>35+ activos analizados</li>
+                    <li>Scoring fundamental, técnico y macro</li>
+                    <li>ETFs, acciones, bonos y oro</li>
+                    <li>Constructor de cartera</li>
+                    <li>Proyección de crecimiento</li>
                 </ul>
             </div>
             """, unsafe_allow_html=True)
             st.markdown("")
-            if st.button("📈 Entrar a Inversión LP", use_container_width=True):
+            if st.button("Entrar a Inversión", use_container_width=True):
                 st.session_state.app_mode = "investment"
                 st.rerun()
 
         with _mc3:
             st.markdown("""
             <div class="mode-card">
-                <h2>🤖 Bot Orquestador</h2>
-                <p>Decisión automática multi-par</p>
+                <div class="mode-ico" style="background:rgba(124,77,237,.16);color:#a78bfa">🤖</div>
+                <h2>Bot Orquestador</h2>
+                <div class="sub">Decisión automática multi-par</div>
                 <ul>
-                    <li>🌐 7 pares analizados en paralelo</li>
-                    <li>⚙️ Conecta todos los módulos existentes</li>
-                    <li>📊 Calibración de frecuencia (~30 ops/día)</li>
-                    <li>🕰️ Backtest 2008, 2020, 2022, hoy</li>
-                    <li>📋 Log de decisiones persistente</li>
+                    <li>7 pares analizados en paralelo</li>
+                    <li>Noticias + calendario + técnico</li>
+                    <li>Aprendizaje walk-forward propio</li>
+                    <li>Paper trading en vivo 24/7</li>
+                    <li>Registro de decisiones auditable</li>
                 </ul>
             </div>
             """, unsafe_allow_html=True)
             st.markdown("")
-            if st.button("🤖 Entrar al Orquestador", use_container_width=True):
+            if st.button("Entrar al Orquestador", use_container_width=True):
                 st.session_state.app_mode = "orchestrator"
                 st.rerun()
 
@@ -3220,106 +3241,142 @@ else:
 
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 
-/* ── Design tokens ────────────────────────────────────────── */
+/* ── Design tokens · Premium fintech ─────────────────────────── */
 :root {
-  --bg:         #04080f;
-  --surface:    #080d17;
-  --surface-2:  #0c1220;
-  --border:     #172032;
-  --border-2:   #1f2e44;
-  --blue:       #1566d3;
-  --blue-light: #3d8ef5;
-  --blue-glow:  rgba(21,102,211,.16);
-  --green:      #00b87c;
-  --green-dim:  rgba(0,184,124,.08);
-  --green-bd:   rgba(0,184,124,.28);
-  --red:        #e03c50;
-  --red-dim:    rgba(224,60,80,.07);
-  --red-bd:     rgba(224,60,80,.3);
-  --amber:      #c97d0a;
-  --amber-dim:  rgba(201,125,10,.07);
-  --amber-bd:   rgba(201,125,10,.25);
-  --text:       #c8d3e0;
-  --text-2:     #57697c;
-  --text-3:     #2e3f50;
+  --bg:         #0a0e17;
+  --bg-2:       #070a11;
+  --surface:    #121826;
+  --surface-2:  #1a2233;
+  --border:     #232c3d;
+  --border-2:   #32405a;
+  --blue:       #2f6bed;
+  --blue-light: #5b9bff;
+  --blue-glow:  rgba(47,107,237,.22);
+  --green:      #16c784;
+  --green-dim:  rgba(22,199,132,.10);
+  --green-bd:   rgba(22,199,132,.32);
+  --red:        #f0566e;
+  --red-dim:    rgba(240,86,110,.10);
+  --red-bd:     rgba(240,86,110,.34);
+  --amber:      #e0a23c;
+  --amber-dim:  rgba(224,162,60,.10);
+  --amber-bd:   rgba(224,162,60,.30);
+  --text:       #e6ecf5;
+  --text-2:     #93a1b5;
+  --text-3:     #5a6b81;
   --mono:       'JetBrains Mono','Courier New',monospace;
   --sans:       'Inter',-apple-system,'Segoe UI',sans-serif;
-  --radius:     5px;
+  --radius:     10px;
+  --radius-sm:  7px;
+  --radius-lg:  14px;
+  --shadow:     0 1px 2px rgba(0,0,0,.30), 0 2px 8px rgba(0,0,0,.22);
+  --shadow-lg:  0 8px 30px rgba(0,0,0,.38);
 }
 
 /* ── Base layout ── */
-.main .block-container{padding-top:.5rem!important;padding-bottom:2.5rem!important;max-width:100%!important}
+.main .block-container{padding-top:1.2rem!important;padding-bottom:3rem!important;max-width:1320px!important;margin:0 auto!important}
 #MainMenu,footer,[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important}
-.stApp{background:var(--bg)!important;font-family:var(--sans)!important}
-p,li,span,label,caption{font-family:var(--sans)!important}
+.stApp{background:
+  radial-gradient(1200px 600px at 50% -200px, rgba(47,107,237,.06), transparent 60%),
+  var(--bg)!important;font-family:var(--sans)!important}
+p,li,span,label{font-family:var(--sans)!important}
+.stApp p,.stApp li{color:var(--text)!important;font-size:.92rem!important;line-height:1.6!important}
+[data-testid="stCaptionContainer"],.stCaption,small{color:var(--text-2)!important;font-size:.8rem!important;line-height:1.55!important}
 
 /* ── Sidebar ── */
-[data-testid="stSidebar"]{background:#06090f!important;border-right:1px solid var(--border)!important}
+[data-testid="stSidebar"]{background:var(--bg-2)!important;border-right:1px solid var(--border)!important}
 [data-testid="stSidebar"] h1,[data-testid="stSidebar"] h2,[data-testid="stSidebar"] h3{
-  color:var(--blue-light)!important;font-size:.65rem!important;font-weight:700!important;
-  letter-spacing:.12em!important;text-transform:uppercase!important;margin-bottom:8px!important;font-family:var(--sans)!important}
-[data-testid="stSidebar"] .stMarkdown p{font-size:.77rem!important;color:var(--text-2)!important;line-height:1.55!important}
+  color:var(--text-2)!important;font-size:.68rem!important;font-weight:700!important;
+  letter-spacing:.14em!important;text-transform:uppercase!important;margin-bottom:8px!important;font-family:var(--sans)!important}
+[data-testid="stSidebar"] .stMarkdown p{font-size:.82rem!important;color:var(--text-2)!important;line-height:1.6!important}
 [data-testid="stSidebarNavItems"]{padding-top:0!important}
 
 /* ── Metrics ── */
-[data-testid="metric-container"]{
-  background:var(--surface)!important;border:1px solid var(--border)!important;
-  border-radius:var(--radius)!important;padding:13px 15px!important;position:relative!important;overflow:hidden!important}
-[data-testid="metric-container"]::after{content:'';position:absolute;bottom:0;left:0;width:100%;height:2px;
-  background:var(--blue);transform:scaleX(0);transition:transform .2s ease;transform-origin:left}
-[data-testid="metric-container"]:hover{border-color:var(--border-2)!important}
-[data-testid="metric-container"]:hover::after{transform:scaleX(1)}
-[data-testid="stMetricValue"]{font-size:1.1rem!important;font-weight:700!important;
-  font-family:var(--mono)!important;color:var(--text)!important;letter-spacing:-.01em!important}
-[data-testid="stMetricLabel"]{font-size:.62rem!important;font-weight:600!important;
-  color:var(--text-2)!important;text-transform:uppercase!important;letter-spacing:.1em!important;font-family:var(--sans)!important}
+[data-testid="stMetric"],[data-testid="metric-container"]{
+  background:linear-gradient(180deg,var(--surface),var(--bg-2))!important;border:1px solid var(--border)!important;
+  border-radius:var(--radius)!important;padding:18px 20px!important;position:relative!important;overflow:hidden!important;
+  box-shadow:var(--shadow)!important;transition:border-color .18s,transform .18s,box-shadow .18s!important}
+[data-testid="stMetric"]:hover,[data-testid="metric-container"]:hover{
+  border-color:var(--border-2)!important;transform:translateY(-2px)!important;box-shadow:var(--shadow-lg)!important}
+[data-testid="stMetricValue"]{font-size:1.7rem!important;font-weight:700!important;
+  font-family:var(--mono)!important;color:var(--text)!important;letter-spacing:-.02em!important;line-height:1.1!important}
+[data-testid="stMetricLabel"]{font-size:.72rem!important;font-weight:600!important;
+  color:var(--text-2)!important;text-transform:uppercase!important;letter-spacing:.09em!important;font-family:var(--sans)!important}
+[data-testid="stMetricLabel"] p{font-size:.72rem!important;color:var(--text-2)!important}
 [data-testid="stMetricDelta"] svg{display:none!important}
-[data-testid="stMetricDelta"]{font-size:.7rem!important;font-family:var(--mono)!important}
+[data-testid="stMetricDelta"]{font-size:.78rem!important;font-weight:600!important;font-family:var(--mono)!important}
+
+/* ── Tabs · navegación premium ── */
+[data-baseweb="tab-list"]{gap:4px!important;background:var(--bg-2)!important;border:1px solid var(--border)!important;
+  border-radius:var(--radius)!important;padding:5px!important;margin-bottom:18px!important}
+[data-baseweb="tab-list"]::-webkit-scrollbar{display:none!important}
+button[data-baseweb="tab"]{height:auto!important;background:transparent!important;border:none!important;
+  border-radius:var(--radius-sm)!important;padding:9px 16px!important;color:var(--text-2)!important;
+  font-family:var(--sans)!important;font-size:.82rem!important;font-weight:600!important;letter-spacing:0!important;transition:all .15s!important}
+button[data-baseweb="tab"]:hover{background:var(--surface)!important;color:var(--text)!important}
+button[data-baseweb="tab"][aria-selected="true"]{background:var(--blue)!important;color:#fff!important;box-shadow:0 2px 10px var(--blue-glow)!important}
+[data-baseweb="tab-highlight"],[data-baseweb="tab-border"]{display:none!important}
+[data-baseweb="tab"] p{font-size:.82rem!important;font-weight:600!important;color:inherit!important}
 
 /* ── Buttons ── */
-button[kind="primary"]{background:var(--blue)!important;border:none!important;border-radius:var(--radius)!important;
-  font-weight:700!important;letter-spacing:.05em!important;font-size:.76rem!important;padding:8px 16px!important;
-  font-family:var(--sans)!important;text-transform:uppercase!important;box-shadow:none!important;transition:background .15s,box-shadow .15s,transform .1s!important}
-button[kind="primary"]:hover{background:#1a72ec!important;box-shadow:0 4px 18px var(--blue-glow)!important;transform:translateY(-1px)!important}
-button[kind="secondary"]{background:var(--surface)!important;border:1px solid var(--border)!important;
-  border-radius:var(--radius)!important;color:var(--text-2)!important;font-size:.76rem!important;
-  font-family:var(--sans)!important;box-shadow:none!important}
-button[kind="secondary"]:hover{border-color:var(--border-2)!important;color:var(--text)!important}
+.stButton>button,button[kind="primary"],button[kind="secondary"]{
+  border-radius:var(--radius-sm)!important;font-weight:600!important;letter-spacing:0!important;font-size:.86rem!important;
+  padding:11px 20px!important;font-family:var(--sans)!important;text-transform:none!important;transition:all .16s ease!important}
+button[kind="primary"]{background:var(--blue)!important;border:1px solid var(--blue)!important;color:#fff!important;box-shadow:0 2px 10px var(--blue-glow)!important}
+button[kind="primary"]:hover{background:#3b78f0!important;box-shadow:0 6px 22px var(--blue-glow)!important;transform:translateY(-1px)!important}
+button[kind="secondary"]{background:var(--surface)!important;border:1px solid var(--border)!important;color:var(--text)!important;box-shadow:var(--shadow)!important}
+button[kind="secondary"]:hover{border-color:var(--border-2)!important;background:var(--surface-2)!important;transform:translateY(-1px)!important}
 
 /* ── Expanders ── */
-[data-testid="stExpander"]{background:var(--surface)!important;border:1px solid var(--border)!important;border-radius:var(--radius)!important}
-details summary{font-weight:600!important;font-size:.72rem!important;color:var(--text-2)!important;
-  padding:9px 13px!important;font-family:var(--sans)!important;text-transform:uppercase!important;letter-spacing:.07em!important}
-details summary:hover{color:var(--text)!important}
+[data-testid="stExpander"]{background:var(--surface)!important;border:1px solid var(--border)!important;
+  border-radius:var(--radius)!important;box-shadow:var(--shadow)!important;overflow:hidden!important}
+details summary{font-weight:600!important;font-size:.86rem!important;color:var(--text)!important;
+  padding:13px 17px!important;font-family:var(--sans)!important;text-transform:none!important;letter-spacing:0!important}
+details summary:hover{color:var(--blue-light)!important}
 details[open] summary{color:var(--text)!important;border-bottom:1px solid var(--border)!important}
 
 /* ── Alerts ── */
-[data-testid="stAlert"]{border-radius:var(--radius)!important;padding:9px 14px!important;font-size:.76rem!important;
-  font-family:var(--sans)!important;border-left-width:3px!important;border-top-width:0!important;border-right-width:0!important;border-bottom-width:0!important}
-.stSuccess{background:var(--green-dim)!important;border-color:var(--green)!important;color:#8de5c7!important}
-.stWarning{background:var(--amber-dim)!important;border-color:var(--amber)!important;color:#e6b86a!important}
-.stInfo{background:rgba(21,102,211,.06)!important;border-color:var(--blue)!important;color:#7ab5f5!important}
-.stError{background:var(--red-dim)!important;border-color:var(--red)!important;color:#f08090!important}
+[data-testid="stAlert"]{border-radius:var(--radius)!important;padding:13px 17px!important;font-size:.86rem!important;
+  font-family:var(--sans)!important;border-width:1px!important;border-left-width:4px!important;box-shadow:var(--shadow)!important}
+[data-testid="stAlert"] p{font-size:.86rem!important;line-height:1.6!important}
+.stSuccess{background:var(--green-dim)!important;border-color:var(--green-bd)!important;border-left-color:var(--green)!important;color:#7fe8c4!important}
+.stWarning{background:var(--amber-dim)!important;border-color:var(--amber-bd)!important;border-left-color:var(--amber)!important;color:#edc079!important}
+.stInfo{background:rgba(47,107,237,.09)!important;border-color:rgba(47,107,237,.30)!important;border-left-color:var(--blue)!important;color:#9cc0ff!important}
+.stError{background:var(--red-dim)!important;border-color:var(--red-bd)!important;border-left-color:var(--red)!important;color:#ff8b9c!important}
 
 /* ── DataFrames ── */
-[data-testid="stDataFrame"]{border:1px solid var(--border)!important;border-radius:var(--radius)!important;overflow:hidden!important}
+[data-testid="stDataFrame"]{border:1px solid var(--border)!important;border-radius:var(--radius)!important;
+  overflow:hidden!important;box-shadow:var(--shadow)!important}
 
 /* ── Dividers ── */
-hr{border-color:var(--border)!important;margin:14px 0!important}
+hr{border-color:var(--border)!important;margin:22px 0!important}
 
 /* ── Inputs ── */
-[data-testid="stWidgetLabel"] label{font-size:.62rem!important;font-weight:700!important;
-  color:var(--text-2)!important;text-transform:uppercase!important;letter-spacing:.1em!important;font-family:var(--sans)!important}
-.stTextInput input,.stSelectbox select{background:var(--surface)!important;border-color:var(--border)!important;
-  border-radius:var(--radius)!important;color:var(--text)!important;font-family:var(--mono)!important;font-size:.82rem!important}
-.stTextInput input:focus{border-color:var(--blue)!important;box-shadow:0 0 0 2px var(--blue-glow)!important}
+[data-testid="stWidgetLabel"] label{font-size:.78rem!important;font-weight:600!important;
+  color:var(--text-2)!important;text-transform:none!important;letter-spacing:.01em!important;font-family:var(--sans)!important}
+.stTextInput input,.stSelectbox select,.stNumberInput input{background:var(--surface)!important;border:1px solid var(--border)!important;
+  border-radius:var(--radius-sm)!important;color:var(--text)!important;font-family:var(--sans)!important;font-size:.9rem!important;padding:10px 13px!important}
+.stTextInput input:focus,.stNumberInput input:focus{border-color:var(--blue)!important;box-shadow:0 0 0 3px var(--blue-glow)!important}
+[data-baseweb="select"]>div{background:var(--surface)!important;border:1px solid var(--border)!important;border-radius:var(--radius-sm)!important}
 
 /* ── Plotly ── */
-.js-plotly-plot{border:1px solid var(--border)!important;border-radius:var(--radius)!important;overflow:hidden!important}
+.js-plotly-plot{border:1px solid var(--border)!important;border-radius:var(--radius)!important;overflow:hidden!important;box-shadow:var(--shadow)!important}
 
-/* ── Headings ── */
-h1,h2,h3{color:var(--text)!important;font-family:var(--sans)!important;font-weight:700!important;letter-spacing:-.02em!important}
-h3{font-size:.9rem!important;text-transform:uppercase;letter-spacing:.04em!important;color:var(--text-2)!important}
+/* ── Headings · jerarquía clara ── */
+h1,h2,h3,h4{color:var(--text)!important;font-family:var(--sans)!important;font-weight:700!important;letter-spacing:-.02em!important}
+h1{font-size:1.8rem!important;line-height:1.2!important}
+h2{font-size:1.35rem!important;line-height:1.25!important}
+h3{font-size:1.05rem!important;text-transform:none!important;letter-spacing:-.01em!important;color:var(--text)!important;margin-top:.3rem!important}
+h4{font-size:.95rem!important;text-transform:none!important;color:var(--text)!important}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-track{background:var(--bg-2)}
+::-webkit-scrollbar-thumb{background:var(--border-2);border-radius:6px;border:2px solid var(--bg-2)}
+::-webkit-scrollbar-thumb:hover{background:#3e4d68}
+
+/* ── Toggle / radio refinamiento ── */
+[data-testid="stToggle"]{font-family:var(--sans)!important}
 
 /* ═══ TERMINAL COMPONENTS ═══ */
 
