@@ -2511,6 +2511,216 @@ else:
                 st.rerun()
         st.stop()
 
+    if st.session_state.get("app_mode") == "orchestrator":
+        # ── MODO ORQUESTADOR — renderiza directamente sin tabs de trading ────
+        import time as _orch_time_home
+        _oc_back, _oc_title = st.columns([1, 6])
+        if _oc_back.button("← Volver", key="orch_home_back"):
+            st.session_state.app_mode = None
+            st.rerun()
+        _oc_title.markdown("### Orquestador Bot — Decisión automática multi-par")
+
+        if not _ORCH_OK:
+            st.error("Módulo orchestrator no disponible. Revisa backend/orchestrator.py.")
+            st.stop()
+
+        st.caption(
+            "Conecta todos los módulos existentes (análisis técnico, DXY, COT, noticias, IA) "
+            "en una única decisión por par. Paper trading por defecto."
+        )
+
+        # Configuración
+        st.markdown("---")
+        _oc_h1, _oc_h2, _oc_h3 = st.columns([1, 1, 1])
+        with _oc_h1:
+            st.markdown("**Modo**")
+            _oc_mode_h = st.radio("Modo", ["paper", "live"],
+                index=0 if st.session_state.orch_mode == "paper" else 1,
+                horizontal=True, key="orch_mode_home", label_visibility="collapsed")
+            st.session_state.orch_mode = _oc_mode_h
+            if _oc_mode_h == "live":
+                st.warning("LIVE: órdenes reales al broker.", icon="⚠️")
+            else:
+                st.info("PAPER: sin órdenes reales.", icon="📝")
+        with _oc_h2:
+            st.markdown("**Tipo de análisis**")
+            _oc_am_h_map = {"scalping": "Scalping 15m", "intraday": "Intraday 1h", "swing": "Swing 4h"}
+            _oc_am_h_keys = list(_oc_am_h_map.keys())
+            _oc_am_h_idx  = _oc_am_h_keys.index(st.session_state.orch_analysis_mode) if st.session_state.orch_analysis_mode in _oc_am_h_keys else 1
+            _oc_am_h_sel  = st.selectbox("Análisis", list(_oc_am_h_map.values()),
+                index=_oc_am_h_idx, key="orch_am_home", label_visibility="collapsed")
+            st.session_state.orch_analysis_mode = _oc_am_h_keys[list(_oc_am_h_map.values()).index(_oc_am_h_sel)]
+        with _oc_h3:
+            st.markdown("**Score mínimo**")
+            _oc_sc_h = st.slider("Score", 45, 90, st.session_state.orch_min_score,
+                step=5, key="orch_score_home", label_visibility="collapsed")
+            st.session_state.orch_min_score = _oc_sc_h
+
+        _oc_all_pairs_h = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
+        st.markdown("**Pares a analizar**")
+        _oc_pairs_h = st.multiselect("Pares", _oc_all_pairs_h,
+            default=st.session_state.orch_pairs, key="orch_pairs_home")
+        if _oc_pairs_h:
+            st.session_state.orch_pairs = _oc_pairs_h
+
+        st.markdown("---")
+        _oc_run_h = st.button("Analizar todos los pares", type="primary",
+            key="orch_run_home", use_container_width=False)
+        _oc_last_h = st.session_state.orch_last_run
+        if _oc_last_h > 0:
+            st.caption(f"Último análisis hace {int(_orch_time_home.time() - _oc_last_h)}s")
+
+        if _oc_run_h and _oc_pairs_h:
+            with st.spinner(f"Analizando {len(_oc_pairs_h)} pares..."):
+                try:
+                    _oc_dxy_h = ""
+                    try:
+                        from backend.signals import get_dxy_yf as _gd_h
+                        _oc_dxy_h = (_gd_h("1h") or {}).get("direction", "")
+                    except Exception:
+                        pass
+                    _oc_news_h = []
+                    try:
+                        from backend.signals import get_rss_news as _gn_h
+                        _oc_news_h = _gn_h() or []
+                    except Exception:
+                        pass
+                    _oc_res_h = _orch.run_all_pairs_analysis(
+                        pairs=_oc_pairs_h,
+                        analysis_mode=st.session_state.orch_analysis_mode,
+                        dxy_dir=_oc_dxy_h, news_list=_oc_news_h,
+                    )
+                    for _sym_h, _dec_h in _oc_res_h.items():
+                        _dec_h["trading_mode"] = st.session_state.orch_mode
+                        _dec_h["min_score"]    = st.session_state.orch_min_score
+                        _dec_h["executed"]     = (
+                            st.session_state.orch_mode == "live"
+                            and _dec_h.get("direction") in ("LONG","SHORT")
+                            and int(_dec_h.get("score") or 0) >= st.session_state.orch_min_score
+                        )
+                        _orch.log_decision(_dec_h)
+                    st.session_state.orch_results  = _oc_res_h
+                    st.session_state.orch_last_run = _orch_time_home.time()
+                    st.success(f"Análisis completado — {len(_oc_res_h)} pares")
+                except Exception as _oe_h:
+                    st.error(f"Error: {_oe_h}")
+
+        # Cards por par
+        if st.session_state.orch_results:
+            st.markdown("---")
+            st.markdown("#### Decisión actual por par")
+            _oc_rs_h   = st.session_state.orch_results
+            _oc_min_h  = st.session_state.orch_min_score
+            _oc_syms_h = list(_oc_rs_h.keys())
+            for _ri in range(0, len(_oc_syms_h), 4):
+                _row_syms_h = _oc_syms_h[_ri:_ri+4]
+                _row_cols_h = st.columns(len(_row_syms_h))
+                for _ci_h, _sym_h in enumerate(_row_syms_h):
+                    _d_h     = _oc_rs_h[_sym_h]
+                    _dir_h   = _d_h.get("direction") or "WAIT"
+                    _conf_h  = int(_d_h.get("confidence") or 0)
+                    _sc_h    = int(_d_h.get("score") or 0)
+                    _tp_h    = _d_h.get("tp1") or _d_h.get("tp")
+                    _sl_h    = _d_h.get("sl")
+                    _rr_h    = _d_h.get("rr")
+                    _name_h  = _d_h.get("name", _sym_h)
+                    _fb_h    = _d_h.get("flag_base","")
+                    _fq_h    = _d_h.get("flag_quote","")
+                    _vl_h    = int(_d_h.get("votes_long") or 0)
+                    _vs_h    = int(_d_h.get("votes_short") or 0)
+                    _valid_h = _sc_h >= _oc_min_h and _dir_h in ("LONG","SHORT")
+                    if _dir_h == "LONG":
+                        _dc_h = "#00b87c"; _bd_h = "#00b87c"; _dl_h = "LONG"
+                    elif _dir_h == "SHORT":
+                        _dc_h = "#e03c50"; _bd_h = "#e03c50"; _dl_h = "SHORT"
+                    else:
+                        _dc_h = "#a0aab4"; _bd_h = "#30363d"; _dl_h = "ESPERAR"
+                    _op_h = "1.0" if _valid_h else "0.6"
+                    _badge_h  = f'<div style="display:inline-block;padding:2px 8px;border-radius:4px;background:{_dc_h}22;color:{_dc_h};font-size:0.7rem;font-weight:700">SEÑAL ACTIVA</div>' if _valid_h else ""
+                    _price_h  = f'<div style="font-size:0.82rem;color:#8b949e">Precio: {_d_h.get("price",0):.5f}</div>' if _d_h.get("price") else ""
+                    _lvl_h    = (f'<div style="font-size:0.76rem;color:#8b949e">TP:<span style="color:#00b87c">{_tp_h:.5f}</span> SL:<span style="color:#e03c50">{_sl_h:.5f}</span>{f" RR{_rr_h:.1f}" if _rr_h else ""}</div>') if (_tp_h and _sl_h and _valid_h) else ""
+                    _card_h   = (
+                        f'<div style="background:#161b22;border:1px solid {_bd_h};border-left:4px solid {_dc_h};'
+                        f'border-radius:8px;padding:14px 16px;opacity:{_op_h};margin-bottom:8px">'
+                        f'<div style="font-size:0.95rem;font-weight:700;color:#e6edf3">{_fb_h}{_fq_h} {_name_h}</div>'
+                        f'<div style="font-family:monospace;font-size:1.5rem;font-weight:800;color:{_dc_h}">{_dl_h}</div>'
+                        f'<div style="font-size:0.8rem;color:#8b949e">Conf: {_conf_h}% | L:{_vl_h} S:{_vs_h} | Sc:{_sc_h}</div>'
+                        f'{_badge_h}{_price_h}{_lvl_h}</div>'
+                    )
+                    with _row_cols_h[_ci_h]:
+                        st.markdown(_card_h, unsafe_allow_html=True)
+
+        # Log compacto
+        st.markdown("---")
+        st.markdown("#### Últimas decisiones registradas")
+        try:
+            _oc_log_h = _orch.load_decisions_log(last_n=30)
+        except Exception:
+            _oc_log_h = []
+        if _oc_log_h:
+            _oc_log_rows_h = []
+            for _le_h in _oc_log_h:
+                _le_dir_h  = _le_h.get("direction","WAIT")
+                _le_sc_h   = int(_le_h.get("score") or 0)
+                _le_mn_h   = int(_le_h.get("min_score") or 0)
+                _le_valid_h= _le_sc_h >= _le_mn_h and _le_dir_h in ("LONG","SHORT")
+                _oc_log_rows_h.append({
+                    "Fecha/Hora": str(_le_h.get("logged_at",""))[:19].replace("T"," "),
+                    "Par":        _le_h.get("symbol","—"),
+                    "Dir":        _le_dir_h,
+                    "Score":      _le_sc_h,
+                    "Conf %":     int(_le_h.get("confidence") or 0),
+                    "Activa":     "SI" if _le_valid_h else "—",
+                    "Modo":       _le_h.get("trading_mode","paper"),
+                })
+            st.dataframe(pd.DataFrame(_oc_log_rows_h), use_container_width=True,
+                hide_index=True, height=280)
+        else:
+            st.info("Log vacío — pulsa 'Analizar todos los pares' para generar decisiones.")
+
+        # Backtest y calibración como expanders para no sobrecargar la página
+        with st.expander("Calibración de frecuencia (ops/día por cooldown)"):
+            _oc_sw_btn_h = st.button("Calcular tabla de frecuencias", key="orch_sweep_home")
+            if _oc_sw_btn_h:
+                with st.spinner("Ejecutando backtest de calibración (~30s)..."):
+                    try:
+                        from backend.strategies import get_backtest_data as _gbt_h
+                        _df_sw_h = _gbt_h("1h")
+                        if not _df_sw_h.empty:
+                            st.session_state.orch_sweep_df = _orch.cooldown_sweep(_df_sw_h)
+                        else:
+                            st.warning("Sin datos 1h para calibración.")
+                    except Exception as _se_h:
+                        st.error(f"Error: {_se_h}")
+            if st.session_state.orch_sweep_df is not None and not st.session_state.orch_sweep_df.empty:
+                _sw_h = st.session_state.orch_sweep_df.copy()
+                _best_h = int((_sw_h["Ops/día"] - 30).abs().idxmin())
+                def _hi_h(row):
+                    return ["background-color:#1c2f1c;color:#00b87c;font-weight:bold"]*len(row) if row.name==_best_h else [""]*len(row)
+                st.dataframe(_sw_h.style.apply(_hi_h,axis=1), use_container_width=True, hide_index=True)
+                st.caption("Fila verde = más cercana a 30 ops/día.")
+
+        with st.expander("Backtest multi-periodo (2008, 2020, 2022, último año)"):
+            _oc_bt_btn_h = st.button("Ejecutar backtest histórico", key="orch_bt_home",
+                help="Descarga datos y ejecuta 4 backtests. ~1-2 minutos.")
+            if _oc_bt_btn_h:
+                with st.spinner("Descargando datos históricos y ejecutando backtests..."):
+                    try:
+                        st.session_state.orch_bt_results = _orch.backtest_multiperiod()
+                    except Exception as _bte_h:
+                        st.error(f"Error: {_bte_h}")
+            if st.session_state.orch_bt_results:
+                _bt_rows_h = []
+                for _pn_h, _pr_h in st.session_state.orch_bt_results.items():
+                    if "error" in _pr_h and "winrate" not in _pr_h:
+                        _bt_rows_h.append({"Periodo": _pn_h, "TF":"—","Ops":"—","Ops/día":"—","WR%":"—","PF":"—","MaxDD%":"—","Pips":"—","Info":_pr_h.get("error","")})
+                    else:
+                        _bt_rows_h.append({"Periodo":_pn_h,"TF":_pr_h.get("tf","—"),"Ops":_pr_h.get("total","—"),"Ops/día":_pr_h.get("ops_per_day","—"),"WR%":_pr_h.get("winrate","—"),"PF":_pr_h.get("profit_factor","—"),"MaxDD%":_pr_h.get("max_dd","—"),"Pips":_pr_h.get("net_pips","—"),"Info":_pr_h.get("note","")[:60]})
+                st.dataframe(pd.DataFrame(_bt_rows_h), use_container_width=True, hide_index=True)
+                st.caption("Sin spread/slippage modelado. Resultados indicativos.")
+
+        st.stop()
+
     if st.session_state.get("app_mode") is None:
         st.markdown("""
         <style>
@@ -2526,7 +2736,7 @@ else:
         st.markdown(f"## ¡Bienvenido, {current_user_name}! ¿Qué quieres hacer hoy?")
         st.markdown("")
 
-        _mc1, _mc2 = st.columns(2)
+        _mc1, _mc2, _mc3 = st.columns(3)
         with _mc1:
             st.markdown("""
             <div class="mode-card">
@@ -2563,6 +2773,25 @@ else:
             st.markdown("")
             if st.button("📈 Entrar a Inversión LP", use_container_width=True):
                 st.session_state.app_mode = "investment"
+                st.rerun()
+
+        with _mc3:
+            st.markdown("""
+            <div class="mode-card">
+                <h2>🤖 Bot Orquestador</h2>
+                <p>Decisión automática multi-par</p>
+                <ul>
+                    <li>🌐 7 pares analizados en paralelo</li>
+                    <li>⚙️ Conecta todos los módulos existentes</li>
+                    <li>📊 Calibración de frecuencia (~30 ops/día)</li>
+                    <li>🕰️ Backtest 2008, 2020, 2022, hoy</li>
+                    <li>📋 Log de decisiones persistente</li>
+                </ul>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("")
+            if st.button("🤖 Entrar al Orquestador", use_container_width=True):
+                st.session_state.app_mode = "orchestrator"
                 st.rerun()
 
         st.stop()
