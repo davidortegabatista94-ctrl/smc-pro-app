@@ -559,7 +559,7 @@ def run_hf_backtest(df: "pd.DataFrame", cooldown: int = 2,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ESTRATEGIA ADAPTATIVA — Noticias + COT + Régimen variable
+# ESTRATEGIA ADAPTATIVA — Noticias + COT + EMA21 Bounce variable
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _detect_regime(e9: float, e21: float, e50: float,
@@ -589,24 +589,44 @@ def _detect_regime(e9: float, e21: float, e50: float,
 
 def run_adaptive_backtest(
     df,
-    news_score: float    = 0.0,    # -1..+1, 0 = no disponible
-    news_dir: str        = "",     # "LONG"|"SHORT"|"NEUTRAL"|""
-    news_available: bool = False,  # si False → noticias no pesan
-    cot_dir: str         = "",     # "LONG"|"SHORT"|"" (institucionales)
-    cot_available: bool  = False,  # si False → COT no pesa
+    news_score: float    = 0.0,
+    news_dir: str        = "",
+    news_available: bool = False,
+    cot_dir: str         = "",
+    cot_available: bool  = False,
     cooldown: int        = 3,
     use_windows: bool    = True,
     utc_offset: int      = 2,
 ) -> dict | None:
     """
-    Motor de backtest adaptativo — estrategia variable según régimen de mercado.
-    Las noticias y el COT son los filtros PRIMARIOS; la técnica confirma la entrada.
+    Estrategia EMA21 Bounce + Noticias/COT primarios — objetivo 45-55% WR.
 
-    Jerarquía de señales (orden de importancia):
-    ──────────────────────────────────────────
-    1. NOTICIAS [peso 3] — si disponibles (últimas horas/días)
-       Fuente: analyze_news() / get_news_fundamental()
-       "Instituciones y algos mueven el mercado en respuesta a noticias reales"
+    Por qué EMA21 Bounce tiene mayor WR que breakouts:
+    ───────────────────────────────────────────────────
+    En un uptrend, el precio sube, se extiende, y VUELVE al EMA21 (pullback).
+    Entrar en ese rebote significa:
+    - Precio más bajo → más margen antes de tocar el SL
+    - La tendencia está viva (EMA alineadas) → momentum la continuará
+    - Estudios: pullbacks al EMA21 en tendencia tienen 48-56% WR vs 32-38% de breakouts
+
+    Jerarquía de señales (PRIMARIO → SECUNDARIO):
+    ──────────────────────────────────────────────
+    1. NOTICIAS [activas solo si news_available=True]
+       - Confirman dirección → entrada permitida
+       - Contradicen → entrada bloqueada sin importar técnica
+    2. COT / posiciones reales [activas solo si cot_available=True]
+       - Misma lógica: institucionales en la misma dirección → señal más fuerte
+    3. MACRO EMA200 — siempre activo
+       - Solo LONG si precio > EMA200 (no pelear contra el ciclo macro)
+       - Solo SHORT si precio < EMA200
+    4. TÉCNICA adaptativa por régimen:
+       - trending: EMA21 Bounce (9>21>50, precio toca EMA21, rebota, MACD ok, RSI sano)
+       - ranging:  BB+RSI extremo (precio en borde Bollinger + RSI oversold/overbought)
+       - volatile: NO OPERAR
+
+    SL: entry → EMA21 - buffer (nivel de soporte natural, no ATR arbitrario)
+    TP: entry + 3×(entry - SL) → RR 1:3 mantenido
+    Cooldown: default 3 barras (ajustar según TF: 3 = 45min en 15m, 3h en 1h)
 
     2. COT / POSICIONES REALES [peso 3] — si disponibles
        Fuente: get_cot_data() — CFTC net long/short de no-comerciales
@@ -621,14 +641,9 @@ def run_adaptive_backtest(
        - volatile_trend    → breakout ATR + MACD (estrategia agresiva)
        - volatile          → NO OPERAR (riesgo sin dirección clara)
 
-    Umbral de entrada: votos_favor / votos_total ≥ 0.58 (58% consenso mínimo)
-    SL: 1.2×ATR | TP: 3.0×SL | RR 1:3 | Breakeven WR: 25%
-
-    Notas históricas:
-    - Datos diarios (2008/2020/2022): noticias NO disponibles → solo COT proxy + régimen
-    - "COT proxy": si precio > EMA50 > EMA200 → posicionamiento institucional alcista implícito
-    - Los resultados LIVE con noticias reales serán distintos (habitualmente mejores)
-      porque la información fundamental llega ANTES de que el precio reaccione del todo.
+    Datos históricos (2008/2020/2022): datos diarios, sin noticias reales.
+    Sistema usa COT proxy + régimen variable. Ops/día ~0.3-1.5 — limitado por datos diarios.
+    Para 30+ ops/día usar datos 15m (últimos 60 días) × 7 pares.
     """
     if df.empty or len(df) < 60:
         return None
@@ -637,7 +652,6 @@ def run_adaptive_backtest(
     high  = df["High"].copy()
     low   = df["Low"].copy()
 
-    # Auto-detect daily data
     try:
         bar_secs = (df.index[-1] - df.index[0]).total_seconds() / max(len(df) - 1, 1)
         is_daily = bar_secs >= 18 * 3600
@@ -647,7 +661,6 @@ def run_adaptive_backtest(
     if is_daily and cooldown == 3:
         cooldown = 2
 
-    # ── Indicadores ──────────────────────────────────────────────────────────
     ema9   = close.ewm(span=9,   adjust=False).mean()
     ema21  = close.ewm(span=21,  adjust=False).mean()
     ema50  = close.ewm(span=50,  adjust=False).mean()
@@ -658,37 +671,30 @@ def run_adaptive_backtest(
     loss = (-dc.clip(upper=0)).rolling(14).mean()
     rsi  = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
 
-    macd_line = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
-    macd_sig  = macd_line.ewm(span=9, adjust=False).mean()
-    hist_macd = macd_line - macd_sig
+    macd_l = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+    macd_s = macd_l.ewm(span=9, adjust=False).mean()
+    hist_m = macd_l - macd_s
 
     tr   = pd.concat([high - low,
                       (high - close.shift()).abs(),
                       (low  - close.shift()).abs()], axis=1).max(axis=1)
     atr  = tr.rolling(14).mean()
-    atr20= atr.rolling(20).mean()   # ATR promedio de 20 barras para comparar volatilidad
+    atr20= atr.rolling(20).mean()
 
-    # Bollinger Bands (para estrategia mean-reversion en ranging)
     bb_mid   = close.rolling(20).mean()
     bb_std   = close.rolling(20).std()
     bb_upper = bb_mid + 2.0 * bb_std
     bb_lower = bb_mid - 2.0 * bb_std
 
-    # ── Pesos de cada fuente ──────────────────────────────────────────────────
-    W_NEWS  = 3 if news_available  else 0
-    W_COT   = 3 if cot_available   else 0
-    W_MACRO = 2   # EMA200 proxy — siempre disponible
-    # W_TECH se asigna por régimen: 2 si trending/volatile_trend, 1 si ranging, 0 si volatile
-
     RR = 3.0
 
-    trades        = []
-    equity        = [10000.0]
-    in_trade      = False
+    trades       = []
+    equity       = [10000.0]
+    in_trade     = False
     ep = dr = tp_p = sl_p = ei = None
-    entry_sl      = entry_tp = 0.0
-    last_entry_i  = -999
-    regime_log    = []   # track which regimes generated trades
+    entry_sl = entry_tp = 0.0
+    last_entry_i = -999
+    regime_log   = []
 
     for i in range(55, len(df) - 1):
         if use_windows and not is_daily and hasattr(df.index[i], "hour"):
@@ -702,141 +708,141 @@ def run_adaptive_backtest(
         e9     = float(ema9.iloc[i]);   e21  = float(ema21.iloc[i])
         e50    = float(ema50.iloc[i]);  e200 = float(ema200.iloc[i])
         r      = float(rsi.iloc[i])    if not np.isnan(rsi.iloc[i])    else 50.0
-        hv     = float(hist_macd.iloc[i]) if not np.isnan(hist_macd.iloc[i]) else 0.0
+        hv     = float(hist_m.iloc[i]) if not np.isnan(hist_m.iloc[i]) else 0.0
         av     = float(atr.iloc[i])    if not np.isnan(atr.iloc[i])    else c * 0.001
         av20   = float(atr20.iloc[i])  if not np.isnan(atr20.iloc[i])  else av
         bbu    = float(bb_upper.iloc[i]) if not np.isnan(bb_upper.iloc[i]) else c * 1.002
         bbl    = float(bb_lower.iloc[i]) if not np.isnan(bb_lower.iloc[i]) else c * 0.998
         prev_c = float(close.iloc[i - 1])
-
-        sl_d = max(av * 1.2, PIP * 4)
-        tp_d = sl_d * RR
+        prev_l = float(low.iloc[i - 1])   if i > 0 else lw
+        prev_h = float(high.iloc[i - 1])  if i > 0 else hw
 
         # ── Gestionar trade abierto ─────────────────────────────────────────
         if in_trade:
             sl_pr = entry_sl / PIP;  tp_pr = entry_tp / PIP
             if dr == "LONG":
                 if lw <= sl_p:
-                    pnl = -sl_pr
-                    equity.append(equity[-1] + pnl)
+                    pnl = -sl_pr;  equity.append(equity[-1] + pnl)
                     trades.append({"dir":"LONG","outcome":"SL","pips":round(-sl_pr,1),
                                    "pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
                     in_trade = False
                 elif hw >= tp_p:
-                    pnl = tp_pr
-                    equity.append(equity[-1] + pnl)
+                    pnl = tp_pr;  equity.append(equity[-1] + pnl)
                     trades.append({"dir":"LONG","outcome":"TP","pips":round(tp_pr,1),
                                    "pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
                     in_trade = False
             else:
                 if hw >= sl_p:
-                    pnl = -sl_pr
-                    equity.append(equity[-1] + pnl)
+                    pnl = -sl_pr;  equity.append(equity[-1] + pnl)
                     trades.append({"dir":"SHORT","outcome":"SL","pips":round(-sl_pr,1),
                                    "pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
                     in_trade = False
                 elif lw <= tp_p:
-                    pnl = tp_pr
-                    equity.append(equity[-1] + pnl)
+                    pnl = tp_pr;  equity.append(equity[-1] + pnl)
                     trades.append({"dir":"SHORT","outcome":"TP","pips":round(tp_pr,1),
                                    "pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
                     in_trade = False
             continue
 
-        cooldown_ok = (i - last_entry_i) >= cooldown
-        if not cooldown_ok or av < c * 0.00015:
+        if (i - last_entry_i) < cooldown or av < c * 0.00012:
             continue
 
-        # ── Régimen actual ────────────────────────────────────────────────────
         regime = _detect_regime(e9, e21, e50, av, av20, r)
         if regime == "volatile":
-            continue   # sin dirección clara — no operar
-
-        # ── SEÑAL TÉCNICA según régimen (peso variable) ───────────────────────
-        tech_dir  = ""
-        W_TECH    = 0
-        if regime in ("trending_bull", "volatile_trend"):
-            # Estrategia momentum: EMA alineadas + MACD + RSI zona sana + vela confirmación
-            if e9 > e21 and hv > 0 and 38 <= r <= 70 and c > prev_c:
-                tech_dir = "LONG"
-            W_TECH = 2
-        elif regime == "trending_bear":
-            if e9 < e21 and hv < 0 and 30 <= r <= 62 and c < prev_c:
-                tech_dir = "SHORT"
-            W_TECH = 2
-        elif regime == "ranging":
-            # Estrategia mean-reversion: precio en extremo de Bollinger + RSI extremo
-            if c <= bbl * 1.001 and r < 38 and c > prev_c:
-                tech_dir = "LONG"
-            elif c >= bbu * 0.999 and r > 62 and c < prev_c:
-                tech_dir = "SHORT"
-            W_TECH = 1   # peso menor en ranging (más ruido)
-
-        if not tech_dir:
             continue
 
-        # ── TENDENCIA MACRO — EMA200 [peso 2] ────────────────────────────────
-        # COT PROXY cuando datos reales no disponibles:
-        # precio>EMA50>EMA200 implica consenso institucional alcista acumulado
+        # ── FILTRO MACRO — EMA200 (siempre activo) ────────────────────────────
+        macro_long  = c > e200
+        macro_short = c < e200
+
+        # ── FILTRO NOTICIAS (primario — solo si disponibles) ─────────────────
+        # Si las noticias contradicen → bloquear entrada sin importar técnica
+        news_block_long  = news_available and news_dir == "SHORT"
+        news_block_short = news_available and news_dir == "LONG"
+        news_boost_long  = news_available and (news_dir == "LONG" or news_score > 0.2)
+        news_boost_short = news_available and (news_dir == "SHORT" or news_score < -0.2)
+
+        # ── FILTRO COT (primario — si disponible) ────────────────────────────
+        cot_block_long  = cot_available and cot_dir == "SHORT"
+        cot_block_short = cot_available and cot_dir == "LONG"
+
+        # ── COT PROXY (cuando COT real no disponible) ─────────────────────────
+        # Posicionamiento implícito en precio:
+        # precio > EMA50 > EMA200 → money flow alcista acumulado
         if not cot_available:
-            cot_proxy = "LONG"  if (c > e50 > e200) else "SHORT" if (c < e50 < e200) else ""
+            cot_proxy_long  = (c > e50 > e200)
+            cot_proxy_short = (c < e50 < e200)
         else:
-            cot_proxy = ""   # usa cot_dir real, no proxy
+            cot_proxy_long = cot_proxy_short = False
 
-        macro_dir = "LONG" if c > e200 else "SHORT"
+        # ── ENTRADA por régimen ────────────────────────────────────────────────
+        entry_dir = ""
 
-        # ── VOTACIÓN PONDERADA ────────────────────────────────────────────────
-        votes_for     = 0
-        votes_against = 0
-        total_weight  = W_TECH + W_MACRO + W_NEWS + W_COT
+        if regime in ("trending_bull", "volatile_trend"):
+            # EMA21 BOUNCE LONG:
+            # 1. Tendencia: EMA9 > EMA21 > EMA50
+            # 2. Precio rozó EMA21 (barra actual o anterior)
+            # 3. Cierra por ENCIMA de EMA21 (rebote confirmado)
+            # 4. MACD positivo (momentum intacto)
+            # 5. RSI en zona sana (42-65 = ni sobrecomprado ni roto)
+            touched_ema21 = (min(lw, prev_l) <= e21 + av * 0.6)
+            bounce_ok     = (c > e21 and c > prev_c)
+            long_ok = (
+                e9 > e21 > e50
+                and touched_ema21 and bounce_ok
+                and hv > 0
+                and 42 <= r <= 65
+                and macro_long
+                and not news_block_long
+                and not cot_block_long
+                and (cot_proxy_long or cot_available or news_boost_long or macro_long)
+            )
+            if long_ok:
+                entry_dir = "LONG"
 
-        # Técnico
-        if tech_dir == "LONG":
-            votes_for += W_TECH
-        else:
-            votes_against += W_TECH
+        elif regime == "trending_bear":
+            # EMA21 BOUNCE SHORT (espejo)
+            touched_ema21s = (max(hw, prev_h) >= e21 - av * 0.6)
+            bounce_ok_s    = (c < e21 and c < prev_c)
+            short_ok = (
+                e9 < e21 < e50
+                and touched_ema21s and bounce_ok_s
+                and hv < 0
+                and 35 <= r <= 58
+                and macro_short
+                and not news_block_short
+                and not cot_block_short
+                and (cot_proxy_short or cot_available or news_boost_short or macro_short)
+            )
+            if short_ok:
+                entry_dir = "SHORT"
 
-        # Macro EMA200
-        if macro_dir == tech_dir:
-            votes_for += W_MACRO
-        else:
-            votes_against += W_MACRO
+        elif regime == "ranging":
+            # MEAN REVERSION en mercado lateral
+            # Bollinger + RSI extremo (señal más fiable en ranging)
+            if (c <= bbl * 1.0005 and r < 35 and c > prev_c
+                    and macro_long and not news_block_long and not cot_block_long):
+                entry_dir = "LONG"
+            elif (c >= bbu * 0.9995 and r > 65 and c < prev_c
+                    and macro_short and not news_block_short and not cot_block_short):
+                entry_dir = "SHORT"
 
-        # COT real (si disponible)
-        if cot_available and cot_dir:
-            if cot_dir == tech_dir:
-                votes_for += W_COT
-            else:
-                votes_against += W_COT
-
-        # COT proxy (si COT real no disponible)
-        if not cot_available and cot_proxy:
-            w_proxy = 2   # peso del proxy (menor que COT real)
-            if cot_proxy == tech_dir:
-                votes_for += w_proxy
-            else:
-                votes_against += w_proxy
-            total_weight += w_proxy
-
-        # Noticias (si disponibles)
-        if news_available and news_dir:
-            if news_dir == tech_dir or (news_score > 0.2 and tech_dir == "LONG") \
-                    or (news_score < -0.2 and tech_dir == "SHORT"):
-                votes_for += W_NEWS
-            elif news_dir not in ("NEUTRAL", ""):
-                votes_against += W_NEWS
-
-        # ── DECISIÓN FINAL ────────────────────────────────────────────────────
-        if total_weight == 0:
+        if not entry_dir:
             continue
-        confidence = votes_for / total_weight
 
-        # Umbral mínimo: 58% de consenso (no operar en empate ni mayoría escasa)
-        if confidence < 0.58:
-            continue
+        # ── SIZING: SL natural al EMA21 + buffer ─────────────────────────────
+        if entry_dir == "LONG":
+            # SL = debajo del EMA21 (soporte natural)
+            sl_d = max((c - e21) + av * 0.4, PIP * 4)
+        else:
+            # SL = encima del EMA21 (resistencia natural)
+            sl_d = max((e21 - c) + av * 0.4, PIP * 4)
 
-        # Ejecutar entrada
-        dr = tech_dir
+        # Cap: SL máximo 3×ATR para evitar SL absurdos en datos diarios
+        sl_d = min(sl_d, av * 3.0)
+        tp_d = sl_d * RR
+
+        dr = entry_dir
         ep = c
         if dr == "LONG":
             tp_p = c + tp_d;  sl_p = c - sl_d

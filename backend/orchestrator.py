@@ -428,4 +428,35 @@ def backtest_multiperiod(live_news_score: float = 0.0,
     except Exception as ex:
         results[name_15m_base] = {"error": str(ex)}
 
+    # ── Proyección multi-par (7 pares × ops/día del 15m base) ────────────────
+    # Si el backtest 15m base tiene resultados, calculamos la proyección total
+    base_15m = results.get(name_15m_base, {})
+    if "ops_per_day" in base_15m and not base_15m.get("error"):
+        ops_1 = float(base_15m["ops_per_day"])
+        wr_1  = float(base_15m["winrate"])
+        pf_1  = float(base_15m["profit_factor"])
+        for n_pairs in [3, 5, 7]:
+            key = f"Proyección {n_pairs} pares × 15m"
+            results[key] = {
+                "total":         "—",
+                "wins":          "—",
+                "losses":        "—",
+                "winrate":       wr_1,
+                "profit_factor": pf_1,
+                "net_pips":      "—",
+                "max_dd":        base_15m.get("max_dd", "—"),
+                "ops_per_day":   round(ops_1 * n_pairs, 1),
+                "n_days":        base_15m.get("n_days", "—"),
+                "bars":          "—",
+                "tf":            f"15m × {n_pairs} pares",
+                "signals":       "Régimen + EMA21 Bounce × N pares",
+                "note":          (
+                    f"Estimación: {ops_1:.1f} ops/día/par × {n_pairs} pares = "
+                    f"{ops_1*n_pairs:.1f} ops/día total del sistema. "
+                    f"WR y PF = promedio del par base (EURUSD). "
+                    f"Pares con menos liquidez pueden tener WR ligeramente diferente."
+                ),
+                "is_projection": True,
+            }
+
     return results

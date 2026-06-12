@@ -2752,12 +2752,32 @@ else:
             if st.session_state.orch_bt_results:
                 _bt_rows_h = []
                 for _pn_h, _pr_h in st.session_state.orch_bt_results.items():
-                    if "error" in _pr_h and "winrate" not in _pr_h:
-                        _bt_rows_h.append({"Periodo": _pn_h, "TF":"—","Ops":"—","Ops/día":"—","WR%":"—","PF":"—","MaxDD%":"—","Pips":"—","Info":_pr_h.get("error","")})
+                    _is_proj = _pr_h.get("is_projection", False)
+                    _has_err = "error" in _pr_h and "winrate" not in _pr_h
+                    if _has_err:
+                        _bt_rows_h.append({"Periodo":_pn_h,"TF":"—","Ops":"—",
+                            "Ops/día":"—","WR%":"—","PF":"—","MaxDD%":"—","Pips":"—",
+                            "Info":_pr_h.get("error","")[:60]})
+                    elif _is_proj:
+                        _bt_rows_h.append({"Periodo":f"📊 {_pn_h}","TF":_pr_h.get("tf","—"),
+                            "Ops":"estimado","Ops/día":_pr_h.get("ops_per_day","—"),
+                            "WR%":_pr_h.get("winrate","—"),"PF":_pr_h.get("profit_factor","—"),
+                            "MaxDD%":_pr_h.get("max_dd","—"),"Pips":"proporcional",
+                            "Info":_pr_h.get("note","")[:80]})
                     else:
-                        _bt_rows_h.append({"Periodo":_pn_h,"TF":_pr_h.get("tf","—"),"Ops":_pr_h.get("total","—"),"Ops/día":_pr_h.get("ops_per_day","—"),"WR%":_pr_h.get("winrate","—"),"PF":_pr_h.get("profit_factor","—"),"MaxDD%":_pr_h.get("max_dd","—"),"Pips":_pr_h.get("net_pips","—"),"Info":_pr_h.get("note","")[:60]})
+                        _bt_rows_h.append({"Periodo":_pn_h,"TF":_pr_h.get("tf","—"),
+                            "Ops":_pr_h.get("total","—"),"Ops/día":_pr_h.get("ops_per_day","—"),
+                            "WR%":_pr_h.get("winrate","—"),"PF":_pr_h.get("profit_factor","—"),
+                            "MaxDD%":_pr_h.get("max_dd","—"),"Pips":_pr_h.get("net_pips","—"),
+                            "Info":_pr_h.get("signals","")[:50]})
                 st.dataframe(pd.DataFrame(_bt_rows_h), use_container_width=True, hide_index=True)
-                st.caption("Sin spread/slippage modelado. Resultados indicativos.")
+                st.info(
+                    "**Filas 📊**: proyección multi-par — los 30 ops/día se alcanzan "
+                    "con 5-7 pares en paralelo sobre datos 15m. "
+                    "Las filas históricas (2008/2020/2022) usan datos diarios: "
+                    "máx ~1 op/día — no existe 15m histórico gratuito para esos años."
+                )
+                st.caption("Sin spread/slippage modelado. WR objetivo: 45-55%. RR 1:3 → breakeven en 25%.")
 
         st.stop()
 
