@@ -390,10 +390,31 @@ def backtest_multiperiod(live_news_score: float = 0.0,
             )
             if r_base:
                 r_base["bars"]    = len(df_15m)
-                r_base["note"]    = "Solo régimen + COT proxy. Sin noticias."
+                r_base["note"]    = "Solo régimen + COT proxy. Sin noticias. Costes: 2 pips/op."
                 r_base["tf"]      = "15m intraday"
                 r_base["signals"] = "Régimen variable + COT proxy"
                 results[name_15m_base] = r_base
+
+            # ── TEST DE ESTRÉS: doblar costes (4 pips/op) ────────────────────
+            # CLAUDE.md §3: si la estrategia muere al doblar costes, no era robusta.
+            r_stress = run_adaptive_backtest(
+                df_15m, news_available=False, cot_available=False,
+                cooldown=2, use_windows=True, utc_offset=2,
+                cost_pips=4.0,
+            )
+            if r_base and r_stress:
+                results["_stress"] = {
+                    "realistic_cost":  2.0,
+                    "stress_cost":     4.0,
+                    "base_retorno":    r_base.get("retorno_pct"),
+                    "base_pf":         r_base.get("profit_factor"),
+                    "base_wr":         r_base.get("winrate"),
+                    "stress_retorno":  r_stress.get("retorno_pct"),
+                    "stress_pf":       r_stress.get("profit_factor"),
+                    "stress_wr":       r_stress.get("winrate"),
+                    "survives":        (r_stress.get("retorno_pct") or 0) > 0
+                                       and (r_stress.get("profit_factor") or 0) >= 1.0,
+                }
 
             # Versión CON noticias actuales (si se pasaron)
             if live_news_dir and live_news_dir != "NEUTRAL":

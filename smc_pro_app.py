@@ -2537,6 +2537,35 @@ else:
             st.error("Módulo orchestrator no disponible. Revisa backend/orchestrator.py.")
             st.stop()
 
+        # ── Arrancar worker de paper trading en vivo 24/7 (una vez/proceso) ──
+        @st.cache_resource
+        def _ensure_paper_worker():
+            try:
+                import backend.paper_worker as _pw
+                _pw.start_background_worker(min_score=70, interval=600)
+                return True
+            except Exception:
+                return False
+        _worker_on = _ensure_paper_worker()
+
+        # Estado del worker (heartbeat)
+        try:
+            import backend.paper_worker as _pwm
+            _hb = _pwm.read_heartbeat()
+            if _hb.get("ts"):
+                from datetime import datetime as _dtt, timezone as _tzz
+                _hbt = _dtt.fromisoformat(_hb["ts"])
+                _hb_age = int((_dtt.now(_tzz.utc) - _hbt).total_seconds())
+                _hb_st = _hb.get("status", "?")
+                _hb_icon = "🟢" if (_hb_st == "ok" and _hb_age < 1200) else ("🟡" if _hb_age < 2400 else "🔴")
+                st.caption(f"{_hb_icon} Worker en vivo: último ciclo hace {_hb_age}s · "
+                           f"{_hb.get('operable','?')} señales operables · "
+                           f"{_hb.get('opened','?')} trades en papel abiertos este ciclo")
+            else:
+                st.caption("🟡 Worker en vivo: arrancando... (primer ciclo en <10 min)")
+        except Exception:
+            pass
+
         # ── Banner: próximos eventos macro (el "porqué" programado) ──────────
         try:
             import backend.econ_calendar as _ecal
@@ -2809,9 +2838,39 @@ else:
                          use_container_width=True, hide_index=True)
             st.caption(
                 "Verde = retorno positivo | Rojo = negativo | Azul 📊 = proyección multi-par. "
-                "Sin spread/slippage. RR 1:3 → breakeven en 25% WR. "
+                "CON costes: 2 pips/op (spread+slippage). RR 1:3 → breakeven en 25% WR. "
                 "Datos diarios (2008/2020/2022): máx ~1 op/día por limitación de datos históricos gratuitos."
             )
+
+            # ── TEST DE ESTRÉS: ¿sobrevive al doble de costes? ────────────────
+            _ss = _bt.get("_stress") if isinstance(_bt, dict) else None
+            if _ss:
+                st.markdown("##### 🧪 Test de estrés — costes reales")
+                _sc1, _sc2, _sc3 = st.columns(3)
+                _sc1.metric("Realista (2 pips/op)",
+                            f"{_ss['base_retorno']:+.2f}%" if isinstance(_ss['base_retorno'],(int,float)) else "—",
+                            delta=f"PF {_ss['base_pf']}")
+                _sc2.metric("Estrés (4 pips/op)",
+                            f"{_ss['stress_retorno']:+.2f}%" if isinstance(_ss['stress_retorno'],(int,float)) else "—",
+                            delta=f"PF {_ss['stress_pf']}")
+                if _ss.get("survives"):
+                    _sc3.success("✅ Sobrevive\nal doble de costes")
+                else:
+                    _sc3.error("❌ NO sobrevive\nal doble de costes")
+                if not _ss.get("survives"):
+                    st.warning(
+                        "⚠️ **Honestidad obligatoria (CLAUDE.md §3):** con costes realistas esta "
+                        "estrategia NO es rentable en este periodo/par. Un sistema que solo gana sin "
+                        "costes es una ilusión. **NO debe ir a dinero real así.** El paper trading en "
+                        "vivo abajo sirve para MEDIR si las señales en vivo (noticias + calendario, "
+                        "que el backtest histórico no tiene) suben el win rate por encima del 25% de "
+                        "breakeven. Es un experimento para recoger evidencia, no un sistema probado."
+                    )
+                else:
+                    st.success(
+                        "La estrategia mantiene rentabilidad incluso al doblar los costes — señal de "
+                        "robustez. Aun así requiere 200+ operaciones antes de cualquier conclusión firme."
+                    )
 
             # ── Efecto del aprendizaje (walk-forward, sin look-ahead) ─────────
             _wf = _bt.get("_walkforward") if isinstance(_bt, dict) else None

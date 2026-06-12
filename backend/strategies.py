@@ -597,9 +597,15 @@ def run_adaptive_backtest(
     cooldown: int        = 3,
     use_windows: bool    = True,
     utc_offset: int      = 2,
+    cost_pips: float     = 2.0,
 ) -> dict | None:
     """
     Estrategia EMA21 Bounce + Noticias/COT primarios — objetivo 45-55% WR.
+
+    COSTES (CLAUDE.md §3 — obligatorio): cost_pips = spread + slippage de ida y
+    vuelta, restado a CADA operación. Default 2.0 pips (realista para EURUSD:
+    ~1.0 spread + ~0.5/lado slippage). Para el test de estrés se dobla a 4.0.
+    Un sistema que solo es rentable sin costes NO es robusto — es una ilusión.
 
     Por qué EMA21 Bounce tiene mayor WR que breakouts:
     ───────────────────────────────────────────────────
@@ -722,29 +728,29 @@ def run_adaptive_backtest(
             sl_pr = entry_sl / PIP;  tp_pr = entry_tp / PIP
             if dr == "LONG":
                 if lw <= sl_p:
-                    pnl = -sl_pr;  equity.append(equity[-1] + pnl)
-                    trades.append({"dir":"LONG","outcome":"SL","pips":round(-sl_pr,1),
+                    pnl = -sl_pr - cost_pips;  equity.append(equity[-1] + pnl)
+                    trades.append({"dir":"LONG","outcome":"SL","pips":round(pnl,1),
                                    "pnl":round(pnl,2),"time":str(df.index[ei])[:16],
-                                   "feats":entry_feats})
+                                   "sl_pips":round(sl_pr,1),"feats":entry_feats})
                     in_trade = False
                 elif hw >= tp_p:
-                    pnl = tp_pr;  equity.append(equity[-1] + pnl)
-                    trades.append({"dir":"LONG","outcome":"TP","pips":round(tp_pr,1),
+                    pnl = tp_pr - cost_pips;  equity.append(equity[-1] + pnl)
+                    trades.append({"dir":"LONG","outcome":"TP","pips":round(pnl,1),
                                    "pnl":round(pnl,2),"time":str(df.index[ei])[:16],
-                                   "feats":entry_feats})
+                                   "sl_pips":round(sl_pr,1),"feats":entry_feats})
                     in_trade = False
             else:
                 if hw >= sl_p:
-                    pnl = -sl_pr;  equity.append(equity[-1] + pnl)
-                    trades.append({"dir":"SHORT","outcome":"SL","pips":round(-sl_pr,1),
+                    pnl = -sl_pr - cost_pips;  equity.append(equity[-1] + pnl)
+                    trades.append({"dir":"SHORT","outcome":"SL","pips":round(pnl,1),
                                    "pnl":round(pnl,2),"time":str(df.index[ei])[:16],
-                                   "feats":entry_feats})
+                                   "sl_pips":round(sl_pr,1),"feats":entry_feats})
                     in_trade = False
                 elif lw <= tp_p:
-                    pnl = tp_pr;  equity.append(equity[-1] + pnl)
-                    trades.append({"dir":"SHORT","outcome":"TP","pips":round(tp_pr,1),
+                    pnl = tp_pr - cost_pips;  equity.append(equity[-1] + pnl)
+                    trades.append({"dir":"SHORT","outcome":"TP","pips":round(pnl,1),
                                    "pnl":round(pnl,2),"time":str(df.index[ei])[:16],
-                                   "feats":entry_feats})
+                                   "sl_pips":round(sl_pr,1),"feats":entry_feats})
                     in_trade = False
             continue
 
@@ -872,10 +878,11 @@ def run_adaptive_backtest(
     # Cerrar trade abierto al final
     if in_trade and ep is not None:
         lp   = float(close.iloc[-1])
-        pcl  = (lp - ep) / PIP if dr == "LONG" else (ep - lp) / PIP
+        pcl  = ((lp - ep) / PIP if dr == "LONG" else (ep - lp) / PIP) - cost_pips
         equity.append(equity[-1] + pcl)
         trades.append({"dir":dr,"outcome":"OPEN","pips":round(pcl,1),
-                       "pnl":round(pcl,2),"time":str(df.index[ei])[:16]})
+                       "pnl":round(pcl,2),"time":str(df.index[ei])[:16],
+                       "sl_pips":round(entry_sl / PIP, 1) if entry_sl else 0.0})
 
     if not trades:
         return None

@@ -343,16 +343,19 @@ def walkforward_learning(trades: list[dict], rr: float = RR_DEFAULT,
     Devuelve: baseline (todos los trades) vs learned (filtrando lo que el bot habría
     aprendido a evitar), con n, win_rate, expectancy_r y total_r de cada uno.
     """
-    # Normalizar: cada trade → (R, feats). TP=+rr, SL=-1. Ignorar OPEN.
+    # Normalizar: cada trade → (R real NETO de costes, feats). Ignorar OPEN.
+    # R = pips_netos / sl_pips → ya refleja spread+slippage restados en el backtest.
     seq = []
     for t in trades:
         out = t.get("outcome")
-        if out == "TP":
-            r = rr
-        elif out == "SL":
-            r = -1.0
-        else:
+        if out not in ("TP", "SL"):
             continue
+        sl_pips = t.get("sl_pips")
+        pips    = t.get("pips")
+        if sl_pips and pips is not None and sl_pips > 0:
+            r = pips / sl_pips           # neto de costes, exacto
+        else:
+            r = rr if out == "TP" else -1.0   # fallback si falta sl_pips
         feats = t.get("feats") or {}
         seq.append((r, {k: feats.get(k) for k in ("regime", "session", "dir")}))
 

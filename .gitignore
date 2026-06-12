@@ -28,6 +28,7 @@ install_status.txt
 backend/_econ_cache.json
 paper_trades.jsonl
 orchestrator_decisions.jsonl
+worker_heartbeat.json
 
 # Archivos de instalador Windows
 SMC_Pro_App_Setup.exe
