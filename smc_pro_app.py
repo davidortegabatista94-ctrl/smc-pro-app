@@ -2758,6 +2758,8 @@ else:
             _bt    = st.session_state.orch_bt_results
             _btrow = []
             for _pn, _pr in _bt.items():
+                if _pn.startswith("_") or not isinstance(_pr, dict):
+                    continue  # claves internas (_walkforward) no van en la tabla
                 _isproj = _pr.get("is_projection", False)
                 _haserr = "error" in _pr and "winrate" not in _pr
                 if _haserr:
@@ -2810,6 +2812,37 @@ else:
                 "Sin spread/slippage. RR 1:3 → breakeven en 25% WR. "
                 "Datos diarios (2008/2020/2022): máx ~1 op/día por limitación de datos históricos gratuitos."
             )
+
+            # ── Efecto del aprendizaje (walk-forward, sin look-ahead) ─────────
+            _wf = _bt.get("_walkforward") if isinstance(_bt, dict) else None
+            if _wf and _wf.get("enough"):
+                st.markdown("##### 🧠 Efecto del aprendizaje (walk-forward)")
+                _b = _wf["baseline"]; _l = _wf["learned"]
+                _wc1, _wc2 = st.columns(2)
+                with _wc1:
+                    st.markdown("**Sin aprendizaje** (todas las señales)")
+                    st.metric("Operaciones", _b["n"])
+                    st.metric("Win rate", f"{_b['win_rate']}%")
+                    st.metric("Expectancy", f"{_b['expectancy_r']:+.3f}R",
+                              delta=f"{_b['total_r']:+.1f}R total")
+                with _wc2:
+                    _de = round(_l["expectancy_r"] - _b["expectancy_r"], 3)
+                    st.markdown("**Con aprendizaje** (filtra lo que aprendió a evitar)")
+                    st.metric("Operaciones", _l["n"], delta=f"-{_wf['dropped']} descartadas")
+                    st.metric("Win rate", f"{_l['win_rate']}%",
+                              delta=f"{round(_l['win_rate']-_b['win_rate'],1):+.1f} pts")
+                    st.metric("Expectancy", f"{_l['expectancy_r']:+.3f}R", delta=f"{_de:+.3f}R")
+                st.caption(
+                    "Walk-forward: para decidir si filtra cada operación, el bot usa SOLO la "
+                    "evidencia de las operaciones ANTERIORES — nunca mira el futuro. Es el efecto "
+                    "real del aprendizaje, no un número inflado. "
+                    "⚠️ Muestra pequeña (1 par, ~2 meses): demuestra el MECANISMO, no prueba un edge "
+                    "(eso exige 200+ ops). En vivo el aprendizaje será más rico: añade noticias y calendario, "
+                    "que no existen en datos históricos."
+                )
+            elif _wf and not _wf.get("enough"):
+                st.caption(f"🧠 Walk-forward: aún {_wf.get('n_total','?')} operaciones en el periodo "
+                           f"15m — insuficiente para una simulación de aprendizaje fiable.")
         else:
             st.info("Calculando historial... por favor espera.")
 

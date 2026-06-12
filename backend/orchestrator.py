@@ -459,4 +459,15 @@ def backtest_multiperiod(live_news_score: float = 0.0,
                 "is_projection": True,
             }
 
+    # ── Aprendizaje walk-forward sobre el periodo con más operaciones (15m) ───
+    # Mide, SIN look-ahead, cuánto mejora el sistema al aprender de su propio
+    # pasado. Clave con prefijo '_' para que la tabla la ignore.
+    try:
+        from backend.learning import walkforward_learning
+        _wf_trades = base_15m.get("trades", []) if isinstance(base_15m, dict) else []
+        if _wf_trades:
+            results["_walkforward"] = walkforward_learning(_wf_trades, warmup=20)
+    except Exception as _wfe:
+        _log.warning("walkforward_learning: %s", _wfe)
+
     return results

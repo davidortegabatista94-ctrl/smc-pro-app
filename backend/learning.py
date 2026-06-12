@@ -321,6 +321,87 @@ def edge_adjustment(sig: dict) -> tuple[int, list[str]]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 5. APRENDIZAJE WALK-FORWARD SOBRE BACKTEST (sin look-ahead)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def walkforward_learning(trades: list[dict], rr: float = RR_DEFAULT,
+                         warmup: int = 30, drop_threshold: float = -0.15) -> dict:
+    """
+    Simula el aprendizaje sobre trades históricos de forma HONESTA (walk-forward):
+    para decidir si filtrar el trade i, usa SOLO la evidencia de los trades 0..i-1.
+    Nunca mira el futuro. Así medimos el efecto real del aprendizaje, no una fantasía.
+
+    POR QUÉ así (CLAUDE.md, anti-overfitting #2):
+        Aprender y testear sobre los MISMOS datos infla el resultado: el sistema
+        "memoriza" el pasado. Walk-forward replica lo que pasaría en vivo — solo
+        sabes lo que ya ocurrió. Si el aprendizaje no ayuda walk-forward, no ayuda.
+
+    LIMITACIÓN HONESTA: en histórico solo hay features 'regime', 'session', 'dir'.
+        Noticias y calendario NO existen en datos pasados (el feed es de esta semana),
+        así que el aprendizaje EN VIVO será más rico que esta simulación.
+
+    Devuelve: baseline (todos los trades) vs learned (filtrando lo que el bot habría
+    aprendido a evitar), con n, win_rate, expectancy_r y total_r de cada uno.
+    """
+    # Normalizar: cada trade → (R, feats). TP=+rr, SL=-1. Ignorar OPEN.
+    seq = []
+    for t in trades:
+        out = t.get("outcome")
+        if out == "TP":
+            r = rr
+        elif out == "SL":
+            r = -1.0
+        else:
+            continue
+        feats = t.get("feats") or {}
+        seq.append((r, {k: feats.get(k) for k in ("regime", "session", "dir")}))
+
+    if len(seq) < warmup + 10:
+        return {"enough": False, "n_total": len(seq), "warmup": warmup}
+
+    buckets: dict = defaultdict(lambda: {"sum": 0.0, "n": 0})
+    base_r, learn_r = [], []
+    dropped = 0
+
+    for idx, (r, feats) in enumerate(seq):
+        base_r.append(r)
+        # Decisión con SOLO el pasado (walk-forward)
+        keep = True
+        if idx >= warmup:
+            exps = []
+            for fk, val in feats.items():
+                if val is None:
+                    continue
+                b = buckets[(fk, str(val))]
+                if b["n"] >= MIN_SAMPLES:
+                    exps.append(b["sum"] / b["n"])
+            # Si la expectancy media aprendida de sus features es claramente mala → evitar
+            if exps and (sum(exps) / len(exps)) < drop_threshold:
+                keep = False
+        if keep:
+            learn_r.append(r)
+        else:
+            dropped += 1
+        # Aprender DESPUÉS de decidir (el trade i alimenta a los i+1)
+        for fk, val in feats.items():
+            if val is None:
+                continue
+            b = buckets[(fk, str(val))]
+            b["sum"] += r; b["n"] += 1
+
+    def _m(rs):
+        n = len(rs)
+        if n == 0:
+            return {"n": 0, "win_rate": 0.0, "expectancy_r": 0.0, "total_r": 0.0}
+        wins = sum(1 for x in rs if x > 0)
+        return {"n": n, "win_rate": round(wins / n * 100, 1),
+                "expectancy_r": round(sum(rs) / n, 3), "total_r": round(sum(rs), 1)}
+
+    return {"enough": True, "baseline": _m(base_r), "learned": _m(learn_r),
+            "dropped": dropped, "warmup": warmup, "drop_threshold": drop_threshold}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Persistencia JSONL
 # ─────────────────────────────────────────────────────────────────────────────
 

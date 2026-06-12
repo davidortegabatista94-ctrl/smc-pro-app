@@ -724,23 +724,27 @@ def run_adaptive_backtest(
                 if lw <= sl_p:
                     pnl = -sl_pr;  equity.append(equity[-1] + pnl)
                     trades.append({"dir":"LONG","outcome":"SL","pips":round(-sl_pr,1),
-                                   "pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                                   "pnl":round(pnl,2),"time":str(df.index[ei])[:16],
+                                   "feats":entry_feats})
                     in_trade = False
                 elif hw >= tp_p:
                     pnl = tp_pr;  equity.append(equity[-1] + pnl)
                     trades.append({"dir":"LONG","outcome":"TP","pips":round(tp_pr,1),
-                                   "pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                                   "pnl":round(pnl,2),"time":str(df.index[ei])[:16],
+                                   "feats":entry_feats})
                     in_trade = False
             else:
                 if hw >= sl_p:
                     pnl = -sl_pr;  equity.append(equity[-1] + pnl)
                     trades.append({"dir":"SHORT","outcome":"SL","pips":round(-sl_pr,1),
-                                   "pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                                   "pnl":round(pnl,2),"time":str(df.index[ei])[:16],
+                                   "feats":entry_feats})
                     in_trade = False
                 elif lw <= tp_p:
                     pnl = tp_pr;  equity.append(equity[-1] + pnl)
                     trades.append({"dir":"SHORT","outcome":"TP","pips":round(tp_pr,1),
-                                   "pnl":round(pnl,2),"time":str(df.index[ei])[:16]})
+                                   "pnl":round(pnl,2),"time":str(df.index[ei])[:16],
+                                   "feats":entry_feats})
                     in_trade = False
             continue
 
@@ -852,6 +856,18 @@ def run_adaptive_backtest(
         entry_sl = sl_d;  entry_tp = tp_d
         in_trade = True;  ei = i;  last_entry_i = i
         regime_log.append(regime)
+        # Features de entrada (el 'porqué' disponible en histórico) para el aprendizaje
+        try:
+            _eh = (df.index[i].hour + utc_offset) % 24
+        except Exception:
+            _eh = -1
+        if   0 <= _eh < 7:   _esess = "asia"
+        elif 7 <= _eh < 12:  _esess = "london"
+        elif 12 <= _eh < 16: _esess = "overlap"
+        elif 16 <= _eh < 21: _esess = "newyork"
+        elif _eh < 0:        _esess = "daily"
+        else:                _esess = "late"
+        entry_feats = {"regime": regime, "session": _esess, "dir": entry_dir}
 
     # Cerrar trade abierto al final
     if in_trade and ep is not None:
