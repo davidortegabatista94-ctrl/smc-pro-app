@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 
 _log = logging.getLogger("smc.invest")
@@ -115,6 +116,30 @@ RISK_PROFILES = {
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _fetch_asset(ticker: str) -> dict:
+    """Wrapper cacheado individual (para llamadas sueltas)."""
+    return _fetch_asset_raw(ticker)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_assets_batch(tickers: tuple) -> dict:
+    """
+    Descarga TODOS los activos en PARALELO (8 hilos) y cachea el lote 24h.
+    Reduce la primera carga de ~60s (serie) a ~10-15s. Cada hilo llama a la
+    función pura (sin Streamlit) → sin problemas de contexto.
+    """
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futs = {pool.submit(_fetch_asset_raw, t): t for t in tickers}
+        for f in as_completed(futs):
+            tk = futs[f]
+            try:
+                out[tk] = f.result()
+            except Exception:
+                out[tk] = {}
+    return out
+
+
+def _fetch_asset_raw(ticker: str) -> dict:
     """Descarga precio histórico (2 años) + fundamentales de yfinance."""
     try:
         import yfinance as yf
@@ -657,6 +682,26 @@ _SECTOR_COLORS = {
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def _fetch_pyme(ticker: str) -> dict:
+    """Wrapper cacheado individual."""
+    return _fetch_pyme_raw(ticker)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def _fetch_pymes_batch(tickers: tuple) -> dict:
+    """Descarga todas las PYMEs en PARALELO (8 hilos), cacheado 24h."""
+    out: dict = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futs = {pool.submit(_fetch_pyme_raw, t): t for t in tickers}
+        for f in as_completed(futs):
+            tk = futs[f]
+            try:
+                out[tk] = f.result()
+            except Exception:
+                out[tk] = {}
+    return out
+
+
+def _fetch_pyme_raw(ticker: str) -> dict:
     """Descarga 2 años de precio + fundamentales para una PYME."""
     try:
         import yfinance as yf
@@ -1093,11 +1138,12 @@ def render_investment_module():
             for ticker, meta in assets.items():
                 all_meta[ticker] = {**meta, "group": group}
 
-        # Fetch + score todos los activos
+        # Fetch + score todos los activos (descarga PARALELA, cacheada 24h)
+        _all_data = _fetch_assets_batch(tuple(all_meta.keys()))
         scored = []
         _failed = []
         for ticker, meta in all_meta.items():
-            data = _fetch_asset(ticker)
+            data = _all_data.get(ticker) or {}
             if not data:
                 _failed.append(ticker)
                 continue
@@ -1370,9 +1416,10 @@ def render_investment_module():
 
         # Cargar datos PYMEs
         with st.spinner("Analizando 20 PYMEs... (~20 segundos la primera vez)"):
+            _pyme_data = _fetch_pymes_batch(tuple(PYME_UNIVERSE.keys()))
             _pyme_scored = []
             for _tk, _pm in PYME_UNIVERSE.items():
-                _pd_data = _fetch_pyme(_tk)
+                _pd_data = _pyme_data.get(_tk) or {}
                 _ps = _score_pyme(_tk, _pm, _pd_data)
                 _pyme_scored.append({
                     "ticker":   _tk,
