@@ -53,6 +53,11 @@ def _features_of(sig: dict) -> dict:
         hour = datetime.now(timezone.utc).hour
     except Exception:
         pass
+    try:
+        from backend.strategy_engine import derive_live_tactic
+        tactic = derive_live_tactic(sig)
+    except Exception:
+        tactic = "other"
     return {
         "pair":        sig.get("symbol"),
         "direction":   sig.get("direction"),
@@ -63,6 +68,7 @@ def _features_of(sig: dict) -> dict:
         "calendar_bias_match": (cal.get("bias") == sig.get("direction") and bool(cal.get("bias"))),
         "session":     _session_of(hour),
         "score_band":  _score_band(int(sig.get("score") or 0)),
+        "tactic":      tactic,
     }
 
 

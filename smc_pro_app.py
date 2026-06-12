@@ -2739,6 +2739,52 @@ else:
 
         st.markdown("---")
 
+        # ── SECCIÓN 1a: ESTRATEGIA EMERGENTE (motor de selección de tácticas) ─
+        st.markdown("#### 🧬 La estrategia que el bot está construyendo")
+        st.caption("El bot no usa una táctica fija. Tiene un abanico, cada una con su "
+                   "hipótesis económica, y mide walk-forward (sin mirar el futuro) y neto "
+                   "de costes cuál tiene ventaja. Enciende lo que funciona, apaga lo que no. "
+                   "La estrategia emerge de la evidencia, no de optimizar el pasado.")
+        try:
+            import backend.strategy_engine as _SE
+            # Combina trades en papel (vivo) + trades del backtest 15m (más muestra)
+            _all_tr = []
+            try:
+                from backend.learning import _read_trades as _rt
+                _all_tr += [t for t in _rt() if t.get("status") == "closed"]
+            except Exception:
+                pass
+            try:
+                _bt0 = st.session_state.get("orch_bt_results") or {}
+                for _k, _v in _bt0.items():
+                    if isinstance(_v, dict) and isinstance(_v.get("trades"), list) and "15m" in str(_v.get("tf","")):
+                        _all_tr += _v["trades"]
+            except Exception:
+                pass
+            _led = _SE.tactic_ledger(_all_tr)
+            st.info(f"**Veredicto actual:** {_led['veredicto']}")
+            _trow = []
+            for _tk, _tmeta in _SE.TACTICS.items():
+                _td = _led["tactics"].get(_tk, {})
+                _est = _td.get("estado", "aprendiendo")
+                _icon = {"ON":"🟢 ON","OFF":"🔴 OFF","aprendiendo":"🟡 aprendiendo"}.get(_est, _est)
+                _trow.append({
+                    "Táctica":     _tmeta["nombre"],
+                    "Estado":      _icon,
+                    "Ops":         _td.get("n", 0),
+                    "WR %":        _td.get("win_rate", "—") if _td.get("n") else "—",
+                    "Expectancy R":_td.get("expectancy_r", "—") if _td.get("n") else "—",
+                    "Hipótesis":   _tmeta["hipotesis"][:90] + "…",
+                })
+            st.dataframe(pd.DataFrame(_trow), use_container_width=True, hide_index=True)
+            st.caption("🟢 ON = edge demostrado neto de costes · 🔴 OFF = sin edge, el bot la apaga · "
+                       "🟡 = aún sin muestra suficiente (necesita ~25 ops cerradas por táctica). "
+                       "news_reaction solo acumula en vivo (no existe en datos históricos).")
+        except Exception as _see:
+            st.caption(f"Motor de tácticas no disponible: {_see}")
+
+        st.markdown("---")
+
         # ── SECCIÓN 1b: LO QUE EL BOT HA APRENDIDO ───────────────────────────
         st.markdown("#### 🧠 Aprendizaje del bot")
         st.caption("Cada señal operable se registra con su porqué y se verifica contra el "

@@ -873,7 +873,15 @@ def run_adaptive_backtest(
         elif 16 <= _eh < 21: _esess = "newyork"
         elif _eh < 0:        _esess = "daily"
         else:                _esess = "late"
-        entry_feats = {"regime": regime, "session": _esess, "dir": entry_dir}
+        # Táctica que generó la entrada (para el motor de selección)
+        if regime in ("trending_bull", "trending_bear", "volatile_trend"):
+            _etactic = "pullback_trend"
+        elif regime == "ranging":
+            _etactic = "meanrev_range"
+        else:
+            _etactic = "other"
+        entry_feats = {"regime": regime, "session": _esess,
+                       "dir": entry_dir, "tactic": _etactic}
 
     # Cerrar trade abierto al final
     if in_trade and ep is not None:
