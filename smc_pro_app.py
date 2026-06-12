@@ -4778,36 +4778,41 @@ with _t_pares:
                     else:
                         _mp_d_col, _mp_d_ico, _mp_d_txt = "#c97d0a", "—", "ESPERAR"
 
-                    _mp_chg_str = ""
-                    if _mp_chg is not None:
-                        _mp_chg_col = "#00b87c" if _mp_chg >= 0 else "#e03c50"
-                        _mp_chg_str = (f'<span style="color:{_mp_chg_col};font-size:10px">'
-                                       f'{_mp_chg:+.4f}%</span>')
-
+                    # Pre-compute every conditional HTML block BEFORE the f-string
+                    # (nested f-strings inside st.markdown trip Streamlit's markdown parser)
                     _mp_is_sel = (st.session_state.multi_pair_selected == _mp_sym)
-                    _mp_card_border = f"2px solid {_mp_clr}" if _mp_is_sel else "1px solid var(--border)"
-                    _mp_card_bg = f"rgba(0,0,0,0.15)" if _mp_is_sel else "var(--surface)"
+                    _mp_bd = f"2px solid {_mp_clr}" if _mp_is_sel else f"1px solid var(--border)"
+                    _mp_bg = "rgba(0,0,0,.15)" if _mp_is_sel else "var(--surface)"
+                    _mp_px_str = f"{_mp_px:.5f}" if _mp_px else "—"
 
-                    st.markdown(f"""<div style="
-                        background:{_mp_card_bg};border:{_mp_card_border};
-                        border-radius:var(--radius);padding:12px 14px;margin-bottom:8px;
-                        border-left:3px solid {_mp_clr}">
-                      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-                        <span style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text)">{_mp_fb}{_mp_fq} {_mp_nm}</span>
-                        <span style="font-family:var(--mono);font-size:9px;color:var(--text-3)">{_mp_score}/100</span>
-                      </div>
-                      <div style="font-family:var(--mono);font-size:18px;font-weight:800;color:{_mp_d_col};margin-bottom:4px">
-                        {_mp_d_ico} {_mp_d_txt}
-                      </div>
-                      <div style="display:flex;justify-content:space-between;align-items:center">
-                        <span style="font-family:var(--mono);font-size:11px;color:var(--text-2)">
-                          {f'{_mp_px:.5f}' if _mp_px else '—'}
-                        </span>
-                        <span style="font-family:var(--mono);font-size:11px;color:{_mp_d_col}">{_mp_conf}%</span>
-                      </div>
-                      {f'<div style="margin-top:4px">{_mp_chg_str}</div>' if _mp_chg_str else ''}
-                      {f'<div style="font-size:9px;color:var(--red);margin-top:4px">⚠ {_mp_err[:40]}</div>' if _mp_err else ''}
-                    </div>""", unsafe_allow_html=True)
+                    _mp_chg_html = ""
+                    if _mp_chg is not None:
+                        _cc = "#00b87c" if _mp_chg >= 0 else "#e03c50"
+                        _mp_chg_html = (f'<div style="margin-top:3px;font-family:var(--mono);'
+                                        f'font-size:10px;color:{_cc}">{_mp_chg:+.4f}%</div>')
+
+                    _mp_err_html = ""
+                    if _mp_err:
+                        _mp_err_html = (f'<div style="font-size:9px;color:var(--red);margin-top:4px">'
+                                        f'&#9888; {str(_mp_err)[:40]}</div>')
+
+                    _mp_card_html = (
+                        f'<div style="background:{_mp_bg};border:{_mp_bd};border-radius:var(--radius);'
+                        f'padding:12px 14px;margin-bottom:8px;border-left:3px solid {_mp_clr}">'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">'
+                        f'<span style="font-family:var(--mono);font-size:11px;font-weight:700;color:var(--text)">{_mp_fb}{_mp_fq} {_mp_nm}</span>'
+                        f'<span style="font-family:var(--mono);font-size:9px;color:var(--text-3)">{_mp_score}/100</span>'
+                        f'</div>'
+                        f'<div style="font-family:var(--mono);font-size:18px;font-weight:800;color:{_mp_d_col};margin-bottom:4px">{_mp_d_ico} {_mp_d_txt}</div>'
+                        f'<div style="display:flex;justify-content:space-between;align-items:center">'
+                        f'<span style="font-family:var(--mono);font-size:11px;color:var(--text-2)">{_mp_px_str}</span>'
+                        f'<span style="font-family:var(--mono);font-size:11px;color:{_mp_d_col}">{_mp_conf}%</span>'
+                        f'</div>'
+                        f'{_mp_chg_html}'
+                        f'{_mp_err_html}'
+                        f'</div>'
+                    )
+                    st.markdown(_mp_card_html, unsafe_allow_html=True)
 
                     if st.button(
                         "Ver análisis",
@@ -4898,64 +4903,68 @@ with _t_pares:
                 _mp_ns_qc   = _mp_s_news.get("quote_count", 0)
                 _mp_ns_col  = {"LONG": "#00b87c", "SHORT": "#e03c50", "NEUTRAL": "#c97d0a"}.get(_mp_ns_dir, "#c97d0a")
 
-                st.markdown(f"""<div class="de-card {_mp_s_cardcss}" style="margin-top:14px">
-  <div class="de-header">
-    <span class="de-title">DECISIÓN ANALIZADA — {_mp_s_name}</span>
-    <span class="de-mode-badge">{_mp_mode_opts.get(st.session_state.multi_pair_mode,'').upper()}</span>
-  </div>
-  <div class="de-main">
-    <div class="de-dir {_mp_s_dircss}">{_mp_s_dirtxt}</div>
-    <div class="de-votes">
-      <div class="de-vote-lbl">Votos ponderados ({_mp_s_vl}L vs {_mp_s_vs}S)</div>
-      <div class="de-vrow">
-        <span class="de-vname" style="color:var(--green)">LONG</span>
-        <div class="de-vtrack"><div class="de-vfill-l" style="width:{_mp_s_pctl}%"></div></div>
-        <span class="de-vcount" style="color:var(--green)">{_mp_s_vl}</span>
-      </div>
-      <div class="de-vrow">
-        <span class="de-vname" style="color:var(--red)">SHORT</span>
-        <div class="de-vtrack"><div class="de-vfill-s" style="width:{_mp_s_pcts}%"></div></div>
-        <span class="de-vcount" style="color:var(--red)">{_mp_s_vs}</span>
-      </div>
-    </div>
-    <div class="de-conf">
-      <div class="de-conf-num" style="color:{_mp_s_confcol}">{_mp_s_conf}%</div>
-      <div class="de-conf-lbl">Confianza</div>
-    </div>
-  </div>
-  <div class="de-levels">
-    <div class="de-lv"><span class="de-lv-k">Entrada</span><span class="de-lv-v" style="color:var(--text)">{_mp_fmt(_mp_s_px)}</span></div>
-    <div class="de-lv"><span class="de-lv-k">TP 1</span><span class="de-lv-v" style="color:var(--green)">{_mp_fmt(_mp_s_tp1)}</span></div>
-    <div class="de-lv"><span class="de-lv-k">TP 2</span><span class="de-lv-v" style="color:#00c98a">{_mp_fmt(_mp_s_tp2)}</span></div>
-    <div class="de-lv"><span class="de-lv-k">SL / RR</span><span class="de-lv-v" style="color:var(--red)">{_mp_fmt(_mp_s_sl)} / {_mp_fmtrr(_mp_s_rr)}</span></div>
-  </div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">
-    <div>
-      <div class="de-vote-lbl" style="margin-bottom:6px">Señal técnica por timeframe</div>
-      {"".join(
-          f'<div class="t-row"><span>{tf}</span>'
-          f'<span class="t-val" style="color:' + ("#00b87c" if data.get("signal")=="COMPRA" else ("#e03c50" if data.get("signal")=="VENTA" else "#c97d0a")) + '">'
-          f'{data.get("signal","NEUTRAL")}</span></div>'
-          for tf, data in _mp_s_tfs.items()
-      )}
-    </div>
-    <div>
-      <div class="de-vote-lbl" style="margin-bottom:6px">Sentimiento noticias divisas</div>
-      <div class="t-row">
-        <span>{_mp_cfg.get("base","")}</span>
-        <span class="t-val" style="color:{"#00b87c" if _mp_ns_base>0 else "#e03c50"}">{_mp_ns_base:+.3f} ({_mp_ns_bc} noticias)</span>
-      </div>
-      <div class="t-row">
-        <span>{_mp_cfg.get("quote","")}</span>
-        <span class="t-val" style="color:{"#00b87c" if _mp_ns_quote>0 else "#e03c50"}">{_mp_ns_quote:+.3f} ({_mp_ns_qc} noticias)</span>
-      </div>
-      <div class="t-row">
-        <span>Sesgo noticias</span>
-        <span class="t-val" style="color:{_mp_ns_col}">{_mp_ns_dir}</span>
-      </div>
-    </div>
-  </div>
-</div>""", unsafe_allow_html=True)
+                # Pre-compute HTML blocks — avoid nested ternaries inside f-strings
+                _mp_tf_rows = ""
+                for _tf_k, _tf_v in _mp_s_tfs.items():
+                    _tf_sig = _tf_v.get("signal", "NEUTRAL")
+                    _tf_col = "#00b87c" if _tf_sig == "COMPRA" else ("#e03c50" if _tf_sig == "VENTA" else "#c97d0a")
+                    _mp_tf_rows += (f'<div class="t-row"><span>{_tf_k}</span>'
+                                    f'<span class="t-val" style="color:{_tf_col}">{_tf_sig}</span></div>')
+
+                _mp_base_col  = "#00b87c" if _mp_ns_base  > 0 else "#e03c50"
+                _mp_quote_col = "#00b87c" if _mp_ns_quote > 0 else "#e03c50"
+                _mp_mode_lbl  = _mp_mode_opts.get(st.session_state.multi_pair_mode, "").upper()
+
+                _mp_det_html = (
+                    f'<div class="de-card {_mp_s_cardcss}" style="margin-top:14px">'
+                    f'<div class="de-header">'
+                    f'<span class="de-title">DECISIÓN ANALIZADA — {_mp_s_name}</span>'
+                    f'<span class="de-mode-badge">{_mp_mode_lbl}</span>'
+                    f'</div>'
+                    f'<div class="de-main">'
+                    f'<div class="de-dir {_mp_s_dircss}">{_mp_s_dirtxt}</div>'
+                    f'<div class="de-votes">'
+                    f'<div class="de-vote-lbl">Votos ponderados ({_mp_s_vl}L vs {_mp_s_vs}S)</div>'
+                    f'<div class="de-vrow"><span class="de-vname" style="color:var(--green)">LONG</span>'
+                    f'<div class="de-vtrack"><div class="de-vfill-l" style="width:{_mp_s_pctl}%"></div></div>'
+                    f'<span class="de-vcount" style="color:var(--green)">{_mp_s_vl}</span></div>'
+                    f'<div class="de-vrow"><span class="de-vname" style="color:var(--red)">SHORT</span>'
+                    f'<div class="de-vtrack"><div class="de-vfill-s" style="width:{_mp_s_pcts}%"></div></div>'
+                    f'<span class="de-vcount" style="color:var(--red)">{_mp_s_vs}</span></div>'
+                    f'</div>'
+                    f'<div class="de-conf">'
+                    f'<div class="de-conf-num" style="color:{_mp_s_confcol}">{_mp_s_conf}%</div>'
+                    f'<div class="de-conf-lbl">Confianza</div>'
+                    f'</div>'
+                    f'</div>'
+                    f'<div class="de-levels">'
+                    f'<div class="de-lv"><span class="de-lv-k">Entrada</span>'
+                    f'<span class="de-lv-v" style="color:var(--text)">{_mp_fmt(_mp_s_px)}</span></div>'
+                    f'<div class="de-lv"><span class="de-lv-k">TP 1</span>'
+                    f'<span class="de-lv-v" style="color:var(--green)">{_mp_fmt(_mp_s_tp1)}</span></div>'
+                    f'<div class="de-lv"><span class="de-lv-k">TP 2</span>'
+                    f'<span class="de-lv-v" style="color:#00c98a">{_mp_fmt(_mp_s_tp2)}</span></div>'
+                    f'<div class="de-lv"><span class="de-lv-k">SL / RR</span>'
+                    f'<span class="de-lv-v" style="color:var(--red)">{_mp_fmt(_mp_s_sl)} / {_mp_fmtrr(_mp_s_rr)}</span></div>'
+                    f'</div>'
+                    f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px">'
+                    f'<div>'
+                    f'<div class="de-vote-lbl" style="margin-bottom:6px">Señal técnica por timeframe</div>'
+                    f'{_mp_tf_rows}'
+                    f'</div>'
+                    f'<div>'
+                    f'<div class="de-vote-lbl" style="margin-bottom:6px">Sentimiento noticias divisas</div>'
+                    f'<div class="t-row"><span>{_mp_cfg.get("base","")}</span>'
+                    f'<span class="t-val" style="color:{_mp_base_col}">{_mp_ns_base:+.3f} ({_mp_ns_bc} noticias)</span></div>'
+                    f'<div class="t-row"><span>{_mp_cfg.get("quote","")}</span>'
+                    f'<span class="t-val" style="color:{_mp_quote_col}">{_mp_ns_quote:+.3f} ({_mp_ns_qc} noticias)</span></div>'
+                    f'<div class="t-row"><span>Sesgo noticias</span>'
+                    f'<span class="t-val" style="color:{_mp_ns_col}">{_mp_ns_dir}</span></div>'
+                    f'</div>'
+                    f'</div>'
+                    f'</div>'
+                )
+                st.markdown(_mp_det_html, unsafe_allow_html=True)
 
                 # Vote breakdown
                 if _mp_s_vlog:
