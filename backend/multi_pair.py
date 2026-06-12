@@ -238,6 +238,7 @@ def analyze_pair(
         "vote_log": [],
         "votes_long": 0, "votes_short": 0,
         "dxy_signal_dir": "",
+        "confluence": False, "conflict": False, "setup_grade": "normal",
         "error": None,
     }
 
@@ -327,6 +328,10 @@ def analyze_pair(
         result["buy_signals"]  = buy_sigs
         result["sell_signals"] = sell_sigs
 
+        # Snapshot técnico puro (antes de DXY/noticias) para detectar confluencia
+        tech_vl, tech_vs = vl, vs
+        tech_dir = "LONG" if tech_vl > tech_vs else ("SHORT" if tech_vs > tech_vl else "")
+
         # 3. DXY — adjusted direction per pair type
         dxy_signal_dir = ""
         if dxy_dir == "DOWN":
@@ -342,15 +347,25 @@ def analyze_pair(
             else:
                 vs += w; vote_log.append(f"+{w} SHORT — DXY {dxy_dir.lower()} ({dxy_mode})")
 
-        # 4. News sentiment per pair
+        # 4. News sentiment per pair — peso escalado por fuerza e impacto
+        news_dir = "NEUTRAL"
+        news_w   = 0
         if news:
             ns = score_news_for_pair(symbol, news)
             result["news_sentiment"] = ns
-            nd = ns.get("direction", "NEUTRAL")
-            if nd == "LONG":
-                vl += 1; vote_log.append("+1 LONG — Noticias base positivas")
-            elif nd == "SHORT":
-                vs += 1; vote_log.append("+1 SHORT — Noticias base negativas")
+            news_dir = ns.get("direction", "NEUTRAL")
+            # Fuerza del sesgo de noticias = |diff base-quote|; nº de titulares relevantes
+            _strength = abs(ns.get("base_score", 0.0) - ns.get("quote_score", 0.0))
+            _ncount   = ns.get("base_count", 0) + ns.get("quote_count", 0)
+            if news_dir in ("LONG", "SHORT"):
+                # 1 base; +1 si sesgo fuerte (>0.20); +1 si 2+ titulares confirman
+                news_w = 1 + (1 if _strength > 0.20 else 0) + (1 if _ncount >= 2 else 0)
+                if news_dir == "LONG":
+                    vl += news_w
+                    vote_log.append(f"+{news_w} LONG — Noticias (fuerza {_strength:.2f}, {_ncount} titulares)")
+                else:
+                    vs += news_w
+                    vote_log.append(f"+{news_w} SHORT — Noticias (fuerza {_strength:.2f}, {_ncount} titulares)")
 
         # 5. TP/SL from 1h data
         if not df_1h.empty and result["price"]:
@@ -368,12 +383,35 @@ def analyze_pair(
             except Exception as _e:
                 _log.debug("TP/SL %s: %s", symbol, _e)
 
-        # 6. Compute net direction + confidence
+        # 6. Confluencia / conflicto noticias-técnico (coordinación inteligente)
+        #    - Confluencia: noticias fuertes + técnico en la MISMA dirección → alta convicción
+        #    - Conflicto:  noticias FUERTES (peso 3) contra técnico claro → VETO (fail-closed)
+        confluence = False
+        conflict   = False
+        setup_grade = "normal"
+        if news_dir in ("LONG", "SHORT") and tech_dir:
+            if news_dir == tech_dir:
+                confluence = True
+                setup_grade = "alta_conviccion"
+                vote_log.append(f"★ CONFLUENCIA — Noticias y técnico coinciden ({news_dir})")
+            elif news_w >= 3 and abs(tech_vl - tech_vs) >= 2:
+                # Noticias fuertes empujan en contra de un técnico claro → no operamos
+                conflict = True
+                vote_log.append(f"⚠ CONFLICTO — Noticias fuertes ({news_dir}) vs técnico ({tech_dir}) → VETO")
+        result["confluence"]  = confluence
+        result["conflict"]    = conflict
+        result["setup_grade"] = setup_grade
+
+        # 7. Compute net direction + confidence
         result["votes_long"]  = vl
         result["votes_short"] = vs
         result["vote_log"]    = vote_log
         total = vl + vs
-        if total == 0:
+        if conflict:
+            # Fail-closed: en conflicto fuerte no damos dirección operable
+            result["direction"]  = None
+            result["confidence"] = 0
+        elif total == 0:
             result["direction"]  = None
             result["confidence"] = 0
         elif vl > vs:
@@ -386,15 +424,20 @@ def analyze_pair(
             result["direction"]  = None
             result["confidence"] = 50
 
-        # 7. Score (0-100 scale for consistency with EUR/USD display)
-        _base = 40
-        if total > 0:
-            _base += int((max(vl, vs) / total) * 30)
-        if dxy_signal_dir == result["direction"]:
-            _base += 10
-        if result["news_sentiment"].get("direction") == result["direction"]:
-            _base += 8
-        result["score"] = min(95, _base)
+        # 8. Score (0-100 scale for consistency with EUR/USD display)
+        if conflict:
+            result["score"] = 0
+        else:
+            _base = 40
+            if total > 0:
+                _base += int((max(vl, vs) / total) * 30)
+            if dxy_signal_dir == result["direction"]:
+                _base += 10
+            if result["news_sentiment"].get("direction") == result["direction"]:
+                _base += 8
+            if confluence:
+                _base += 12   # bonus de convicción cuando noticias + técnico alinean
+            result["score"] = min(98, _base)
 
     except Exception as e:
         result["error"] = str(e)

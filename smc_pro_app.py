@@ -2618,6 +2618,11 @@ else:
                     _dl    = "LONG" if _dir=="LONG" else ("SHORT" if _dir=="SHORT" else "ESPERAR")
                     _op    = "1.0" if _valid else "0.55"
                     _badge_h = f'<span style="background:{_dc}22;color:{_dc};font-size:0.68rem;font-weight:700;padding:1px 7px;border-radius:3px">ACTIVA</span>' if _valid else ""
+                    # Badge de coordinación noticias-técnico
+                    if _d.get("conflict"):
+                        _badge_h += ' <span style="background:#e0a83c22;color:#e0a83c;font-size:0.68rem;font-weight:700;padding:1px 7px;border-radius:3px">⚠ CONFLICTO</span>'
+                    elif _d.get("confluence"):
+                        _badge_h += ' <span style="background:#7c3aed22;color:#a78bfa;font-size:0.68rem;font-weight:700;padding:1px 7px;border-radius:3px">★ ALTA CONVICCIÓN</span>'
                     _pr_h  = f'<div style="font-size:0.8rem;color:#8b949e;margin-top:3px">Precio: {_pr:.5f}</div>' if _pr else ""
                     _lvl_h = ""
                     if _tp and _sl and _valid and _pr:
@@ -2742,7 +2747,7 @@ else:
                 if val == "SI":    return "color:#00b87c;font-weight:bold"
                 return ""
             st.dataframe(
-                pd.DataFrame(_lrows).style.applymap(_lcol, subset=["Dir","Activa"]),
+                pd.DataFrame(_lrows).style.map(_lcol, subset=["Dir","Activa"]),
                 use_container_width=True, hide_index=True, height=300,
             )
         else:
@@ -8110,8 +8115,8 @@ with _t_orch:
 
             st.dataframe(
                 _oc_log_df.style
-                    .applymap(_oc_color_dir,   subset=["Dirección"])
-                    .applymap(_oc_color_valid, subset=["Señal activa", "Ejecutada"]),
+                    .map(_oc_color_dir,   subset=["Dirección"])
+                    .map(_oc_color_valid, subset=["Señal activa", "Ejecutada"]),
                 use_container_width=True, hide_index=True, height=350,
             )
             st.caption(
