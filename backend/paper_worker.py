@@ -42,7 +42,7 @@ CONFIG    = data_path("worker_config.json")     # config compartida dashboard↔
 
 def read_config() -> dict:
     """Config compartida: el dashboard la escribe, el worker la lee cada ciclo."""
-    cfg = {"rr": 3.0, "min_score": DEFAULT_MIN_SCORE}
+    cfg = {"rr": 3.0, "min_score": DEFAULT_MIN_SCORE, "interval": DEFAULT_INTERVAL}
     try:
         if CONFIG.exists():
             with open(CONFIG, "r", encoding="utf-8") as f:
@@ -52,11 +52,13 @@ def read_config() -> dict:
     return cfg
 
 
-def write_config(rr: float | None = None, min_score: int | None = None) -> None:
+def write_config(rr: float | None = None, min_score: int | None = None,
+                 interval: int | None = None) -> None:
     """El dashboard ajusta la config; el worker la aplica en el siguiente ciclo."""
     cfg = read_config()
     if rr is not None:        cfg["rr"] = float(rr)
     if min_score is not None: cfg["min_score"] = int(min_score)
+    if interval is not None:  cfg["interval"] = int(interval)
     try:
         with open(CONFIG, "w", encoding="utf-8") as f:
             json.dump(cfg, f)
@@ -79,8 +81,8 @@ def apply_rr(d: dict, rr: float) -> None:
     d["rr"]  = round(rr, 2)
 
 DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
-DEFAULT_INTERVAL = 600        # 10 min — equilibra frescura vs límites de yfinance
-DEFAULT_MIN_SCORE = 70
+DEFAULT_INTERVAL = 300        # 5 min — modo captura de datos (15m bars: idempotencia evita duplicados)
+DEFAULT_MIN_SCORE = 55        # umbral bajo por defecto: captura muchas más ops en papel para aprender
 
 # Singleton: un solo worker por proceso
 _LOCK = threading.Lock()
@@ -244,8 +246,9 @@ def _loop(pairs: list[str], min_score: int, interval: int) -> None:
                 _last_bt = time.time()
             except Exception as e:
                 _log.warning("backtest snapshot error: %s", e)
-        # Dormir hasta el próximo ciclo
-        time.sleep(max(60, interval))
+        # Dormir hasta el próximo ciclo (intervalo configurable en vivo)
+        _iv = int(read_config().get("interval", interval))
+        time.sleep(max(120, _iv))
 
 
 def _compute_backtest_snapshot() -> None:

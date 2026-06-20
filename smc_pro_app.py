@@ -2551,30 +2551,41 @@ else:
             st.error("Módulo orchestrator no disponible. Revisa backend/orchestrator.py.")
             st.stop()
 
-        # ── Controles: ratio riesgo/beneficio (1:1, 1:2, 1:3) ────────────────
-        _rc1, _rc2 = st.columns([2, 5])
+        # ── Controles: RR + modo captura de datos ────────────────────────────
+        if "orch_turbo" not in st.session_state: st.session_state.orch_turbo = True
+        _rc1, _rc2, _rc3 = st.columns([2, 2, 4])
         _rr_opts = {"1:1": 1.0, "1:2": 2.0, "1:3": 3.0}
         _rr_lbls = list(_rr_opts.keys())
         _cur_lbl = next((k for k, v in _rr_opts.items() if abs(v - st.session_state.orch_rr) < 0.01), "1:3")
         _sel_rr = _rc1.radio("Ratio riesgo/beneficio (TP)", _rr_lbls,
                              index=_rr_lbls.index(_cur_lbl), horizontal=True, key="orch_rr_radio")
-        if _rr_opts[_sel_rr] != st.session_state.orch_rr:
-            st.session_state.orch_rr = _rr_opts[_sel_rr]
-            try:
-                import backend.paper_worker as _pwc
-                _pwc.write_config(rr=st.session_state.orch_rr, min_score=st.session_state.orch_min_score)
-            except Exception:
-                pass
-            st.session_state.orch_results = None  # forzar refresco con el nuevo RR
+        _turbo = _rc2.toggle("🚀 Captura de datos a tope", value=st.session_state.orch_turbo,
+                             key="orch_turbo_toggle")
+        # Turbo: umbral bajo (más operaciones) + ciclo rápido. Normal: selectivo.
+        _new_score = 55 if _turbo else 70
+        _new_iv    = 300 if _turbo else 600
+        _changed = (_rr_opts[_sel_rr] != st.session_state.orch_rr
+                    or _turbo != st.session_state.orch_turbo
+                    or _new_score != st.session_state.orch_min_score)
+        st.session_state.orch_rr        = _rr_opts[_sel_rr]
+        st.session_state.orch_turbo     = _turbo
+        st.session_state.orch_min_score = _new_score
+        try:
+            import backend.paper_worker as _pwc
+            _pwc.write_config(rr=st.session_state.orch_rr,
+                              min_score=_new_score, interval=_new_iv)
+        except Exception:
+            pass
+        if _changed:
+            st.session_state.orch_results = None  # refrescar con la nueva config
+        if _turbo:
+            _rc3.caption(f"**Modo turbo ON** · RR {_sel_rr} · abre con score ≥ 55 y revisa cada "
+                         f"5 min → muchas más operaciones en papel = aprende mucho más rápido. "
+                         f"Incluye setups marginales a propósito: el aprendizaje distingue por "
+                         f"banda de score cuáles funcionan. Es PAPEL, sin riesgo.")
         else:
-            try:
-                import backend.paper_worker as _pwc
-                _pwc.write_config(rr=st.session_state.orch_rr, min_score=st.session_state.orch_min_score)
-            except Exception:
-                pass
-        _rc2.caption(f"El bot opera en papel a **{_sel_rr}**. El aprendizaje compara qué RR "
-                     f"da más expectancy por táctica — 1:1 gana más veces (necesita >50% WR), "
-                     f"1:3 gana menos veces pero más grande. La evidencia decide.")
+            _rc3.caption(f"**Modo selectivo** · RR {_sel_rr} · solo score ≥ 70. Menos datos, "
+                         f"más calidad. Para dinero real se usaría este, no el turbo.")
 
         # ── Worker de paper trading en vivo ──────────────────────────────────
         # En Railway hay un PROCESO worker dedicado (start.sh) → el dashboard NO
