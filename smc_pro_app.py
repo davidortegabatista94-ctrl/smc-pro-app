@@ -2622,6 +2622,32 @@ else:
         except Exception:
             pass
 
+        # ── PROGRESO: vistazo rápido de cuánto lleva acumulado el bot ────────
+        try:
+            import backend.learning as _Lp
+            _pg = _Lp.progress_stats()
+            _pc1, _pc2, _pc3, _pc4, _pc5 = st.columns(5)
+            _pc1.metric("Trades acumulados", _pg["total"])
+            _pc2.metric("Evaluados (cerrados)", _pg["closed"])
+            _pc3.metric("Abiertos ahora", _pg["open"])
+            _pc4.metric("Win rate acumulado", f"{_pg['win_rate']}%" if _pg["closed"] else "—")
+            _pc5.metric("Cerrados últimas 24h", _pg["closed_last24"])
+            if _pg["total"] > 0:
+                _ritmo = (f" · ~{_pg['avg_per_day']}/día · {_pg['days_active']} día(s) activo"
+                          f" · desde {_pg['first_trade']}")
+                st.caption(f"📈 El bot lleva acumulando{_ritmo}. Entra cuando quieras a ver "
+                           f"cómo sube — los datos persisten entre despliegues.")
+                if len(_pg["by_day"]) >= 2:
+                    st.bar_chart(pd.DataFrame(
+                        {"trades/día": list(_pg["by_day"].values())},
+                        index=list(_pg["by_day"].keys())), height=160)
+            else:
+                st.info("📈 Aún sin trades acumulados. El worker abre operaciones cuando hay "
+                        "señal operable; en minutos verás subir 'Abiertos ahora' y, al cerrarse "
+                        "(TP/SL), 'Evaluados'. Vuelve en unas horas y verás el número crecer.")
+        except Exception:
+            pass
+
         # ── Banner: próximos eventos macro (el "porqué" programado) ──────────
         try:
             import backend.econ_calendar as _ecal

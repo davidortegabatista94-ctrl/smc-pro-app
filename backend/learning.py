@@ -246,6 +246,58 @@ def _r_from_price(t: dict, price: float) -> float:
     return move / risk
 
 
+def progress_stats() -> dict:
+    """
+    Resumen de progreso para 'entrar y ver cómo va': cuántos trades acumulados,
+    cuántos evaluados, ritmo por día, win rate acumulado. Pensado para un vistazo.
+    """
+    from collections import Counter
+    trades = _read_trades()
+    closed = [t for t in trades if t.get("status") == "closed"]
+    opens  = [t for t in trades if t.get("status") == "open"]
+    wins   = sum(1 for t in closed if t.get("outcome") == "WIN")
+    total_r = sum((t.get("r_multiple") or 0.0) for t in closed)
+
+    by_day = Counter()
+    for t in trades:
+        d = (t.get("opened_at") or "")[:10]
+        if d:
+            by_day[d] += 1
+    by_day = dict(sorted(by_day.items()))
+
+    times = sorted([t.get("opened_at", "") for t in trades if t.get("opened_at")])
+    days_active = len(by_day)
+    avg_per_day = round(len(trades) / days_active, 1) if days_active else 0.0
+
+    # Cerrados en las últimas 24h
+    last24 = 0
+    try:
+        cutoff = datetime.now(timezone.utc).timestamp() - 86400
+        for t in closed:
+            ca = t.get("closed_at")
+            if ca:
+                ts = datetime.fromisoformat(ca)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=timezone.utc)
+                if ts.timestamp() >= cutoff:
+                    last24 += 1
+    except Exception:
+        pass
+
+    return {
+        "total": len(trades),
+        "closed": len(closed),
+        "open": len(opens),
+        "win_rate": round(wins / len(closed) * 100, 1) if closed else 0.0,
+        "total_r": round(total_r, 1),
+        "by_day": by_day,
+        "days_active": days_active,
+        "avg_per_day": avg_per_day,
+        "closed_last24": last24,
+        "first_trade": times[0][:16] if times else None,
+    }
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 3. INFORME DE APRENDIZAJE (qué funciona de verdad)
 # ─────────────────────────────────────────────────────────────────────────────
