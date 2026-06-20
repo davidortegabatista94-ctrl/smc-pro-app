@@ -31,6 +31,7 @@ orchestrator_decisions.jsonl
 worker_heartbeat.json
 worker_results.json
 worker_backtest.json
+worker_config.json
 
 # Archivos de instalador Windows
 SMC_Pro_App_Setup.exe

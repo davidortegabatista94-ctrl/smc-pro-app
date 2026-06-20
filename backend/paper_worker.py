@@ -36,6 +36,46 @@ _BASE_DIR = Path(__file__).parent.parent
 HEARTBEAT = _BASE_DIR / "worker_heartbeat.json"
 RESULTS   = _BASE_DIR / "worker_results.json"   # snapshot del último análisis (para el dashboard)
 BACKTEST  = _BASE_DIR / "worker_backtest.json"  # snapshot del backtest histórico (caro, cada 6h)
+CONFIG    = _BASE_DIR / "worker_config.json"    # config compartida dashboard↔worker (RR, min_score)
+
+
+def read_config() -> dict:
+    """Config compartida: el dashboard la escribe, el worker la lee cada ciclo."""
+    cfg = {"rr": 3.0, "min_score": DEFAULT_MIN_SCORE}
+    try:
+        if CONFIG.exists():
+            with open(CONFIG, "r", encoding="utf-8") as f:
+                cfg.update(json.load(f))
+    except Exception:
+        pass
+    return cfg
+
+
+def write_config(rr: float | None = None, min_score: int | None = None) -> None:
+    """El dashboard ajusta la config; el worker la aplica en el siguiente ciclo."""
+    cfg = read_config()
+    if rr is not None:        cfg["rr"] = float(rr)
+    if min_score is not None: cfg["min_score"] = int(min_score)
+    try:
+        with open(CONFIG, "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+    except Exception as e:
+        _log.debug("config write: %s", e)
+
+
+def apply_rr(d: dict, rr: float) -> None:
+    """
+    Recalcula el TP a un RR objetivo manteniendo el SL (basado en liquidez).
+    Permite probar 1:1, 1:2, 1:3 — el aprendizaje dirá cuál tiene más expectancy.
+    """
+    price = d.get("price"); sl = d.get("sl"); direction = d.get("direction")
+    if not (price and sl) or direction not in ("LONG", "SHORT"):
+        return
+    risk = abs(price - sl)
+    if risk <= 0:
+        return
+    d["tp1"] = round(price + rr * risk, 6) if direction == "LONG" else round(price - rr * risk, 6)
+    d["rr"]  = round(rr, 2)
 
 DEFAULT_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
 DEFAULT_INTERVAL = 600        # 10 min — equilibra frescura vs límites de yfinance
@@ -104,6 +144,11 @@ def _run_one_cycle(pairs: list[str], min_score: int) -> dict:
     import backend.orchestrator as orch
     import backend.learning as L
 
+    # 0. Config compartida (RR, min_score) — el dashboard la puede cambiar en vivo
+    cfg = read_config()
+    rr        = float(cfg.get("rr", 3.0))
+    min_score = int(cfg.get("min_score", min_score))
+
     # 1. Contexto de mercado en vivo
     dxy_dir = ""
     try:
@@ -136,6 +181,8 @@ def _run_one_cycle(pairs: list[str], min_score: int) -> dict:
     for sym, d in results.items():
         d["trading_mode"] = "paper"
         d["min_score"] = min_score
+        # Aplicar RR configurado (1:1 / 1:2 / 1:3) — recalcula TP manteniendo SL
+        apply_rr(d, rr)
         # Ajuste de score aprendido (acotado)
         try:
             adj, why = L.edge_adjustment(d)
@@ -168,6 +215,8 @@ def _run_one_cycle(pairs: list[str], min_score: int) -> dict:
         "eval": ev,
         "dxy": dxy_dir,
         "news_count": len(news),
+        "rr": rr,
+        "min_score": min_score,
     }
     return summary
 

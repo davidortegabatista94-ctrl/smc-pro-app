@@ -2530,6 +2530,7 @@ else:
         if "orch_analysis_mode" not in st.session_state: st.session_state.orch_analysis_mode = "intraday"
         if "orch_pairs"         not in st.session_state: st.session_state.orch_pairs          = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD"]
         if "orch_min_score"     not in st.session_state: st.session_state.orch_min_score      = 70
+        if "orch_rr"            not in st.session_state: st.session_state.orch_rr             = 3.0
         if "orch_results"       not in st.session_state: st.session_state.orch_results        = None
         if "orch_last_run"      not in st.session_state: st.session_state.orch_last_run       = 0.0
         if "orch_bt_results"    not in st.session_state: st.session_state.orch_bt_results     = None
@@ -2549,6 +2550,31 @@ else:
         if not _ORCH_OK:
             st.error("Módulo orchestrator no disponible. Revisa backend/orchestrator.py.")
             st.stop()
+
+        # ── Controles: ratio riesgo/beneficio (1:1, 1:2, 1:3) ────────────────
+        _rc1, _rc2 = st.columns([2, 5])
+        _rr_opts = {"1:1": 1.0, "1:2": 2.0, "1:3": 3.0}
+        _rr_lbls = list(_rr_opts.keys())
+        _cur_lbl = next((k for k, v in _rr_opts.items() if abs(v - st.session_state.orch_rr) < 0.01), "1:3")
+        _sel_rr = _rc1.radio("Ratio riesgo/beneficio (TP)", _rr_lbls,
+                             index=_rr_lbls.index(_cur_lbl), horizontal=True, key="orch_rr_radio")
+        if _rr_opts[_sel_rr] != st.session_state.orch_rr:
+            st.session_state.orch_rr = _rr_opts[_sel_rr]
+            try:
+                import backend.paper_worker as _pwc
+                _pwc.write_config(rr=st.session_state.orch_rr, min_score=st.session_state.orch_min_score)
+            except Exception:
+                pass
+            st.session_state.orch_results = None  # forzar refresco con el nuevo RR
+        else:
+            try:
+                import backend.paper_worker as _pwc
+                _pwc.write_config(rr=st.session_state.orch_rr, min_score=st.session_state.orch_min_score)
+            except Exception:
+                pass
+        _rc2.caption(f"El bot opera en papel a **{_sel_rr}**. El aprendizaje compara qué RR "
+                     f"da más expectancy por táctica — 1:1 gana más veces (necesita >50% WR), "
+                     f"1:3 gana menos veces pero más grande. La evidencia decide.")
 
         # ── Worker de paper trading en vivo ──────────────────────────────────
         # En Railway hay un PROCESO worker dedicado (start.sh) → el dashboard NO
@@ -2655,6 +2681,12 @@ else:
                     for _as, _ad2 in _ar.items():
                         _ad2["trading_mode"] = st.session_state.orch_mode
                         _ad2["min_score"]    = st.session_state.orch_min_score
+                        # Aplicar RR configurado (1:1 / 1:2 / 1:3)
+                        try:
+                            import backend.paper_worker as _pwrr
+                            _pwrr.apply_rr(_ad2, st.session_state.orch_rr)
+                        except Exception:
+                            pass
                         # Ajuste de score según lo aprendido (acotado) — solo lectura
                         if _L is not None:
                             try:
@@ -2706,6 +2738,16 @@ else:
                         )
                     except Exception as _be:
                         st.warning(f"Error en backtest histórico: {_be}")
+
+        # Aplicar el RR seleccionado a los resultados para mostrar (feedback inmediato,
+        # aunque el snapshot del worker traiga otro RR hasta su próximo ciclo)
+        if st.session_state.orch_results:
+            try:
+                import backend.paper_worker as _pwd
+                for _dd in st.session_state.orch_results.values():
+                    _pwd.apply_rr(_dd, st.session_state.orch_rr)
+            except Exception:
+                pass
 
         # ── SECCIÓN 1: SEÑALES EN VIVO POR PAR ───────────────────────────────
         if st.session_state.orch_results:

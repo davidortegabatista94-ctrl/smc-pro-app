@@ -58,6 +58,12 @@ def _features_of(sig: dict) -> dict:
         tactic = derive_live_tactic(sig)
     except Exception:
         tactic = "other"
+    ict = sig.get("ict_setup") or {}
+    ict_confirm = bool(ict and ict.get("direction") == sig.get("direction"))
+    try:
+        rr_band = f"1:{int(round(float(sig.get('rr') or 0)))}"
+    except Exception:
+        rr_band = "?"
     return {
         "pair":        sig.get("symbol"),
         "direction":   sig.get("direction"),
@@ -69,6 +75,8 @@ def _features_of(sig: dict) -> dict:
         "session":     _session_of(hour),
         "score_band":  _score_band(int(sig.get("score") or 0)),
         "tactic":      tactic,
+        "ict_confirm": ict_confirm,
+        "rr_band":     rr_band,
     }
 
 
@@ -253,7 +261,8 @@ def learning_report() -> dict:
                      [t["outcome"] for t in closed])
 
     feature_keys = ["pair", "direction", "confluence", "setup_grade", "news_dir",
-                    "calendar_clean", "calendar_bias_match", "session", "score_band"]
+                    "calendar_clean", "calendar_bias_match", "session", "score_band",
+                    "tactic", "ict_confirm", "rr_band"]
     by_feature: dict = {}
     for fk in feature_keys:
         buckets = defaultdict(lambda: {"r": [], "out": []})
