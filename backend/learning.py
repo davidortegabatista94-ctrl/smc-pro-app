@@ -32,8 +32,8 @@ from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
-_BASE_DIR = Path(__file__).parent.parent
-PAPER_TRADES = _BASE_DIR / "paper_trades.jsonl"
+from backend.storage import data_path
+PAPER_TRADES = data_path("paper_trades.jsonl")
 
 MIN_SAMPLES = 20          # nº mínimo de trades cerrados para fiarse de un feature
 MAX_ADJ     = 8           # ajuste máx (±) al score que el aprendizaje puede aplicar

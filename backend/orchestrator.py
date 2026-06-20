@@ -31,7 +31,8 @@ _log = logging.getLogger(__name__)
 
 # ── Ruta del log de decisiones ────────────────────────────────────────────────
 _BASE_DIR = Path(__file__).parent.parent
-DECISIONS_LOG = _BASE_DIR / "orchestrator_decisions.jsonl"
+from backend.storage import data_path
+DECISIONS_LOG = data_path("orchestrator_decisions.jsonl")
 
 # ── Pares configurados ────────────────────────────────────────────────────────
 ALL_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]

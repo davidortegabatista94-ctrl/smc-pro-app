@@ -2871,6 +2871,19 @@ else:
         st.caption("Cada señal operable se registra con su porqué y se verifica contra el "
                    "mercado real (¿tocó TP o SL?). El bot mide qué razones ganan de verdad "
                    "y ajusta el filtro. No es azar: es causa → resultado → ajuste.")
+        # Aviso de persistencia: sin volumen, cada redeploy de Railway borra la memoria
+        try:
+            import backend.storage as _stg
+            if not _stg.is_persistent():
+                st.warning(
+                    "⚠️ **Memoria NO persistente.** El estado se guarda en disco efímero: "
+                    "cada redeploy/reinicio de Railway borra los trades aprendidos (por eso "
+                    "viste 0). **Solución (1 vez):** en Railway crea un Volume con mount path "
+                    "`/data` y añade la variable de entorno `DATA_DIR=/data`. Entonces el bot "
+                    "recuerda entre despliegues."
+                )
+        except Exception:
+            pass
         try:
             import backend.learning as _Lr
             _rep = _Lr.learning_report()

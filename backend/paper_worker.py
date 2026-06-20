@@ -33,10 +33,11 @@ from pathlib import Path
 _log = logging.getLogger(__name__)
 
 _BASE_DIR = Path(__file__).parent.parent
-HEARTBEAT = _BASE_DIR / "worker_heartbeat.json"
-RESULTS   = _BASE_DIR / "worker_results.json"   # snapshot del último análisis (para el dashboard)
-BACKTEST  = _BASE_DIR / "worker_backtest.json"  # snapshot del backtest histórico (caro, cada 6h)
-CONFIG    = _BASE_DIR / "worker_config.json"    # config compartida dashboard↔worker (RR, min_score)
+from backend.storage import data_path
+HEARTBEAT = data_path("worker_heartbeat.json")
+RESULTS   = data_path("worker_results.json")    # snapshot del último análisis (para el dashboard)
+BACKTEST  = data_path("worker_backtest.json")   # snapshot del backtest histórico (caro, cada 6h)
+CONFIG    = data_path("worker_config.json")     # config compartida dashboard↔worker (RR, min_score)
 
 
 def read_config() -> dict:
