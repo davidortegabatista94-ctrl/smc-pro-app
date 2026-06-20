@@ -389,6 +389,26 @@ def analyze_pair(
             _log.debug("calendar %s: %s", symbol, _e)
             result["calendar"] = {"calendar_available": False}
 
+        # 4c. Setup ICT London-Sweep+FVG — INFORMATIVO (validado sin edge → no vota).
+        # Solo se muestra; si coincide con la dirección técnica+noticias ya formada,
+        # añade una confirmación modesta (nunca opera en contra de su grano).
+        result["ict_setup"] = None
+        try:
+            from backend.ict_strategy import detect_live_setup
+            _ict = detect_live_setup(df_15, symbol)
+            if _ict:
+                result["ict_setup"] = _ict
+                _lean = "LONG" if vl > vs else ("SHORT" if vs > vl else "")
+                if _ict["direction"] == _lean and _lean:
+                    # Confirmación leve solo cuando confluye con la señal ya formada
+                    if _lean == "LONG": vl += 1
+                    else:               vs += 1
+                    vote_log.append(f"🎯 +1 {_lean} — Setup ICT confirma ({_ict['reason']})")
+                else:
+                    vote_log.append(f"🎯 Setup ICT detectado ({_ict['direction']}) — informativo")
+        except Exception as _e:
+            _log.debug("ict %s: %s", symbol, _e)
+
         # 5. TP/SL from 1h data
         if not df_1h.empty and result["price"]:
             try:

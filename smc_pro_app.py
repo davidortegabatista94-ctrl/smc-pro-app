@@ -2747,6 +2747,9 @@ else:
                         _badge_h += ' <span style="background:#e0a83c22;color:#e0a83c;font-size:0.68rem;font-weight:700;padding:1px 7px;border-radius:3px">⚠ CONFLICTO</span>'
                     elif _d.get("confluence"):
                         _badge_h += ' <span style="background:#7c3aed22;color:#a78bfa;font-size:0.68rem;font-weight:700;padding:1px 7px;border-radius:3px">★ ALTA CONVICCIÓN</span>'
+                    # Badge de setup ICT London-Sweep+FVG detectado en vivo (informativo)
+                    if _d.get("ict_setup"):
+                        _badge_h += ' <span style="background:#16c78422;color:#16c784;font-size:0.68rem;font-weight:700;padding:1px 7px;border-radius:3px">🎯 SETUP ICT</span>'
                     _pr_h  = f'<div style="font-size:0.8rem;color:#8b949e;margin-top:3px">Precio: {_pr:.5f}</div>' if _pr else ""
                     _lvl_h = ""
                     if _tp and _sl and _valid and _pr:

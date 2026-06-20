@@ -53,6 +53,25 @@ TACTICS: dict[str, dict] = {
         "fuente": "Repricing post-dato. Requiere calendario en vivo (no existe en histórico).",
         "live_only": True,
     },
+    "london_sweep_fvg": {
+        "nombre": "London Sweep + FVG (ICT)",
+        "hipotesis": "En la apertura de NY el precio barre la liquidez de los extremos del "
+                     "rango de Londres (stops minoristas) y revierte, dejando un Fair Value "
+                     "Gap que tiende a rellenarse. Se entra en el relleno del FVG, alineado "
+                     "con la tendencia macro D1 EMA50.",
+        "regimenes": ["cualquiera"],
+        "fuente": "Portada de /api. Microestructura real (caza de liquidez + repricing).",
+        # VEREDICTO de validación honesta sobre M15 real 18 años (con costes + OOS):
+        # La versión que afirmaba ~76%/año era ilusión (look-ahead + fills perfectos).
+        # Corregida y con slippage: -3.3%/año, 0/19 años positivos, consistente IS/OOS.
+        # → SIN edge demostrado. Disponible y visible, pero el motor la mantiene OFF.
+        "validated": {
+            "edge": False,
+            "avg_annual_net": -3.3,
+            "note": "76%/año era look-ahead; corregida y con costes pierde. Gateada OFF.",
+        },
+        "default_off": True,
+    },
 }
 
 MIN_TACTIC_SAMPLES = 25      # trades cerrados por táctica antes de un veredicto
@@ -146,13 +165,17 @@ def tactic_ledger(trades: list[dict], warmup: int = 20,
         n = len(f["r"])
         exp = sum(f["r"]) / n if n else 0.0
         reliable = n >= MIN_TACTIC_SAMPLES
-        if not reliable:
+        meta = TACTICS.get(tac, {})
+        validated = meta.get("validated", {})
+        if validated.get("edge") is False:
+            # Validada honestamente como SIN edge (backtest M15 con costes) → OFF
+            estado = "OFF"
+        elif not reliable:
             estado = "aprendiendo"
         elif exp > COST_FLOOR_R:
             estado = "ON"
         else:
             estado = "OFF"
-        meta = TACTICS.get(tac, {})
         tactics_out[tac] = {
             "nombre":       meta.get("nombre", tac),
             "n":            n,
@@ -163,6 +186,19 @@ def tactic_ledger(trades: list[dict], warmup: int = 20,
             "reliable":     reliable,
             "hipotesis":    meta.get("hipotesis", ""),
         }
+
+    # Incluir tácticas validadas SIN edge aunque aún no tengan trades en vivo,
+    # para que su veredicto quede VISIBLE (OFF documentado).
+    for tac, meta in TACTICS.items():
+        if tac in tactics_out:
+            continue
+        validated = meta.get("validated", {})
+        if validated.get("edge") is False:
+            tactics_out[tac] = {
+                "nombre": meta.get("nombre", tac), "n": 0, "win_rate": 0.0,
+                "expectancy_r": validated.get("avg_annual_net", 0.0), "total_r": 0.0,
+                "estado": "OFF", "reliable": True, "hipotesis": meta.get("hipotesis", ""),
+            }
 
     # Estrategia emergente = tácticas ON, ordenadas por edge
     on_tactics = sorted(
