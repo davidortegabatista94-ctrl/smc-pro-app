@@ -12,13 +12,33 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 
 _log = logging.getLogger(__name__)
-_DB_URL = os.environ.get("DATABASE_URL", "")
+_DB_URL_CACHE = None
+
+
+def db_url() -> str:
+    """
+    URL de la BD, robusta entre plataformas:
+      - Variable de entorno DATABASE_URL/POSTGRES_URL (Railway, GitHub Actions, local)
+      - st.secrets (Streamlit Community Cloud, donde los secrets no siempre son env)
+    """
+    global _DB_URL_CACHE
+    if _DB_URL_CACHE is not None:
+        return _DB_URL_CACHE
+    url = os.environ.get("DATABASE_URL", "") or os.environ.get("POSTGRES_URL", "")
+    if not url:
+        try:
+            import streamlit as st
+            url = st.secrets.get("DATABASE_URL", "") or st.secrets.get("POSTGRES_URL", "")
+        except Exception:
+            url = ""
+    _DB_URL_CACHE = url or ""
+    return _DB_URL_CACHE
 
 
 def _get_conn():
     import psycopg2
     import psycopg2.extras
-    url = _DB_URL
+    url = db_url()
     # Railway Postgres URLs sometimes start with postgres:// — psycopg2 needs postgresql://
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
@@ -27,7 +47,7 @@ def _get_conn():
 
 def ensure_tables() -> bool:
     """Create all required tables if they don't exist. Safe to call on every startup."""
-    if not _DB_URL:
+    if not db_url():
         return False
     try:
         conn = _get_conn()
@@ -178,6 +198,22 @@ def ensure_tables() -> bool:
             applied BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMPTZ DEFAULT NOW()
         )""")
+        # ── Tablas del BOT ORQUESTADOR (aprendizaje persistente) ──────────────
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS bot_paper_trades (
+            id BIGSERIAL PRIMARY KEY,
+            trade_id VARCHAR(140),
+            status VARCHAR(20) DEFAULT 'open',
+            data JSONB NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS bot_kv (
+            k VARCHAR(100) PRIMARY KEY,
+            v JSONB NOT NULL,
+            updated_at TIMESTAMPTZ DEFAULT NOW()
+        )""")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_bot_trades_status ON bot_paper_trades(status)")
         # Indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_memory_user ON ai_memory(user_id)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_chat_session ON advisor_chat(session_id)")
@@ -196,7 +232,7 @@ def ensure_tables() -> bool:
 
 @contextmanager
 def _cursor():
-    if not _DB_URL:
+    if not db_url():
         yield None
         return
     conn = None
@@ -221,11 +257,72 @@ def _cursor():
                 pass
 
 
+# ── Estado del BOT ORQUESTADOR (paper trades + kv) ────────────────────────────
+
+def bot_trades_all() -> list:
+    """Todos los paper-trades (orden de inserción)."""
+    with _cursor() as cur:
+        if cur is None:
+            return []
+        try:
+            cur.execute("SELECT data FROM bot_paper_trades ORDER BY id")
+            return [r["data"] for r in cur.fetchall()]
+        except Exception as e:
+            _log.warning("bot_trades_all: %s", e)
+            return []
+
+
+def bot_trades_append(trade: dict) -> None:
+    """Inserta un paper-trade nuevo."""
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute(
+            "INSERT INTO bot_paper_trades (trade_id, status, data) VALUES (%s, %s, %s)",
+            (trade.get("trade_id"), trade.get("status", "open"), json.dumps(trade, default=str)))
+
+
+def bot_trades_replace(trades: list) -> None:
+    """Reemplaza TODA la tabla (usado tras evaluar/cerrar trades)."""
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute("TRUNCATE bot_paper_trades")
+        for t in trades:
+            cur.execute(
+                "INSERT INTO bot_paper_trades (trade_id, status, data) VALUES (%s, %s, %s)",
+                (t.get("trade_id"), t.get("status", "open"), json.dumps(t, default=str)))
+
+
+def bot_kv_get(key: str):
+    """Lee un blob JSON (config, results, backtest, heartbeat…)."""
+    with _cursor() as cur:
+        if cur is None:
+            return None
+        try:
+            cur.execute("SELECT v FROM bot_kv WHERE k = %s", (key,))
+            r = cur.fetchone()
+            return r["v"] if r else None
+        except Exception:
+            return None
+
+
+def bot_kv_set(key: str, value) -> None:
+    """Guarda un blob JSON (upsert)."""
+    with _cursor() as cur:
+        if cur is None:
+            return
+        cur.execute(
+            "INSERT INTO bot_kv (k, v, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (k) DO UPDATE SET v = EXCLUDED.v, updated_at = NOW()",
+            (key, json.dumps(value, default=str)))
+
+
 # ── Auth & sessions ────────────────────────────────────────────────────────────
 
 def authenticate_user(user_id: str, password: str) -> bool:
     """Check credentials against users table. Returns True if valid."""
-    if not _DB_URL:
+    if not db_url():
         return False
     try:
         conn = _get_conn()
@@ -260,7 +357,7 @@ def create_session(user_id: str) -> str:
 
 def validate_session(token: str) -> str | None:
     """Check token validity. Returns user_id if valid and not expired, else None."""
-    if not _DB_URL or not token:
+    if not db_url() or not token:
         return None
     try:
         conn = _get_conn()
@@ -319,7 +416,7 @@ def save_backtest(cache_type: str, results: list, best: dict, n_bars: int = 0):
 
 def load_backtest(cache_type: str) -> dict | None:
     """Load backtest results from DB. Returns dict with 'results', 'best', 'n_bars' or None."""
-    if not _DB_URL:
+    if not db_url():
         return None
     try:
         conn = _get_conn()
@@ -357,7 +454,7 @@ def save_chat_message(session_id: str, role: str, content: str, user_id: str = "
 
 def load_chat_history(session_id: str, user_id: str = None, limit: int = 40) -> list[dict]:
     """Load recent chat messages for a session. Returns list of {role, content}."""
-    if not _DB_URL:
+    if not db_url():
         return []
     try:
         conn = _get_conn()
@@ -442,7 +539,7 @@ def save_trade(
 
 def load_trades(user_id: str = None, limit: int = 200) -> list[dict]:
     """Return the most recent trades, optionally filtered by user."""
-    if not _DB_URL:
+    if not db_url():
         return []
     try:
         conn = _get_conn()
@@ -477,7 +574,7 @@ def load_trades(user_id: str = None, limit: int = 200) -> list[dict]:
 
 def trades_summary(user_id: str = None) -> dict:
     """Aggregate stats: total trades, win rate, net pips, net P&L."""
-    if not _DB_URL:
+    if not db_url():
         return {}
     try:
         conn = _get_conn()
@@ -508,7 +605,7 @@ def trades_summary(user_id: str = None) -> dict:
 
 def get_user_trade_patterns(user_id: str) -> dict:
     """Analyze trade patterns for a specific user. Returns stats dict."""
-    if not _DB_URL:
+    if not db_url():
         return {}
     try:
         conn = _get_conn()
@@ -601,7 +698,7 @@ def save_ai_memory(
 
 def load_ai_memories(user_id: str, memory_type: str = None, limit: int = 20) -> list[dict]:
     """Load AI memories for a user."""
-    if not _DB_URL:
+    if not db_url():
         return []
     try:
         conn = _get_conn()
@@ -642,7 +739,7 @@ def clear_ai_memories(user_id: str):
 
 def count_ai_memories(user_id: str) -> int:
     """Count stored memories for a user."""
-    if not _DB_URL:
+    if not db_url():
         return 0
     try:
         conn = _get_conn()
@@ -679,7 +776,7 @@ def save_snapshot(price: float, signal: str, score: int, dxy_trend: str,
 
 def get_setting(key: str) -> str | None:
     """Read a global app setting by key."""
-    if not _DB_URL:
+    if not db_url():
         return None
     try:
         conn = _get_conn()
@@ -726,7 +823,7 @@ def save_user_mt5(user_id: str, mt5_login: str, mt5_password: str, mt5_server: s
 
 def load_user_mt5(user_id: str) -> dict | None:
     """Load saved MT5 credentials for a user. Returns dict or None."""
-    if not _DB_URL:
+    if not db_url():
         return None
     try:
         conn = _get_conn()
@@ -752,7 +849,7 @@ def load_user_mt5(user_id: str) -> dict | None:
 
 def get_recent_snapshots(hours: int = 4, limit: int = 30) -> list[dict]:
     """Return market snapshots from the last N hours, newest first."""
-    if not _DB_URL:
+    if not db_url():
         return []
     try:
         conn = _get_conn()
@@ -787,7 +884,7 @@ def get_recent_snapshots(hours: int = 4, limit: int = 30) -> list[dict]:
 
 def is_connected() -> bool:
     """Quick health check — True if DB is reachable."""
-    if not _DB_URL:
+    if not db_url():
         return False
     try:
         conn = _get_conn()
@@ -803,7 +900,7 @@ def save_strategy_dna(version: int, rules: dict, fitness: float,
                       trades_evaluated: int, winrate: float, net_pips: float,
                       key_insight: str = "") -> int | None:
     """Save a new DNA version and mark it active; deactivate all previous."""
-    if not _DB_URL:
+    if not db_url():
         return None
     try:
         conn = _get_conn()
@@ -831,7 +928,7 @@ def save_strategy_dna(version: int, rules: dict, fitness: float,
 
 def load_active_strategy() -> dict | None:
     """Load the currently active Strategy DNA rules. Returns rules dict or None."""
-    if not _DB_URL:
+    if not db_url():
         return None
     try:
         conn = _get_conn()
@@ -864,7 +961,7 @@ def load_active_strategy() -> dict | None:
 
 def get_evolution_history(limit: int = 8) -> list[dict]:
     """Return list of past DNA versions (newest first)."""
-    if not _DB_URL:
+    if not db_url():
         return []
     try:
         conn = _get_conn()
@@ -892,7 +989,7 @@ def get_strategy_dna_history(limit: int = 10) -> list[dict]:
 
 def get_trades_for_evolution(limit: int = 60) -> list[dict]:
     """Return recent closed trades with market_snapshot for evolution analysis."""
-    if not _DB_URL:
+    if not db_url():
         return []
     try:
         conn = _get_conn()
@@ -917,7 +1014,7 @@ def get_trades_for_evolution(limit: int = 60) -> list[dict]:
 
 def count_trades_since_last_evolution() -> int:
     """Count closed trades that happened after the last evolution."""
-    if not _DB_URL:
+    if not db_url():
         return 0
     try:
         conn = _get_conn()
@@ -1009,7 +1106,7 @@ def log_app_error(component: str, severity: str, message: str,
 
 def get_error_log(hours: int = 6, limit: int = 50) -> list[dict]:
     """Return recent error log entries."""
-    if not _DB_URL:
+    if not db_url():
         return []
     try:
         conn = _get_conn()
@@ -1045,7 +1142,7 @@ def save_metric(name: str, value: float, context: dict | None = None) -> None:
 
 def get_metrics(name: str, limit: int = 100) -> list[dict]:
     """Return recent metrics for a given name."""
-    if not _DB_URL:
+    if not db_url():
         return []
     try:
         conn = _get_conn()
@@ -1082,7 +1179,7 @@ def save_self_improvement(improvement_type: str, before: dict, after: dict,
 
 def get_self_improvements(limit: int = 20) -> list[dict]:
     """Return recent self-improvement records."""
-    if not _DB_URL:
+    if not db_url():
         return []
     try:
         conn = _get_conn()
@@ -1102,7 +1199,7 @@ def get_self_improvements(limit: int = 20) -> list[dict]:
 
 def purge_bad_self_improvements() -> int:
     """Delete garbage self-improvement records (AI errors and raw <think> blocks)."""
-    if not _DB_URL:
+    if not db_url():
         return 0
     try:
         conn = _get_conn()
@@ -1129,7 +1226,7 @@ def purge_bad_self_improvements() -> int:
 
 def get_last_snapshot() -> dict | None:
     """Return the most recent market snapshot (from any source including bg worker)."""
-    if not _DB_URL:
+    if not db_url():
         return None
     try:
         conn = _get_conn()

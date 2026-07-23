@@ -1,0 +1,35 @@
+name: Bot Orquestador (worker 24/7 gratis)
+
+# Ejecuta un ciclo del bot cada 15 minutos. Es el "worker siempre encendido",
+# pero sin servidor: GitHub Actions lo dispara por cron. Gratis (ilimitado en
+# repos públicos; ~2000 min/mes en privados → si es privado, sube el intervalo).
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"     # cada 15 min
+  workflow_dispatch: {}          # permite lanzarlo a mano desde la pestaña Actions
+
+# Evita solapes si un ciclo tarda más de lo normal
+concurrency:
+  group: bot-worker
+  cancel-in-progress: false
+
+jobs:
+  cycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Ejecutar un ciclo del bot
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m backend.worker_once

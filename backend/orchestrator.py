@@ -42,10 +42,22 @@ ALL_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD
 # LOG DE DECISIONES
 # ─────────────────────────────────────────────────────────────────────────────
 
+_DECISIONS_CAP = 500   # solo guardamos las últimas N decisiones
+
+
 def log_decision(decision: dict) -> None:
-    """Appends one decision to the JSONL decision log."""
+    """Registra una decisión (Neon si hay BD, si no fichero JSONL). Capado a N."""
+    entry = {**decision, "logged_at": datetime.now(timezone.utc).isoformat()}
     try:
-        entry = {**decision, "logged_at": datetime.now(timezone.utc).isoformat()}
+        from backend.store import use_db, kv_get, kv_set
+        if use_db():
+            lst = kv_get("decisions") or []
+            lst.append(entry)
+            kv_set("decisions", lst[-_DECISIONS_CAP:])
+            return
+    except Exception as e:
+        _log.debug("log_decision db: %s", e)
+    try:
         with open(DECISIONS_LOG, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
     except Exception as e:
@@ -53,7 +65,14 @@ def log_decision(decision: dict) -> None:
 
 
 def load_decisions_log(last_n: int = 200) -> list[dict]:
-    """Reads last N decisions from the JSONL log, newest first."""
+    """Últimas N decisiones, más recientes primero (Neon o fichero)."""
+    try:
+        from backend.store import use_db, kv_get
+        if use_db():
+            lst = kv_get("decisions") or []
+            return list(reversed(lst[-last_n:]))
+    except Exception:
+        pass
     if not DECISIONS_LOG.exists():
         return []
     try:

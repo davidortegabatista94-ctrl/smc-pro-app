@@ -472,37 +472,19 @@ def walkforward_learning(trades: list[dict], rr: float = RR_DEFAULT,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Persistencia JSONL
+# Persistencia — Neon Postgres o ficheros (vía backend.store)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _read_trades() -> list[dict]:
-    if not PAPER_TRADES.exists():
-        return []
-    out = []
-    try:
-        for ln in PAPER_TRADES.read_text(encoding="utf-8").strip().splitlines():
-            if ln.strip():
-                try:
-                    out.append(json.loads(ln))
-                except Exception:
-                    pass
-    except Exception as e:
-        _log.warning("_read_trades: %s", e)
-    return out
+    from backend.store import trades_all
+    return trades_all()
 
 
 def _append_trade(trade: dict) -> None:
-    try:
-        with open(PAPER_TRADES, "a", encoding="utf-8") as f:
-            f.write(json.dumps(trade, default=str) + "\n")
-    except Exception as e:
-        _log.warning("_append_trade: %s", e)
+    from backend.store import trades_append
+    trades_append(trade)
 
 
 def _write_trades(trades: list[dict]) -> None:
-    try:
-        with open(PAPER_TRADES, "w", encoding="utf-8") as f:
-            for t in trades:
-                f.write(json.dumps(t, default=str) + "\n")
-    except Exception as e:
-        _log.warning("_write_trades: %s", e)
+    from backend.store import trades_replace
+    trades_replace(trades)

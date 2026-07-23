@@ -2588,11 +2588,18 @@ else:
                          f"más calidad. Para dinero real se usaría este, no el turbo.")
 
         # ── Worker de paper trading en vivo ──────────────────────────────────
-        # En Railway hay un PROCESO worker dedicado (start.sh) → el dashboard NO
-        # arranca otro (evita dos escritores sobre paper_trades.jsonl).
-        # En local/dev (sin proceso dedicado) sí arranca uno interno por comodidad.
+        # El dashboard es SOLO-LECTURA cuando hay un worker externo escribiendo:
+        #   - Railway: proceso dedicado (PAPER_WORKER_DEDICATED=1)
+        #   - Streamlit Cloud + Neon: el worker es GitHub Actions (hay DATABASE_URL)
+        # Así nunca hay dos escritores sobre el mismo estado.
+        # En local (sin ninguno de los dos) el dashboard arranca su propio worker.
         import os as _os
-        _dedicated = _os.environ.get("PAPER_WORKER_DEDICATED") == "1"
+        try:
+            from backend.store import use_db as _use_db
+            _has_db = _use_db()
+        except Exception:
+            _has_db = False
+        _dedicated = _os.environ.get("PAPER_WORKER_DEDICATED") == "1" or _has_db
         if not _dedicated:
             @st.cache_resource
             def _ensure_paper_worker():

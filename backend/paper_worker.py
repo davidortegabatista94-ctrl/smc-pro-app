@@ -42,28 +42,23 @@ CONFIG    = data_path("worker_config.json")     # config compartida dashboard↔
 
 def read_config() -> dict:
     """Config compartida: el dashboard la escribe, el worker la lee cada ciclo."""
+    from backend.store import kv_get
     cfg = {"rr": 3.0, "min_score": DEFAULT_MIN_SCORE, "interval": DEFAULT_INTERVAL}
-    try:
-        if CONFIG.exists():
-            with open(CONFIG, "r", encoding="utf-8") as f:
-                cfg.update(json.load(f))
-    except Exception:
-        pass
+    stored = kv_get("config")
+    if isinstance(stored, dict):
+        cfg.update(stored)
     return cfg
 
 
 def write_config(rr: float | None = None, min_score: int | None = None,
                  interval: int | None = None) -> None:
     """El dashboard ajusta la config; el worker la aplica en el siguiente ciclo."""
+    from backend.store import kv_set
     cfg = read_config()
     if rr is not None:        cfg["rr"] = float(rr)
     if min_score is not None: cfg["min_score"] = int(min_score)
     if interval is not None:  cfg["interval"] = int(interval)
-    try:
-        with open(CONFIG, "w", encoding="utf-8") as f:
-            json.dump(cfg, f)
-    except Exception as e:
-        _log.debug("config write: %s", e)
+    kv_set("config", cfg)
 
 
 def apply_rr(d: dict, rr: float) -> None:
@@ -90,46 +85,34 @@ _STARTED = False
 
 
 def _write_heartbeat(payload: dict) -> None:
-    try:
-        payload["ts"] = datetime.now(timezone.utc).isoformat()
-        with open(HEARTBEAT, "w", encoding="utf-8") as f:
-            json.dump(payload, f, default=str)
-    except Exception as e:
-        _log.debug("heartbeat write: %s", e)
+    from backend.store import kv_set
+    payload["ts"] = datetime.now(timezone.utc).isoformat()
+    kv_set("heartbeat", payload)
 
 
 def read_heartbeat() -> dict:
     """Lee el último latido del worker (para mostrar estado en el dashboard)."""
-    try:
-        if HEARTBEAT.exists():
-            with open(HEARTBEAT, "r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception:
-        pass
-    return {}
+    from backend.store import kv_get
+    return kv_get("heartbeat") or {}
 
 
 def _write_results(results: dict, dxy_dir: str) -> None:
     """Persiste el último análisis completo para que el dashboard lo LEA (no recalcule)."""
-    try:
-        payload = {"ts": datetime.now(timezone.utc).isoformat(),
-                   "dxy": dxy_dir, "results": results}
-        with open(RESULTS, "w", encoding="utf-8") as f:
-            json.dump(payload, f, default=str)
-    except Exception as e:
-        _log.debug("results write: %s", e)
+    from backend.store import kv_set
+    kv_set("results", {"ts": datetime.now(timezone.utc).isoformat(),
+                       "dxy": dxy_dir, "results": results})
 
 
 def read_results(max_age_secs: int = 900) -> dict | None:
     """
     Lee el snapshot del último análisis del worker si es reciente.
-    Devuelve {ts, dxy, results} o None si no existe / está obsoleto.
+    Devuelve {ts, dxy, results, age_secs} o None si no existe / está obsoleto.
     """
+    from backend.store import kv_get
+    blob = kv_get("results")
+    if not blob:
+        return None
     try:
-        if not RESULTS.exists():
-            return None
-        with open(RESULTS, "r", encoding="utf-8") as f:
-            blob = json.load(f)
         ts = datetime.fromisoformat(blob["ts"])
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
@@ -264,22 +247,18 @@ def _compute_backtest_snapshot() -> None:
         cot_dir    = eu.get("dxy_signal_dir", "")
     res = orch.backtest_multiperiod(live_news_score=news_score,
                                     live_news_dir=news_dir, live_cot_dir=cot_dir)
-    try:
-        payload = {"ts": datetime.now(timezone.utc).isoformat(), "backtest": res}
-        with open(BACKTEST, "w", encoding="utf-8") as f:
-            json.dump(payload, f, default=str)
-        _log.info("backtest snapshot escrito")
-    except Exception as e:
-        _log.debug("backtest write: %s", e)
+    from backend.store import kv_set
+    kv_set("backtest", {"ts": datetime.now(timezone.utc).isoformat(), "backtest": res})
+    _log.info("backtest snapshot escrito")
 
 
 def read_backtest(max_age_secs: int = 8 * 3600) -> dict | None:
     """Lee el snapshot de backtest del worker si es reciente. Devuelve el dict de resultados."""
+    from backend.store import kv_get
+    blob = kv_get("backtest")
+    if not blob:
+        return None
     try:
-        if not BACKTEST.exists():
-            return None
-        with open(BACKTEST, "r", encoding="utf-8") as f:
-            blob = json.load(f)
         ts = datetime.fromisoformat(blob["ts"])
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
