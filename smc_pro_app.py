@@ -2652,6 +2652,40 @@ else:
                 st.info("📈 Aún sin trades acumulados. El worker abre operaciones cuando hay "
                         "señal operable; en minutos verás subir 'Abiertos ahora' y, al cerrarse "
                         "(TP/SL), 'Evaluados'. Vuelve en unas horas y verás el número crecer.")
+
+            # ── Descargar TODOS los trades reales del bot (CSV) ──────────────
+            try:
+                from backend.store import trades_all_merged
+                _alltr = trades_all_merged()
+                if _alltr:
+                    _rows = []
+                    for _t in _alltr:
+                        _ft = _t.get("features", {}) or {}
+                        _row = {
+                            "trade_id":  _t.get("trade_id"),
+                            "symbol":    _t.get("symbol"),
+                            "direction": _t.get("direction"),
+                            "status":    _t.get("status"),
+                            "outcome":   _t.get("outcome"),
+                            "entry":     _t.get("entry"),
+                            "sl":        _t.get("sl"),
+                            "tp":        _t.get("tp"),
+                            "r_multiple":_t.get("r_multiple"),
+                            "opened_at": _t.get("opened_at"),
+                            "closed_at": _t.get("closed_at"),
+                            "close_reason": _t.get("close_reason"),
+                        }
+                        for _k, _v in _ft.items():
+                            _row[f"feat_{_k}"] = _v
+                        _row["why"] = " | ".join(_t.get("why", []) or [])
+                        _rows.append(_row)
+                    _csv = pd.DataFrame(_rows).to_csv(index=False).encode("utf-8-sig")
+                    st.download_button(
+                        f"📥 Descargar TODOS los trades del bot ({len(_alltr)}) en CSV",
+                        data=_csv, file_name="bot_trades_reales.csv", mime="text/csv",
+                        use_container_width=False)
+            except Exception as _dle:
+                st.caption(f"(export CSV no disponible: {_dle})")
         except Exception:
             pass
 

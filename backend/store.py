@@ -25,11 +25,15 @@ def use_db() -> bool:
 
 
 def ensure_ready() -> None:
-    """Crea las tablas del bot si usamos Postgres (idempotente)."""
+    """Crea las tablas del bot y recupera trades del fichero (si migramos a BD)."""
     if use_db():
         try:
             import db
             db.ensure_tables()
+            n = import_files_into_db()
+            if n:
+                import logging
+                logging.getLogger(__name__).info("Importados %d trades del fichero a la BD", n)
         except Exception:
             pass
 
@@ -133,3 +137,57 @@ def trades_replace(trades: list[dict]) -> None:
                 fh.write(json.dumps(t, default=str) + "\n")
     except Exception:
         pass
+
+
+def _file_trades() -> list[dict]:
+    """Lee los trades del FICHERO directamente (aunque estemos en modo BD)."""
+    f = data_path(_TRADES_FILE)
+    out = []
+    try:
+        if f.exists():
+            for ln in f.read_text(encoding="utf-8").strip().splitlines():
+                if ln.strip():
+                    try:
+                        out.append(json.loads(ln))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return out
+
+
+def trades_all_merged() -> list[dict]:
+    """
+    TODOS los trades sin perder ninguno: combina los de la BD y los del fichero
+    (por si quedaron trades históricos en el volumen tras migrar a BD).
+    Dedup por trade_id.
+    """
+    seen = {}
+    for t in _file_trades() + trades_all():
+        tid = t.get("trade_id") or id(t)
+        seen[tid] = t
+    return list(seen.values())
+
+
+def import_files_into_db() -> int:
+    """
+    Migración única: si usamos BD y hay trades en el FICHERO que no están en la BD,
+    los importa. Devuelve cuántos importó. Así los trades del volumen de Railway
+    NO se pierden al pasar a Postgres.
+    """
+    if not use_db():
+        return 0
+    file_trades = _file_trades()
+    if not file_trades:
+        return 0
+    try:
+        import db
+        existing = {t.get("trade_id") for t in db.bot_trades_all()}
+        n = 0
+        for t in file_trades:
+            if t.get("trade_id") not in existing:
+                db.bot_trades_append(t)
+                n += 1
+        return n
+    except Exception:
+        return 0
